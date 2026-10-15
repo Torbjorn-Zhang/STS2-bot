@@ -24,6 +24,7 @@ def _key(st):
 
 
 def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0, rollouts=None):
+    policy.ASCENSION = ascension
     planner = TurnPlanner(sim, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
     st = sim.send({"cmd": "start_run", "character": character, "seed": seed, "ascension": ascension})
     t0, steps, fights, hp_log = time.perf_counter(), 0, 0, []

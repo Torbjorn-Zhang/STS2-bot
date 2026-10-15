@@ -71,7 +71,7 @@ def node_value(kind, hp, row, act=1, gold=0):
     if kind == "Elite":
         # the starter deck loses to elites on the first floors; later, healthy, they pay in relics
         a = min(max(act, 1), 3)
-        return ELITE_VALUE[a] if hp >= ELITE_HP[a] and row >= 4 else -3.0
+        return ELITE_VALUE[a] if hp >= ELITE_HP[a] + 0.01 * ASCENSION and row >= 4 else -3.0
     if kind == "RestSite":
         return 3.0 if hp < 0.5 else 2.0 if hp < 0.7 else 0.8
     if kind == "Treasure":
@@ -88,10 +88,13 @@ def node_value(kind, hp, row, act=1, gold=0):
 HP_COST = {"Monster": (0.07, 0.12, 0.14), "Elite": (0.25, 0.30, 0.32), "Boss": (0.45, 0.5, 0.5)}
 
 
+ASCENSION = 0   # set by the runner; tougher and deadlier enemies make every fight cost more
+
+
 def _hp_after(kind, hp, act):
     a = min(max(act, 1), 3) - 1
     if kind in HP_COST:
-        return hp - HP_COST[kind][a]
+        return hp - HP_COST[kind][a] * (1 + 0.04 * ASCENSION)
     if kind == "RestSite" and hp < 0.7:
         return min(1.0, hp + 0.3)
     return hp

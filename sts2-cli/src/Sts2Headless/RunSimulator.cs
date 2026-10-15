@@ -1623,7 +1623,7 @@ public class RunSimulator
         // needs time to complete the upgrade after card selection resolves.
         if (_runState?.CurrentRoom is RestSiteRoom)
         {
-            Thread.Sleep(200);
+            SettleBackground();   // was a fixed 200 ms sleep; the background task is what we wait for
             _syncCtx.Pump();
             WaitForActionExecutor();
             // Force to map after SMITH completes (same pattern as HEAL)
@@ -1635,7 +1635,7 @@ public class RunSimulator
         // Extra wait for shop card removal: the purchase task needs to finish
         if (_runState?.CurrentRoom is MerchantRoom)
         {
-            Thread.Sleep(200);
+            SettleBackground();   // was a fixed 200 ms sleep
             _syncCtx.Pump();
             WaitForActionExecutor();
             Log("Card selection in shop (card removal), refreshing shop state");
@@ -1799,7 +1799,7 @@ public class RunSimulator
                 // Give the action time to complete (heal HP, dig for relic, etc.)
                 WaitForActionExecutor();
                 _syncCtx.Pump();
-                Thread.Sleep(200);
+                SettleBackground();   // was a fixed 200 ms sleep
                 _syncCtx.Pump();
                 WaitForActionExecutor();
                 ForceToMap();
@@ -3231,6 +3231,7 @@ public class RunSimulator
             ["act_name"] = _loc.Act(_runState.Act?.Id.Entry ?? "OVERGROWTH"),
             ["floor"] = _runState.ActFloor,
             ["room_type"] = _runState.CurrentRoom?.RoomType.ToString(),
+            ["ascension"] = _runState.AscensionLevel,
         };
 
         // Boss encounter info — use BossEncounter?.Id?.Entry
