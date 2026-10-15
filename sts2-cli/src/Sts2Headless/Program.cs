@@ -1,0 +1,265 @@
+using System.Reflection;
+using System.Runtime.Loader;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace Sts2Headless;
+
+class Program
+{
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        WriteIndented = false,
+    };
+
+    /// <summary>
+    /// Locate the directory containing sts2.dll: STS2_LIB env, walk up from BaseDirectory, then BaseDirectory/lib.
+    /// </summary>
+    private static string ResolveLibDirectory()
+    {
+        var envLib = Environment.GetEnvironmentVariable("STS2_LIB");
+        if (!string.IsNullOrWhiteSpace(envLib))
+        {
+            var p = Path.GetFullPath(envLib.Trim());
+            if (Directory.Exists(p) && File.Exists(Path.Combine(p, "sts2.dll")))
+                return p;
+        }
+
+        var dir = AppContext.BaseDirectory;
+        for (var depth = 0; depth < 16 && !string.IsNullOrEmpty(dir); depth++)
+        {
+            var candidate = Path.Combine(dir, "lib");
+            if (Directory.Exists(candidate) && File.Exists(Path.Combine(candidate, "sts2.dll")))
+                return Path.GetFullPath(candidate);
+            dir = Directory.GetParent(dir)?.FullName ?? "";
+        }
+
+        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "lib"));
+    }
+
+    static void Main(string[] args)
+    {
+        // Prevent unhandled exceptions from crashing the process
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            Console.Error.WriteLine($"[FATAL] Unhandled: {e.ExceptionObject}");
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            Console.Error.WriteLine($"[WARN] Unobserved task exception: {e.Exception}");
+            e.SetObserved();
+        };
+
+        var libDir = ResolveLibDirectory();
+
+        AssemblyLoadContext.Default.Resolving += (ctx, name) =>
+        {
+            var path = Path.Combine(libDir, name.Name + ".dll");
+            if (File.Exists(path))
+                return ctx.LoadFromAssemblyPath(Path.GetFullPath(path));
+
+            // Also check game directory (via STS2_GAME_DIR env var)
+            var gameDir = Environment.GetEnvironmentVariable("STS2_GAME_DIR") ?? "";
+            if (!string.IsNullOrEmpty(gameDir))
+            {
+                path = Path.Combine(gameDir, name.Name + ".dll");
+                if (File.Exists(path))
+                    return ctx.LoadFromAssemblyPath(path);
+            }
+
+            return null;
+        };
+
+        var sim = new RunSimulator();
+        sim.CommandHandler = c => HandleCommand(sim, c);
+        WriteLine(new Dictionary<string, object?> { ["type"] = "ready", ["version"] = "0.2.0" });
+
+        string? line;
+        while ((line = Console.ReadLine()) != null)
+        {
+            line = line.Trim();
+            if (string.IsNullOrEmpty(line)) continue;
+
+            Dictionary<string, object?>? result;
+            try
+            {
+                var cmd = JsonSerializer.Deserialize<JsonElement>(line);
+                // Commands that change game state are logged for snapshot/restore replay.
+                if (cmd.TryGetProperty("cmd", out var c) && c.GetString() is "action" or "set_player" or "enter_room" or "set_draw_order")
+                    sim.RecordCommand(line);
+                result = HandleCommand(sim, cmd);
+            }
+            catch (JsonException ex)
+            {
+                result = new Dictionary<string, object?> { ["type"] = "error", ["message"] = $"Invalid JSON: {ex.Message}" };
+            }
+            catch (Exception ex)
+            {
+                result = new Dictionary<string, object?> { ["type"] = "error", ["message"] = $"{ex.GetType().Name}: {ex.Message}", ["stack_trace"] = ex.ToString() };
+            }
+
+            if (result != null)
+            {
+                WriteLine(result);
+                if (result.TryGetValue("type", out var resultTypeObj) &&
+                    string.Equals(resultTypeObj as string, "quit_result", StringComparison.Ordinal))
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    static Dictionary<string, object?>? HandleCommand(RunSimulator sim, JsonElement cmd)
+    {
+        var cmdType = cmd.GetProperty("cmd").GetString() ?? "";
+        switch (cmdType)
+        {
+            case "start_run":
+            {
+                var started = sim.StartRun(
+                    cmd.TryGetProperty("character", out var ch) ? ch.GetString() ?? "Ironclad" : "Ironclad",
+                    cmd.TryGetProperty("ascension", out var asc) ? asc.GetInt32() : 0,
+                    cmd.TryGetProperty("seed", out var s) ? s.GetString() : null,
+                    cmd.TryGetProperty("lang", out var lang) ? lang.GetString() ?? "en" : "en",
+                    cmd.TryGetProperty("unlock_from_save", out var ufs) ? ufs.GetString() : null
+                );
+                if (!(started.TryGetValue("type", out var st) && st as string == "error"))
+                    sim.OnStartRunCommand(cmd.GetRawText());
+                return started;
+            }
+
+            case "action":
+            {
+                var action = cmd.GetProperty("action").GetString() ?? "";
+                Dictionary<string, object?>? actionArgs = null;
+                if (cmd.TryGetProperty("args", out var argsElem))
+                {
+                    actionArgs = new Dictionary<string, object?>();
+                    foreach (var prop in argsElem.EnumerateObject())
+                    {
+                        actionArgs[prop.Name] = prop.Value.ValueKind switch
+                        {
+                            JsonValueKind.Number => prop.Value.GetInt32(),
+                            JsonValueKind.String => prop.Value.GetString(),
+                            JsonValueKind.True => true,
+                            JsonValueKind.False => false,
+                            _ => prop.Value.ToString(),
+                        };
+                    }
+                }
+                return sim.ExecuteAction(action, actionArgs);
+            }
+
+            case "load_save":
+            {
+                var savePath = cmd.TryGetProperty("path", out var sp) ? sp.GetString() : null;
+                var saveJson = cmd.TryGetProperty("json", out var sj) ? sj.GetString() : null;
+                if (saveJson == null && savePath != null)
+                {
+                    if (!File.Exists(savePath))
+                        return new Dictionary<string, object?> { ["type"] = "error", ["message"] = $"Save file not found: {savePath}" };
+                    saveJson = File.ReadAllText(savePath);
+                }
+                if (saveJson == null)
+                    return new Dictionary<string, object?> { ["type"] = "error", ["message"] = "Provide 'path' or 'json' for load_save" };
+                var loadLang = cmd.TryGetProperty("lang", out var le) ? (le.GetString() ?? "en") : "en";
+                var loaded = sim.LoadSave(saveJson, loadLang);
+                if (!(loaded.TryGetValue("type", out var lt) && lt as string == "error"))
+                    sim.OnLoadSaveCommand(saveJson);
+                return loaded;
+            }
+            case "get_map":
+                return sim.GetFullMap();
+
+            case "set_player":
+            {
+                var args = new Dictionary<string, JsonElement>();
+                foreach (var prop in cmd.EnumerateObject())
+                    if (prop.Name != "cmd") args[prop.Name] = prop.Value;
+                return sim.SetPlayer(args);
+            }
+
+            case "enter_room":
+            {
+                var roomType = cmd.TryGetProperty("type", out var rt) ? rt.GetString() ?? "" : "";
+                var encounter = cmd.TryGetProperty("encounter", out var enc) ? enc.GetString() : null;
+                var eventId = cmd.TryGetProperty("event", out var ev) ? ev.GetString() : null;
+                return sim.EnterRoom(roomType, encounter, eventId);
+            }
+
+            case "set_draw_order":
+            {
+                var cards = new List<string>();
+                if (cmd.TryGetProperty("cards", out var cardsArr))
+                    foreach (var c in cardsArr.EnumerateArray())
+                        cards.Add(c.GetString() ?? "");
+                return sim.SetDrawOrder(cards);
+            }
+
+            case "write_continue_save":
+            {
+                var outputPath = cmd.TryGetProperty("path", out var op) ? op.GetString() : null;
+                return sim.SaveCheckpoint(outputPath);
+            }
+
+            case "snapshot":
+                return sim.Snapshot();
+
+            case "restore":
+                return cmd.TryGetProperty("id", out var sid)
+                    ? sim.Restore(sid.GetInt32())
+                    : new Dictionary<string, object?> { ["type"] = "error", ["message"] = "restore requires 'id'" };
+
+            case "drop_snapshots":
+                return sim.DropSnapshots();
+
+            case "checksum":
+                return sim.Checksum(cmd.TryGetProperty("dump", out var dmp) && dmp.GetBoolean());
+
+            case "quit":
+            {
+                var outputPath = cmd.TryGetProperty("path", out var op) ? op.GetString() : null;
+                if (!string.IsNullOrEmpty(outputPath))
+                {
+                    var saveResult = sim.SaveCheckpoint(outputPath);
+                    bool saveOk = saveResult.TryGetValue("success", out var sObj) && sObj is bool b && b;
+                    if (!saveOk)
+                    {
+                        // Save failed — do NOT clean up so the caller can retry with a different path.
+                        return new Dictionary<string, object?>
+                        {
+                            ["type"] = "save_error",
+                            ["save"] = saveResult,
+                        };
+                    }
+                    sim.CleanUp();
+                    return new Dictionary<string, object?>
+                    {
+                        ["type"] = "quit_result",
+                        ["success"] = true,
+                        ["save"] = saveResult,
+                    };
+                }
+                sim.CleanUp();
+                return new Dictionary<string, object?>
+                {
+                    ["type"] = "quit_result",
+                    ["success"] = true,
+                    ["save"] = null,
+                };
+            }
+
+            default:
+                return new Dictionary<string, object?> { ["type"] = "error", ["message"] = $"Unknown command: {cmdType}" };
+        }
+    }
+
+    static void WriteLine(Dictionary<string, object?> data)
+    {
+        Console.Out.WriteLine(JsonSerializer.Serialize(data, JsonOpts));
+        Console.Out.Flush();
+    }
+}
