@@ -13,6 +13,7 @@ import zlib
 from combat import TurnPlanner, alive, quick_policy
 
 REPS = 10
+UPGRADE_REPS = 5   # the engine's smith step sleeps 200 ms, so fewer seeds here
 PILOT = "quick"   # "quick": quick_policy (fast) or "planner": TurnPlanner(NODES)
 DEBUG = None   # set to a list to record how imagined fights ended
 NODES = 80
@@ -31,6 +32,8 @@ def _to_map(sim, st):
             return st
         if d == "card_reward":
             st = sim.act("skip_card_reward")
+        elif d in ("rest_site", "event_choice", "shop"):
+            st = sim.act("leave_room")
         else:
             st = sim.act("proceed")
         if st.get("type") == "error":
@@ -78,30 +81,80 @@ def boss_fight(sim, map_state, boss_id, seed):
     return graded(won, hp, left, enemy_max)
 
 
-def evaluate_options(sim, st):
-    """{arm: mean graded score}; arm is a card_index or None (skip). Restores st."""
-    boss = ((st.get("context") or {}).get("boss") or {}).get("id")
-    if not boss:
+# Hallway fights that punish weak decks, by act (game knowledge of each act's pool,
+# not the run's actual upcoming fights). One is added to the boss, rotating by floor.
+HARD_HALLWAY = {
+    1: ["CUBEX_CONSTRUCT_NORMAL", "SLITHERING_STRANGLER_NORMAL", "VINE_SHAMBLER_NORMAL"],
+    2: ["HUNTER_KILLER_NORMAL", "SLUMBERING_BEETLE_NORMAL", "SPINY_TOAD_NORMAL", "MYTES_NORMAL", "THE_OBSCURA_NORMAL"],
+    3: ["FABRICATOR_NORMAL", "FROG_KNIGHT_NORMAL", "SLIMED_BERSERKER_NORMAL", "GLOBE_HEAD_NORMAL"],
+}
+HALLWAY_FROM_FLOOR = 8   # in act 1, before this floor only the boss matters
+
+
+def tests_for(st):
+    ctx = st.get("context") or {}
+    boss = (ctx.get("boss") or {}).get("id")
+    act, floor = ctx.get("act") or 1, ctx.get("floor") or 0
+    tests = [boss] if boss else []
+    nxt = act + 1 if act == 1 and floor >= HALLWAY_FROM_FLOOR else act
+    if nxt > 1 or floor >= HALLWAY_FROM_FLOOR:
+        pool = HARD_HALLWAY.get(min(nxt, 3), [])
+        if pool:
+            tests.append(pool[floor % len(pool)])
+    return tests
+
+
+def evaluate_arms(sim, st, arms, reps=REPS, tag=""):
+    """arms: {key: [(action, kwargs), ...]}, the moves that make each alternative from st.
+    Each arm is applied in the sandbox, then the bot walks to the map and fights the test
+    encounters (same seeds for every arm). Returns {key: mean graded score}; restores st."""
+    tests = tests_for(st)
+    if not tests or len(arms) < 2:
         return {}
     snap = sim.send({"cmd": "snapshot"})["id"]
-    arms = [c["index"] for c in st.get("cards") or []] + ([None] if st.get("can_skip", True) else [])
     ctx = st.get("context") or {}
     out = {}
     try:
-        for arm in arms:
+        for key, moves in arms.items():
             vals = []
-            for rep in range(REPS):
+            for rep in range(reps):
                 sim.send({"cmd": "restore", "id": snap})
-                s = sim.act("skip_card_reward") if arm is None else sim.act("select_card_reward", card_index=arm)
+                s = st
+                for a, kw in moves:
+                    s = sim.act(a, **kw)
+                    if s.get("type") == "error":
+                        break
                 s = _to_map(sim, s) if s.get("type") != "error" else None
                 if s is None:
                     continue
-                v = boss_fight(sim, s, boss, zlib.crc32(f"{ctx.get('act')}/{ctx.get('floor')}/{rep}".encode()))
+                enc = tests[rep % len(tests)]
+                v = boss_fight(sim, s, enc, zlib.crc32(f"{tag}{ctx.get('act')}/{ctx.get('floor')}/{rep}".encode()))
                 if v is not None:
                     vals.append(v)
             if vals:
-                out[arm] = sum(vals) / len(vals)
+                out[key] = sum(vals) / len(vals)
     finally:
         sim.send({"cmd": "restore", "id": snap})
         sim.send({"cmd": "drop_snapshots", "from": snap})
     return out
+
+
+def evaluate_options(sim, st):
+    """Card reward: {card_index or None (skip): mean graded score}."""
+    arms = {c["index"]: [("select_card_reward", {"card_index": c["index"]})] for c in st.get("cards") or []}
+    if st.get("can_skip", True):
+        arms[None] = [("skip_card_reward", {})]
+    return evaluate_arms(sim, st, arms)
+
+
+def evaluate_upgrades(sim, st, candidates):
+    """Smith prompt: {card index: mean graded score} for upgrading each candidate."""
+    arms = {idx: [("select_cards", {"indices": str(idx)})] for idx in candidates}
+    return evaluate_arms(sim, st, arms, reps=UPGRADE_REPS, tag="up/")
+
+
+def evaluate_buys(sim, st, card_indices):
+    """Shop: {card index or None (buy nothing): mean graded score}."""
+    arms = {i: [("buy_card", {"card_index": i})] for i in card_indices}
+    arms[None] = []
+    return evaluate_arms(sim, st, arms, tag="shop/")

@@ -224,7 +224,7 @@ def upgrade_priority(c):
     return 3 + TIER.get(base_key(c), RARITY.get(c.get("rarity"), 1.0)) + 0.5 * stat_value(c)
 
 
-def choose_card_select(st):
+def choose_card_select(st, sim=None):
     cards = st.get("cards") or []
     lo, hi = st.get("min_select") or 0, st.get("max_select") or 1
     if not cards:
@@ -232,6 +232,14 @@ def choose_card_select(st):
     room = (st.get("context") or {}).get("room_type")
     if room == "RestSite":                       # smith
         order = sorted(cards, key=upgrade_priority, reverse=True)
+        if DECK_TEST and sim is not None and hi == 1 and len(order) > 1:
+            import decktest
+            top = [c.get("index", i) for i, c in enumerate(order[:4])]
+            scores = decktest.evaluate_upgrades(sim, st, top)
+            if scores:
+                prio = {c.get("index", i): upgrade_priority(c) for i, c in enumerate(cards)}
+                best = max(scores, key=lambda k: scores[k] + 1.0 * prio.get(k, 0))
+                return ("select_cards", {"indices": str(best)})
     else:                                        # shop removal / event remove-transform: Strikes, then Defends
         def rank(c):
             k = card_key(c)
@@ -261,7 +269,7 @@ def choose_event(st):
     return ("choose_option", {"option_index": best["index"]})
 
 
-def choose_shop(st, memo):
+def choose_shop(st, memo, sim=None):
     """Remove a Strike, then buy up to two good cards and one potion if affordable."""
     ctx = st.get("context") or {}
     m = memo.setdefault(("shop", ctx.get("act"), ctx.get("floor")), {"removed": False, "cards": 0, "potions": 0})
@@ -274,6 +282,21 @@ def choose_shop(st, memo):
     full = (st.get("player") or {}).get("deck")
     act = ctx.get("act") or 1
     cards = [c for c in st.get("cards") or [] if c.get("is_stocked", True) and (c.get("cost") or 9999) <= gold]
+    if cards and m["cards"] < 2 and DECK_TEST and sim is not None:
+        import decktest
+        top = sorted(cards, key=lambda c: card_value(c, deck, full, act), reverse=True)[:3]
+        scores = decktest.evaluate_buys(sim, st, [c["index"] for c in top])
+        if scores:
+            by = {c["index"]: c for c in top}
+            # buying must beat keeping the gold by a margin (gold also buys removals, potions)
+            total = {k: v + (TIER_WEIGHT * card_value(by[k], deck, full, act) - 8.0 if k is not None else TIER_WEIGHT * 2.8)
+                     for k, v in scores.items()}
+            best = max(total, key=total.get)
+            if best is None:
+                m["cards"] = 2
+            else:
+                m["cards"] += 1
+                return ("buy_card", {"card_index": best})
     if cards and m["cards"] < 2:
         best = max(cards, key=lambda c: card_value(c, deck, full, act))
         if card_value(best, deck, full, act) >= 2.8:
@@ -291,7 +314,7 @@ def decide(sim, st, avoid=(), memo=None):
     """avoid: JSON-encoded actions that made no progress from this exact state before.
     memo: per-run scratch dict (shop visits)."""
     if st.get("decision") == "shop":
-        a = choose_shop(st, memo if memo is not None else {})
+        a = choose_shop(st, memo if memo is not None else {}, sim)
         if json.dumps(a, sort_keys=True) not in avoid:
             return a
     a = _decide(sim, st)
@@ -308,7 +331,7 @@ def _decide(sim, st):
     if d == "card_reward":
         return choose_card_reward(st, sim)
     if d == "card_select":
-        return choose_card_select(st)
+        return choose_card_select(st, sim)
     if d == "rest_site":
         return choose_rest(st)
     if d == "event_choice":
