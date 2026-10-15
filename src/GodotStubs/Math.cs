@@ -121,6 +121,11 @@ public static class Mathf
     public static float Cos(float s) => MathF.Cos(s);
     public static float Tan(float s) => MathF.Tan(s);
     public static float Sqrt(float s) => MathF.Sqrt(s);
+    // Natural log / exp, as in real Godot (Phantasmal Gardeners, Phrog Parasite elites).
+    public static float Log(float s) => MathF.Log(s);
+    public static double Log(double s) => Math.Log(s);
+    public static float Exp(float s) => MathF.Exp(s);
+    public static double Exp(double s) => Math.Exp(s);
     public static float Pow(float @base, float exp) => MathF.Pow(@base, exp);
     public static float Abs(float s) => MathF.Abs(s);
     public static float Floor(float s) => MathF.Floor(s);

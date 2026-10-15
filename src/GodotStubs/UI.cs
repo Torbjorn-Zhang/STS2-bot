@@ -6,6 +6,11 @@ public class CanvasItem : Node
     public Color Modulate { get; set; } = Color.White;
     public Color SelfModulate { get; set; } = Color.White;
     public bool Visible { get; set; } = true;
+    // Real Godot setter methods called directly by some monster VFX code.
+    public void SetVisible(bool visible) => Visible = visible;
+    public bool IsVisible() => Visible;
+    public void SetModulate(Color c) => Modulate = c;
+    public void SetSelfModulate(Color c) => SelfModulate = c;
     public virtual void Show() => Visible = true;
     public virtual void Hide() => Visible = false;
     public bool IsVisibleInTree() => Visible;

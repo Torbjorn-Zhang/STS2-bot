@@ -1,3 +1,5 @@
+using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 
 namespace Godot;
@@ -13,6 +15,22 @@ public class GodotObject
     public SignalAwaiter ToSignal(GodotObject source, StringName signal)
     {
         return new SignalAwaiter();
+    }
+
+    // Real Godot signature, called from VFX code (e.g. Rolling Boulder's start-of-turn effect).
+    // Missing it threw MissingMethodException and killed the combat turn loop.
+    public Error Connect(StringName signal, Callable callable, uint flags = 0) => Error.Ok;
+
+    // Real Godot defers the call to idle time; headless has no frame loop, so run it now
+    // by reflection instead of dropping it (deferred calls can carry game logic).
+    public Variant CallDeferred(StringName method, params Variant[] args)
+    {
+        string name = method;
+        var mi = GetType().GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .FirstOrDefault(m => m.Name == name && m.GetParameters().Length == args.Length);
+        if (mi == null) return default;
+        var result = mi.Invoke(this, args.Select(a => a.Obj).ToArray());
+        return new Variant(result);
     }
 
     // Bridge methods overridden in generated code
@@ -32,6 +50,10 @@ public class Node : GodotObject
 
     private Node? _parent;
     private readonly List<Node> _children = new();
+
+    // Real Godot signature; used by ReattachPower's segment VFX. Missing it threw inside the
+    // AfterDeath hook and cut the hook short.
+    public int GetIndex(bool includeInternal = false) => _parent?._children.IndexOf(this) ?? -1;
 
     public class MethodName
     {

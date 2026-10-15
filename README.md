@@ -79,6 +79,25 @@ dotnet run --project src/Sts2Headless/Sts2Headless.csproj
 
 Each command returns a JSON decision point (`map_select` / `combat_play` / `card_reward` / `rest_site` / `event_choice` / `shop` / `game_over`). All names are in English.
 
+### Many runs per process, snapshot / restore
+
+One process can play any number of runs: send `start_run` (or `load_save`) again and the previous run is cleaned up, so a reused process behaves exactly like a fresh one. Starting a run takes about 50 ms instead of about 700 ms for a new process.
+
+For search, any decision point can be snapshotted and restored inside the same process:
+
+```json
+{"cmd": "snapshot"}
+{"cmd": "restore", "id": 1}
+{"cmd": "checksum"}
+{"cmd": "drop_snapshots"}
+```
+
+- `snapshot` returns `{"type": "snapshot", "id": N, ...}` and costs almost nothing.
+- `restore` returns the decision point as it was when the snapshot was taken. It typically takes 3–15 ms, and longer when many commands have to be replayed.
+- `checksum` fingerprints the full combat state (the game's own `NetFullCombatState`) and the run-level save. Use it to check that a restore is exact.
+
+How it works: the engine keeps a checkpoint at run start, at every `load_save`, and before entering each map node. It also logs every state-changing command after the checkpoint. A restore rebuilds the checkpoint and replays the logged commands. This is the same design as the game's own combat replays (`CombatReplay`: a `SerializableRun` plus the recorded actions). It depends on the engine being deterministic, which `tests/test_snapshot_restore.py` and `tests/test_process_reuse.py` check.
+
 ## Game Logs
 
 Every run is automatically logged to `logs/` as a JSONL file (one JSON per line), recording each game state and action with timestamps. Logs older than 7 days are cleaned up automatically.
@@ -202,6 +221,25 @@ dotnet run --project src/Sts2Headless/Sts2Headless.csproj
 ```
 
 每个命令返回一个 JSON decision point（`map_select` / `combat_play` / `card_reward` / `rest_site` / `event_choice` / `shop` / `game_over`），所有名称为英文。
+
+### 同一进程连续开局、快照与恢复
+
+同一个进程可以连续打任意多局：再发一次 `start_run`（或 `load_save`），上一局会被清理干净，复用进程和新开进程的行为完全一致。开局约 50 毫秒，新开进程约 700 毫秒。
+
+给搜索用的快照和恢复都在同一进程内完成：
+
+```json
+{"cmd": "snapshot"}
+{"cmd": "restore", "id": 1}
+{"cmd": "checksum"}
+{"cmd": "drop_snapshots"}
+```
+
+- `snapshot` 返回 `{"type": "snapshot", "id": N, ...}`，几乎不花时间。
+- `restore` 返回拍快照时的那个决策点，通常 3–15 毫秒；需要重放的命令越多，耗时越长。
+- `checksum` 给完整战斗状态（游戏自带的 `NetFullCombatState`）和跑图存档做指纹，用来验证恢复是否精确。
+
+原理：引擎在开局、每次 `load_save`、每次进入地图节点之前各存一个检查点，并记录检查点之后每条会改变状态的命令。恢复时先重建检查点，再重放这些命令。这和游戏自带的战斗回放（`CombatReplay`：`SerializableRun` 加录下的动作）是同一种设计，依赖引擎的确定性；`tests/test_snapshot_restore.py` 和 `tests/test_process_reuse.py` 会检查这一点。
 
 ## 游戏日志
 

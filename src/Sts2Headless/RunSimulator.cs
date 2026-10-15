@@ -225,18 +225,40 @@ public class RunSimulator
     private int _goldBeforeCombat;
     private int _lastKnownHp;
     private readonly HeadlessCardSelector _cardSelector = new();
+    // Process reuse: the selector scope is disposed between runs, combat handlers are
+    // registered once per process (CombatManager is a process-wide singleton).
+    private IDisposable? _cardSelectorScope;
+    private bool _combatHandlersRegistered;
+    // Game work started on the thread pool (event options, rest site, shop purchases) so a
+    // blocking selector call can wait for the caller. Must be settled before reading state.
+    private Task? _bgTask;
     // Pending bundle selection (Scroll Boxes: pick 1 of N packs)
     private IReadOnlyList<IReadOnlyList<CardModel>>? _pendingBundles;
     private TaskCompletionSource<IEnumerable<CardModel>>? _pendingBundleTcs;
 
-    public Dictionary<string, object?> StartRun(string character, int ascension = 0, string? seed = null, string lang = "en")
+    public Dictionary<string, object?> StartRun(string character, int ascension = 0, string? seed = null, string lang = "en", string? unlockFromSave = null)
     {
         try
         {
+            CleanUp();
             _loc.Lang = lang;
             EnsureModelDbInitialized();
+            CapturePristineProgressOnce();
 
-            var player = CreatePlayer(character);
+            // Optional: take unlock state (and the Neow flag) from a real game save so that
+            // up-front generation (encounters/events/bosses/ancients) draws from the same pools.
+            UnlockState unlocks = UnlockState.all;
+            bool? startedWithNeow = null;
+            if (!string.IsNullOrEmpty(unlockFromSave))
+            {
+                var rr = SaveManager.FromJson<SerializableRun>(File.ReadAllText(unlockFromSave));
+                if (!rr.Success || rr.SaveData == null)
+                    return Error($"Failed to parse unlock source save: {rr.Status} {rr.ErrorMessage}");
+                unlocks = UnlockState.FromSerializable(rr.SaveData.Players[0].UnlockState);
+                startedWithNeow = rr.SaveData.ExtraFields?.StartedWithNeow ?? false;
+            }
+
+            var player = CreatePlayer(character, unlocks);
             if (player == null)
                 return Error($"Unknown character: {character}");
 
@@ -256,7 +278,7 @@ public class RunSimulator
             LocalContext.NetId = netService.NetId;
 
             // Force Neow event (blessing selection at start)
-            _runState.ExtraFields.StartedWithNeow = true;
+            _runState.ExtraFields.StartedWithNeow = startedWithNeow ?? true;
 
             // Generate rooms for all acts
             RunManager.Instance.GenerateRooms();
@@ -267,8 +289,7 @@ public class RunSimulator
             Log("Run launched");
 
             // Register event handlers for combat turn transitions
-            CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
-            CombatManager.Instance.CombatEnded += _ => _combatEnded.Set();
+            RegisterCombatHandlersOnce();
 
             // Finalize starting relics
             RunManager.Instance.FinalizeStartingRelics().GetAwaiter().GetResult();
@@ -279,7 +300,7 @@ public class RunSimulator
             Log("Entered Act 0");
 
             // Register card selector for cards that need player choice
-            CardSelectCmd.UseSelector(_cardSelector);
+            _cardSelectorScope = CardSelectCmd.UseSelector(_cardSelector);
             LocPatches._bundleSimRef = this;
 
             // Now we should be at the map — detect decision point
@@ -334,7 +355,13 @@ public class RunSimulator
                         var id = rEl.GetString();
                         if (id == null) continue;
                         var model = ModelDb.GetById<RelicModel>(new ModelId("RELIC", id));
-                        if (model != null) list.Add(model.ToMutable());
+                        // Obtain through the game's own command so the relic gets an Owner and is
+                        // registered with RunState; a bare list.Add NREs in Hook.BeforeRoomEntered.
+                        if (model != null)
+                        {
+                            RelicCmd.Obtain(model.ToMutable(), player).GetAwaiter().GetResult();
+                            _syncCtx.Pump();
+                        }
                     }
                 }
             }
@@ -491,12 +518,40 @@ public class RunSimulator
     }
 
     // ─── Game actions ───
+    private void RestoreMapPointFlags(string saveJson, int actIndex)
+    {
+        try
+        {
+            var map = _runState?.Map;
+            if (map == null) return;
+            using var doc = System.Text.Json.JsonDocument.Parse(saveJson);
+            var savedMap = doc.RootElement.GetProperty("acts")[actIndex].GetProperty("saved_map");
+            int restored = 0;
+            void Apply(System.Text.Json.JsonElement p)
+            {
+                var c = p.GetProperty("coord");
+                var coord = new MapCoord((byte)c.GetProperty("col").GetInt32(), (byte)c.GetProperty("row").GetInt32());
+                if (!map.HasPoint(coord)) return;
+                var canModify = p.TryGetProperty("can_modify", out var cm) && cm.ValueKind == System.Text.Json.JsonValueKind.True;
+                var point = map.GetPoint(coord);
+                if (point.CanBeModified != canModify) { point.CanBeModified = canModify; restored++; }
+            }
+            foreach (var p in savedMap.GetProperty("points").EnumerateArray()) Apply(p);
+            foreach (var key in new[] { "start", "boss" })
+                if (savedMap.TryGetProperty(key, out var single) && single.ValueKind == System.Text.Json.JsonValueKind.Object) Apply(single);
+            Log($"Restored can_modify on {restored} map points");
+        }
+        catch (Exception ex) { Log($"RestoreMapPointFlags: {ex.Message}"); }
+    }
+
     public Dictionary<string, object?> LoadSave(string saveJson, string lang = "en")
     {
         try
         {
+            CleanUp();
             _loc.Lang = lang;
             EnsureModelDbInitialized();
+            CapturePristineProgressOnce();
 
             Log("Loading save file...");
 
@@ -520,9 +575,8 @@ public class RunSimulator
             RunManager.Instance.SetUpSavedSingleplayer(_runState, save).GetAwaiter().GetResult();
             LocalContext.NetId = netService.NetId;
 
-            CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
-            CombatManager.Instance.CombatEnded += _ => _combatEnded.Set();
-            CardSelectCmd.UseSelector(_cardSelector);
+            RegisterCombatHandlersOnce();
+            _cardSelectorScope = CardSelectCmd.UseSelector(_cardSelector);
             LocPatches._bundleSimRef = this;
 
             var savedRoom = _runState.CurrentRoom;
@@ -540,11 +594,22 @@ public class RunSimulator
                 // Preserve Neow for saves created before the first blessing choice.
                 // Once the run has visited at least one map node, re-entering Act 1
                 // should not send the player back through the Ancient start node.
+                var savedStartedWithNeow = _runState.ExtraFields.StartedWithNeow;
                 if (_runState.CurrentActIndex == 0 && savedVisitedCoords.Count > 0)
                     _runState.ExtraFields.StartedWithNeow = false;
+                // EnterAct also resets the "?" room odds to the act's starting values.
+                var unknownOdds = _runState.Odds?.UnknownMapPoint;
+                var savedOdds = unknownOdds == null ? null : new[] { unknownOdds.MonsterOdds, unknownOdds.EliteOdds, unknownOdds.TreasureOdds, unknownOdds.ShopOdds };
                 RunManager.Instance.EnterAct(_runState.CurrentActIndex, doTransition: false).GetAwaiter().GetResult();
                 _syncCtx.Pump();
                 Log($"Entered Act {_runState.CurrentActIndex}");
+                if (savedOdds != null && savedVisitedCoords.Count > 0 && _runState.Odds?.UnknownMapPoint is { } odds)
+                {
+                    odds.MonsterOdds = savedOdds[0];
+                    odds.EliteOdds = savedOdds[1];
+                    odds.TreasureOdds = savedOdds[2];
+                    odds.ShopOdds = savedOdds[3];
+                }
 
                 if (shouldResumeInitialNeow && _runState.Map?.StartingMapPoint != null)
                 {
@@ -565,6 +630,13 @@ public class RunSimulator
                     var last = savedVisitedCoords[^1];
                     Log($"Restored map position: floor={_runState.ActFloor}, coord=({last.col},{last.row})");
                 }
+
+                // EnterAct re-initialises the act map: put back each point's saved can_modify
+                // flag, otherwise "?" rooms roll differently after a load than in the
+                // uninterrupted run.
+                RestoreMapPointFlags(saveJson, _runState.CurrentActIndex);
+                // Only EnterAct needed the flag cleared; keep the run identical to the saved one.
+                _runState.ExtraFields.StartedWithNeow = savedStartedWithNeow;
             }
             else
             {
@@ -866,6 +938,7 @@ public class RunSimulator
                 return Error("No run in progress");
 
             var player = _runState.Players[0];
+            SettleBackground();
 
             switch (action)
             {
@@ -937,6 +1010,17 @@ public class RunSimulator
         // BUG-013: Wait for any pending actions (relic sessions, etc.) to complete before entering new room
         WaitForActionExecutor();
         _syncCtx.Pump();
+
+        // Snapshot support: remember the pre-entry state of this node so restore can rebuild it.
+        if (!_replaying && _runState?.CurrentRoom is MapRoom mapRoom)
+        {
+            try
+            {
+                var json = SaveManager.ToJson(RunManager.Instance.ToSave(mapRoom));
+                NewCheckpoint(new Checkpoint { Kind = "node", SaveJson = json, Coord = coord });
+            }
+            catch (Exception ex) { Log($"Checkpoint before ({col},{row}) failed: {ex.Message}"); }
+        }
 
         // Call EnterMapCoord directly (same as what MoveToMapCoordAction does in TestMode)
         // This avoids the action executor which can swallow errors silently.
@@ -1031,6 +1115,35 @@ public class RunSimulator
         return p?.PlayerCombatState?.Phase == MegaCrit.Sts2.Core.Combat.PlayerTurnPhase.Play;
     }
 
+    // A card / card-reward / bundle prompt is waiting for the caller (can open mid enemy-turn
+    // transition, e.g. start-of-turn "draw 1, discard 1" powers).
+    private bool SelectionPending() =>
+        _cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null;
+
+    /// <summary>
+    /// Wait until background game work has finished, or has stopped at a prompt that the
+    /// caller must answer. Without this, state was read while effects were still being
+    /// applied on another thread (cards missing from the deck, effects in a random order).
+    /// </summary>
+    private void SettleBackground(int timeoutMs = 10000)
+    {
+        var task = _bgTask;
+        if (task == null) return;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (!task.IsCompleted && sw.ElapsedMilliseconds < timeoutMs)
+        {
+            _syncCtx.Pump();
+            if (SelectionPending()) return;
+            Thread.Sleep(1);
+        }
+        if (!task.IsCompleted)
+            Log($"SettleBackground: background task still running after {timeoutMs} ms");
+        else
+            _bgTask = null;
+        _syncCtx.Pump();
+        WaitForActionExecutor();
+    }
+
     private Dictionary<string, object?> DoEndTurn(Player player)
     {
         // A pending card / card-reward / bundle selection is an unresolved prompt; ending
@@ -1083,6 +1196,7 @@ public class RunSimulator
                 {
                     _syncCtx.Pump();
                     if (_turnStarted.IsSet || _combatEnded.IsSet) break;
+                    if (SelectionPending()) break;
                     if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
                     if (IsPlayPhase()) break;
                     Thread.Sleep(5);
@@ -1096,7 +1210,7 @@ public class RunSimulator
 
         // Second fallback: if still stuck after SuppressYield window, cancel and retry.
         // The WaitUntilQueue TCS is likely deadlocked.
-        if (CombatManager.Instance.IsInProgress && !IsPlayPhase() && !player.Creature.IsDead)
+        if (CombatManager.Instance.IsInProgress && !IsPlayPhase() && !player.Creature.IsDead && !SelectionPending())
         {
             Log("EndTurn stuck, cancelling and retrying with SuppressYield...");
             try
@@ -1125,6 +1239,7 @@ public class RunSimulator
                 {
                     _syncCtx.Pump();
                     if (_turnStarted.IsSet || _combatEnded.IsSet) break;
+                    if (SelectionPending()) break;
                     if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
                     if (IsPlayPhase()) break;
                     Thread.Sleep(10);
@@ -1134,7 +1249,7 @@ public class RunSimulator
 
             // NUCLEAR OPTION: If STILL stuck after 2 attempts, use ThreadPool to force
             // the enemy turn processing to complete with SuppressYield permanently on.
-            if (CombatManager.Instance.IsInProgress && !IsPlayPhase() && !player.Creature.IsDead)
+            if (CombatManager.Instance.IsInProgress && !IsPlayPhase() && !player.Creature.IsDead && !SelectionPending())
             {
                 var stuckState = CombatManager.Instance.DebugOnlyGetState();
                 var stuckEnemies = stuckState?.Enemies?.Where(e => e != null && e.IsAlive)
@@ -1166,6 +1281,7 @@ public class RunSimulator
                         _syncCtx.Pump();
                         if (endTurnTask.IsCompleted) break;
                         if (_turnStarted.IsSet || _combatEnded.IsSet) break;
+                    if (SelectionPending()) break;
                         if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
                         if (IsPlayPhase()) break;
                         Thread.Sleep(10);
@@ -1216,6 +1332,7 @@ public class RunSimulator
             Thread.Sleep(50);
             _syncCtx.Pump();
             WaitForActionExecutor();
+            SettleBackground();
             return DetectDecisionPoint();
         }
 
@@ -1257,6 +1374,7 @@ public class RunSimulator
             Thread.Sleep(50);
             _syncCtx.Pump();
             WaitForActionExecutor();
+            SettleBackground();
             return DetectDecisionPoint();
         }
         if (_pendingCardReward != null)
@@ -1319,6 +1437,7 @@ public class RunSimulator
             // continues once the selector's TCS is fed by select_cards.
             var inv = merchantRoom.GetLocalInventory();
             var task = Task.Run(() => entry.OnTryPurchaseWrapper(inv));
+            _bgTask = task;
             for (int i = 0; i < 100; i++)
             {
                 _syncCtx.Pump();
@@ -1384,6 +1503,7 @@ public class RunSimulator
         {
             // Run on background thread so card selection can pause (same pattern as event options)
             var task = Task.Run(() => removal.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()));
+            _bgTask = task;
             for (int i = 0; i < 100; i++)
             {
                 _syncCtx.Pump();
@@ -1425,6 +1545,7 @@ public class RunSimulator
 
         _syncCtx.Pump();
         WaitForActionExecutor();
+        SettleBackground();
         return DetectDecisionPoint();
     }
 
@@ -1445,6 +1566,7 @@ public class RunSimulator
         _cardSelector.ResolvePendingByIndices(indices);
         _syncCtx.Pump();
         WaitForActionExecutor();
+        SettleBackground();
 
         // Extra wait for rest-site SMITH: the background ChooseLocalOption task
         // needs time to complete the upgrade after card selection resolves.
@@ -1479,6 +1601,7 @@ public class RunSimulator
             _cardSelector.CancelPending();
             _syncCtx.Pump();
             WaitForActionExecutor();
+            SettleBackground();
         }
         return DetectDecisionPoint();
     }
@@ -1596,6 +1719,7 @@ public class RunSimulator
             {
                 // Run on background thread so Smith card selection can pause
                 var task = Task.Run(() => RunManager.Instance.RestSiteSynchronizer.ChooseLocalOption(optionIndex));
+                _bgTask = task;
                 for (int i = 0; i < 100; i++)
                 {
                     _syncCtx.Pump();
@@ -1649,6 +1773,7 @@ public class RunSimulator
                         _lastEventOptionCount = options.Count;
                         // Run on thread pool so GetSelectedCards/GetSelectedCardReward can block
                         var task = Task.Run(() => options[optionIndex].Chosen());
+                        _bgTask = task;
                         for (int i = 0; i < 100; i++)
                         {
                             _syncCtx.Pump();
@@ -2188,6 +2313,13 @@ public class RunSimulator
                 // BUG-007: Override can_play for star-cost cards when player lacks stars
                 if (pcs != null && pcs.Stars < starCost)
                     cardInfo["can_play"] = false;
+            }
+            // A single-enemy card has nothing to hit while no enemy is targetable (e.g. Test
+            // Subject between phases); the game cancels the play, so don't offer it.
+            if (c.TargetType.ToString() == "AnyEnemy" && aliveEnemiesForTargeting.Count == 0)
+            {
+                cardInfo["can_play"] = false;
+                cardInfo["unplayable_reason"] = "no_target";
             }
             var kws = c.Keywords?.Where(k => k != CardKeyword.None).Select(k => k.ToString()).ToList();
             if (kws?.Count > 0) cardInfo["keywords"] = kws;
@@ -2903,6 +3035,9 @@ public class RunSimulator
                 {
                     _syncCtx.Pump();
                     if (!executor.IsRunning) break;
+                    // A prompt opened while waiting (e.g. a Replay/Glam second play of a
+                    // card that selects): the executor stays busy until the caller answers.
+                    if (_cardSelector.HasPending || _cardSelector.HasPendingReward) return;
                     Thread.Sleep(1);
                 }
             }
@@ -3118,6 +3253,7 @@ public class RunSimulator
         // Patch TalkCmd.Play to a no-op (issue #64). Monster speech-bubble VFX during
         // moves (e.g. BygoneEffigy.WakeMove) NRE in headless and break the enemy turn.
         PatchTalkCmd();
+        PatchPresentationHooks();
 
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
@@ -3168,15 +3304,16 @@ public class RunSimulator
         }
     }
 
-    private Player? CreatePlayer(string characterName)
+    private Player? CreatePlayer(string characterName, UnlockState? unlocks = null)
     {
+        var u = unlocks ?? UnlockState.all;
         return characterName.ToLowerInvariant() switch
         {
-            "ironclad" => Player.CreateForNewRun<Ironclad>(UnlockState.all, 1uL),
-            "silent" => Player.CreateForNewRun<Silent>(UnlockState.all, 1uL),
-            "defect" => Player.CreateForNewRun<Defect>(UnlockState.all, 1uL),
-            "regent" => Player.CreateForNewRun<Regent>(UnlockState.all, 1uL),
-            "necrobinder" => Player.CreateForNewRun<Necrobinder>(UnlockState.all, 1uL),
+            "ironclad" => Player.CreateForNewRun<Ironclad>(u, 1uL),
+            "silent" => Player.CreateForNewRun<Silent>(u, 1uL),
+            "defect" => Player.CreateForNewRun<Defect>(u, 1uL),
+            "regent" => Player.CreateForNewRun<Regent>(u, 1uL),
+            "necrobinder" => Player.CreateForNewRun<Necrobinder>(u, 1uL),
             _ => null
         };
     }
@@ -3250,6 +3387,43 @@ public class RunSimulator
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[WARN] Failed to patch Cmd.Wait: {ex.Message}");
+        }
+    }
+
+    // Monster hooks whose work after touching a Godot node is presentation only (death SFX,
+    // Spine animations, boss backgrounds). Headless node singletons are null, and the
+    // NullReferenceException cut the kill / Died flow short: Kaiser Crab rockets killed the
+    // combat turn loop, Soul Nexus skipped any Died handler registered after it. A finalizer
+    // swallows only that NullReferenceException; everything before it already ran.
+    private static readonly (string type, string method)[] PresentationHooks =
+    {
+        ("MegaCrit.Sts2.Core.Models.Monsters.Rocket", "BeforeDeath"),
+        ("MegaCrit.Sts2.Core.Models.Monsters.Crusher", "BeforeDeath"),
+        ("MegaCrit.Sts2.Core.Models.Monsters.SoulNexus", "AfterDeath"),
+    };
+
+    private static void PatchPresentationHooks()
+    {
+        var harmony = new Harmony("sts2headless.presentation");
+        var asm = typeof(CombatManager).Assembly;
+        foreach (var (typeName, methodName) in PresentationHooks)
+        {
+            try
+            {
+                var m = asm.GetType(typeName)?.GetMethod(methodName,
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+                if (m == null)
+                {
+                    Console.Error.WriteLine($"[WARN] Presentation hook not found: {typeName}.{methodName}");
+                    continue;
+                }
+                var finalizer = typeof(YieldPatches).GetMethod(
+                    m.ReturnType == typeof(Task) ? nameof(YieldPatches.SwallowPresentationNreTask) : nameof(YieldPatches.SwallowPresentationNre),
+                    BindingFlags.Static | BindingFlags.Public);
+                harmony.Patch(m, finalizer: new HarmonyMethod(finalizer));
+                Console.Error.WriteLine($"[INFO] Guarded presentation hook {typeName.Split('.').Last()}.{methodName}");
+            }
+            catch (Exception ex) { Console.Error.WriteLine($"[WARN] Guarding {typeName}.{methodName}: {ex.Message}"); }
         }
     }
 
@@ -3355,11 +3529,16 @@ public class RunSimulator
             return _pendingTcs.Task;
         }
 
+        // Clear the pending state BEFORE completing the task: TrySetResult runs the game's
+        // continuation inline, and that continuation can open the next prompt right away
+        // (e.g. a Glam/Replay second play of the same card). Clearing afterwards erased the
+        // new prompt and left the game waiting forever.
         public void ResolvePending(IEnumerable<CardModel> selected)
         {
-            _pendingTcs?.TrySetResult(selected);
+            var tcs = _pendingTcs;
             PendingOptions = null;
             _pendingTcs = null;
+            tcs?.TrySetResult(selected);
         }
 
         public void ResolvePendingByIndices(int[] indices)
@@ -3374,9 +3553,10 @@ public class RunSimulator
 
         public void CancelPending()
         {
-            _pendingTcs?.TrySetResult(Array.Empty<CardModel>());
+            var tcs = _pendingTcs;
             PendingOptions = null;
             _pendingTcs = null;
+            tcs?.TrySetResult(Array.Empty<CardModel>());
         }
 
         // Pending card reward from events (GetSelectedCardReward blocks until resolved)
@@ -3413,6 +3593,20 @@ public class RunSimulator
 
         public bool HasPendingReward => PendingRewardCards != null && _rewardWait != null;
 
+        // Release anything a previous run left waiting on this selector.
+        public void Reset()
+        {
+            var pendingTcs = _pendingTcs;
+            var rewardWait = _rewardWait;
+            PendingOptions = null;
+            _pendingTcs = null;
+            _rewardChoice = -1;
+            PendingRewardCards = null;
+            _rewardWait = null;
+            pendingTcs?.TrySetResult(Array.Empty<CardModel>());
+            rewardWait?.Set();
+        }
+
         public void ResolveReward(int index)
         {
             _rewardChoice = index;
@@ -3428,6 +3622,17 @@ public class RunSimulator
 
     internal static class YieldPatches
     {
+        /// <summary>Harmony finalizer: drop a headless-null Godot node NRE from a presentation hook.</summary>
+        public static Exception? SwallowPresentationNre(Exception? __exception) =>
+            __exception is NullReferenceException ? null : __exception;
+
+        public static Exception? SwallowPresentationNreTask(Exception? __exception, ref Task __result)
+        {
+            if (__exception is not NullReferenceException) return __exception;
+            __result ??= Task.CompletedTask;
+            return null;
+        }
+
         // Only suppress Task.Yield() when this flag is set (during end_turn processing)
         public static volatile bool SuppressYield;
 
@@ -3908,6 +4113,186 @@ public class RunSimulator
         };
     }
 
+    #region Snapshot / restore
+
+    // A checkpoint is a state the engine can rebuild exactly in this process: run start
+    // (the start_run command), a loaded save, or the pre-entry save of a map node plus the
+    // node. Every state-changing command after it is logged. A snapshot is (checkpoint,
+    // copy of the log); restore rebuilds the checkpoint and replays the log. The game is
+    // deterministic, so this reproduces the same state (verify with `checksum`). This is
+    // the same shape as the game's own CombatReplay (SerializableRun + recorded actions).
+    private sealed class Checkpoint
+    {
+        public string Kind = "";        // "start" | "load" | "node"
+        public string? CommandJson;     // start: the start_run command
+        public string? SaveJson;        // load / node: SerializableRun JSON
+        public MapCoord Coord;          // node: the coordinate entered
+    }
+
+    private const int MaxCheckpoints = 512;
+    private const int MaxSnapshots = 8192;
+    private readonly Dictionary<int, Checkpoint> _checkpoints = new();
+    private readonly Dictionary<int, (int checkpoint, List<string> commands)> _snapshots = new();
+    private int _nextCheckpointId = 1, _nextSnapshotId = 1, _currentCheckpoint;
+    private List<string> _commandLog = new();
+    private bool _replaying;
+
+    /// <summary>Program's command dispatcher, used to replay logged commands.</summary>
+    public Func<System.Text.Json.JsonElement, Dictionary<string, object?>?>? CommandHandler { get; set; }
+
+    private void NewCheckpoint(Checkpoint cp)
+    {
+        if (_replaying) return;
+        var id = _nextCheckpointId++;
+        _checkpoints[id] = cp;
+        _currentCheckpoint = id;
+        _commandLog = new List<string>();
+        while (_checkpoints.Count > MaxCheckpoints)
+        {
+            var oldest = _checkpoints.Keys.Min();
+            _checkpoints.Remove(oldest);
+            foreach (var sid in _snapshots.Where(kv => kv.Value.checkpoint == oldest).Select(kv => kv.Key).ToList())
+                _snapshots.Remove(sid);
+        }
+    }
+
+    public void OnStartRunCommand(string commandJson) =>
+        NewCheckpoint(new Checkpoint { Kind = "start", CommandJson = commandJson });
+
+    public void OnLoadSaveCommand(string saveJson) =>
+        NewCheckpoint(new Checkpoint { Kind = "load", SaveJson = saveJson });
+
+    /// <summary>Called by Program before executing a state-changing command.</summary>
+    public void RecordCommand(string commandJson)
+    {
+        if (!_replaying && _currentCheckpoint != 0)
+            _commandLog.Add(commandJson);
+    }
+
+    public Dictionary<string, object?> Snapshot()
+    {
+        if (_runState == null || _currentCheckpoint == 0)
+            return Error("No run in progress");
+        var id = _nextSnapshotId++;
+        _snapshots[id] = (_currentCheckpoint, new List<string>(_commandLog));
+        while (_snapshots.Count > MaxSnapshots)
+            _snapshots.Remove(_snapshots.Keys.Min());
+        return new Dictionary<string, object?>
+        {
+            ["type"] = "snapshot",
+            ["id"] = id,
+            ["checkpoint"] = _currentCheckpoint,
+            ["replay_length"] = _commandLog.Count,
+        };
+    }
+
+    public Dictionary<string, object?> DropSnapshots()
+    {
+        var n = _snapshots.Count;
+        _snapshots.Clear();
+        return new Dictionary<string, object?> { ["type"] = "ok", ["dropped"] = n };
+    }
+
+    private static bool IsError(Dictionary<string, object?>? r) =>
+        r == null || (r.TryGetValue("type", out var t) && t as string == "error");
+
+    public Dictionary<string, object?> Restore(int snapshotId)
+    {
+        if (!_snapshots.TryGetValue(snapshotId, out var snap))
+            return Error($"Unknown snapshot {snapshotId}");
+        if (!_checkpoints.TryGetValue(snap.checkpoint, out var cp))
+            return Error($"Checkpoint of snapshot {snapshotId} was evicted");
+        if (CommandHandler == null)
+            return Error("Restore needs a command handler");
+
+        _replaying = true;
+        try
+        {
+            Dictionary<string, object?>? result;
+            switch (cp.Kind)
+            {
+                case "start":
+                    using (var doc = System.Text.Json.JsonDocument.Parse(cp.CommandJson!))
+                        result = CommandHandler(doc.RootElement.Clone());
+                    break;
+                case "load":
+                    result = LoadSave(cp.SaveJson!);
+                    break;
+                default:
+                    result = LoadSave(cp.SaveJson!);
+                    if (!IsError(result))
+                        result = ExecuteAction("select_map_node", new Dictionary<string, object?>
+                        {
+                            ["col"] = (int)cp.Coord.col,
+                            ["row"] = (int)cp.Coord.row,
+                        });
+                    break;
+            }
+            if (IsError(result))
+                return Error($"Restore: rebuilding checkpoint {snap.checkpoint} ({cp.Kind}) failed: {result?.GetValueOrDefault("message")}");
+
+            for (int i = 0; i < snap.commands.Count; i++)
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(snap.commands[i]);
+                result = CommandHandler(doc.RootElement.Clone());
+                if (IsError(result))
+                    return Error($"Restore: replaying command {i} failed: {result?.GetValueOrDefault("message")}");
+            }
+
+            _currentCheckpoint = snap.checkpoint;
+            _commandLog = new List<string>(snap.commands);
+            return result ?? DetectDecisionPoint();
+        }
+        finally
+        {
+            _replaying = false;
+        }
+    }
+
+    /// <summary>
+    /// Fingerprints for verifying restores: the game's own full combat state (the one it
+    /// checksums in multiplayer) and the run-level save without timing/metric fields.
+    /// </summary>
+    public Dictionary<string, object?> Checksum(bool dump = false)
+    {
+        if (_runState == null) return Error("No run in progress");
+        var result = new Dictionary<string, object?> { ["type"] = "checksum" };
+        try
+        {
+            if (CombatManager.Instance.IsInProgress)
+            {
+                var full = MegaCrit.Sts2.Core.Entities.Multiplayer.NetFullCombatState.FromRun(_runState, null!);
+                var w = new MegaCrit.Sts2.Core.Multiplayer.Serialization.PacketWriter();
+                full.Serialize(w);
+                w.ZeroByteRemainder();
+                var bytes = w.Buffer.AsSpan(0, w.BytePosition).ToArray();
+                result["combat_raw"] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes))[..16];
+                // The dump minus multiplayer sync counters (choice/reward/action/hook ids),
+                // which restart after a load but are not game state.
+                var text = full.ToString();
+                var stateLines = text.Split('\n').Where(l =>
+                    !l.StartsWith("Choice IDs:") && !l.StartsWith("Reward IDs:") &&
+                    !l.StartsWith("Last executed action ID:") && !l.StartsWith("Last executed hook ID:"));
+                result["combat"] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(string.Join("\n", stateLines))))[..16];
+                if (dump) result["combat_dump"] = text;
+            }
+        }
+        catch (Exception ex) { result["combat_error"] = $"{ex.GetType().Name}: {ex.Message}"; }
+        try
+        {
+            var node = System.Text.Json.Nodes.JsonNode.Parse(SaveManager.ToJson(RunManager.Instance.ToSave(new MapRoom())))!.AsObject();
+            foreach (var k in new[] { "save_time", "run_time", "num_reloads", "start_time" }) node.Remove(k);
+            var text = node.ToJsonString();
+            if (dump) result["run_dump"] = text;
+            result["run"] = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)))[..16];
+        }
+        catch (Exception ex) { result["run_error"] = $"{ex.GetType().Name}: {ex.Message}"; }
+        return result;
+    }
+
+    #endregion
+
     public void CleanUp()
     {
         try
@@ -3920,6 +4305,73 @@ public class RunSimulator
         {
             Log($"CleanUp exception: {ex.Message}");
         }
+        ResetPerRunFields();
+    }
+
+    private void RegisterCombatHandlersOnce()
+    {
+        if (_combatHandlersRegistered) return;
+        CombatManager.Instance.TurnStarted += _ => _turnStarted.Set();
+        CombatManager.Instance.CombatEnded += _ => _combatEnded.Set();
+        _combatHandlersRegistered = true;
+    }
+
+    // Profile progress (discovered cards/potions/enemies, stats) is process-global. A fresh
+    // process starts from defaults; reset it between runs so a reused process (and every
+    // restore) records discoveries exactly like a fresh one.
+    private static string? _pristineProgressJson;
+
+    private static void CapturePristineProgressOnce()
+    {
+        try
+        {
+            if (_pristineProgressJson != null || !SaveManager.Instance.IsProfileInitialized) return;
+            _pristineProgressJson = SaveManager.ToJson(SaveManager.Instance.Progress.ToSerializable());
+        }
+        catch (Exception ex) { Log($"CapturePristineProgressOnce: {ex.Message}"); }
+    }
+
+    private static void ResetProfileProgress()
+    {
+        try
+        {
+            if (_pristineProgressJson == null || !SaveManager.Instance.IsProfileInitialized) return;
+            var read = SaveManager.FromJson<SerializableProgress>(_pristineProgressJson);
+            if (!read.Success || read.SaveData == null)
+            {
+                Log($"ResetProfileProgress: cannot parse startup progress ({read.Status})");
+                return;
+            }
+            SaveManager.Instance.Progress = ProgressState.FromSerializable(
+                read.SaveData, new MegaCrit.Sts2.Core.Saves.Validation.DeserializationContext());
+        }
+        catch (Exception ex) { Log($"ResetProfileProgress: {ex.Message}"); }
+    }
+
+    private void ResetPerRunFields()
+    {
+        ResetProfileProgress();
+        try { _cardSelectorScope?.Dispose(); }
+        catch (Exception ex) { Log($"Card selector dispose exception: {ex.Message}"); }
+        _cardSelectorScope = null;
+        try { CardSelectCmd.Reset(); }
+        catch (Exception ex) { Log($"CardSelectCmd.Reset exception: {ex.Message}"); }
+        _cardSelector.Reset();
+        // A previous run's background task must not keep mutating game singletons.
+        try { _bgTask?.Wait(2000); } catch { }
+        _bgTask = null;
+        _eventOptionChosen = false;
+        _lastEventOptionCount = 0;
+        _pendingRewards = null;
+        _pendingCardReward = null;
+        _rewardsProcessed = false;
+        _goldBeforeCombat = 0;
+        _lastKnownHp = 0;
+        _pendingBundles = null;
+        _pendingBundleTcs = null;
+        _turnStarted.Reset();
+        _combatEnded.Reset();
+        YieldPatches.SuppressYield = false;
     }
 
     #endregion

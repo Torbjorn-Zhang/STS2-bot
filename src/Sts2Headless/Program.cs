@@ -73,6 +73,7 @@ class Program
         };
 
         var sim = new RunSimulator();
+        sim.CommandHandler = c => HandleCommand(sim, c);
         WriteLine(new Dictionary<string, object?> { ["type"] = "ready", ["version"] = "0.2.0" });
 
         string? line;
@@ -85,6 +86,9 @@ class Program
             try
             {
                 var cmd = JsonSerializer.Deserialize<JsonElement>(line);
+                // Commands that change game state are logged for snapshot/restore replay.
+                if (cmd.TryGetProperty("cmd", out var c) && c.GetString() is "action" or "set_player" or "enter_room" or "set_draw_order")
+                    sim.RecordCommand(line);
                 result = HandleCommand(sim, cmd);
             }
             catch (JsonException ex)
@@ -114,12 +118,18 @@ class Program
         switch (cmdType)
         {
             case "start_run":
-                return sim.StartRun(
+            {
+                var started = sim.StartRun(
                     cmd.TryGetProperty("character", out var ch) ? ch.GetString() ?? "Ironclad" : "Ironclad",
                     cmd.TryGetProperty("ascension", out var asc) ? asc.GetInt32() : 0,
                     cmd.TryGetProperty("seed", out var s) ? s.GetString() : null,
-                    cmd.TryGetProperty("lang", out var lang) ? lang.GetString() ?? "en" : "en"
+                    cmd.TryGetProperty("lang", out var lang) ? lang.GetString() ?? "en" : "en",
+                    cmd.TryGetProperty("unlock_from_save", out var ufs) ? ufs.GetString() : null
                 );
+                if (!(started.TryGetValue("type", out var st) && st as string == "error"))
+                    sim.OnStartRunCommand(cmd.GetRawText());
+                return started;
+            }
 
             case "action":
             {
@@ -156,7 +166,10 @@ class Program
                 if (saveJson == null)
                     return new Dictionary<string, object?> { ["type"] = "error", ["message"] = "Provide 'path' or 'json' for load_save" };
                 var loadLang = cmd.TryGetProperty("lang", out var le) ? (le.GetString() ?? "en") : "en";
-                return sim.LoadSave(saveJson, loadLang);
+                var loaded = sim.LoadSave(saveJson, loadLang);
+                if (!(loaded.TryGetValue("type", out var lt) && lt as string == "error"))
+                    sim.OnLoadSaveCommand(saveJson);
+                return loaded;
             }
             case "get_map":
                 return sim.GetFullMap();
@@ -191,6 +204,20 @@ class Program
                 var outputPath = cmd.TryGetProperty("path", out var op) ? op.GetString() : null;
                 return sim.SaveCheckpoint(outputPath);
             }
+
+            case "snapshot":
+                return sim.Snapshot();
+
+            case "restore":
+                return cmd.TryGetProperty("id", out var sid)
+                    ? sim.Restore(sid.GetInt32())
+                    : new Dictionary<string, object?> { ["type"] = "error", ["message"] = "restore requires 'id'" };
+
+            case "drop_snapshots":
+                return sim.DropSnapshots();
+
+            case "checksum":
+                return sim.Checksum(cmd.TryGetProperty("dump", out var dmp) && dmp.GetBoolean());
 
             case "quit":
             {
