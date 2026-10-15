@@ -1,4 +1,4 @@
-# sts2-ai
+# STS2-bot
 
 Experiments toward an AI for **Slay the Spire 2**. The simulator is the game itself: `sts2-cli` runs the game's own `sts2.dll` headless, with no Godot and no rendering. On top of it, this repo adds process reuse, mid-combat snapshot/restore for search, a validation harness, and (in progress) a combat search bot.
 
