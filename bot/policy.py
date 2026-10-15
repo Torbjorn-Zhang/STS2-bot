@@ -66,11 +66,30 @@ def choose_map(sim, st):
     return ("select_map_node", {"col": best["col"], "row": best["row"]})
 
 
-def card_value(c, deck_size):
+def card_key(c):
+    """Card id without prefix; shop entries only carry a display name."""
     cid = (c.get("id") or "").replace("CARD.", "")
-    v = RARITY.get(c.get("rarity"), 1.0) + GOOD.get(cid, 0.0)
+    return cid or re.sub(r"[^A-Z0-9]+", "_", (c.get("name") or "").upper()).strip("_")
+
+
+def stat_value(c):
+    """Damage / block per energy from the card's own numbers (no tier list needed)."""
+    st = c.get("stats") or {}
+    cost = c.get("card_cost", c.get("cost"))
+    energy = cost if isinstance(cost, int) and cost > 0 else 0.7
+    desc = (c.get("description") or "").lower()
+    hits = 2 if "twice" in desc else 3 if "3 times" in desc or "three times" in desc else 1
+    dmg = (st.get("damage") or 0) * hits
+    if "all enemies" in desc:
+        dmg *= 1.5
+    return 0.12 * dmg / energy + 0.06 * (st.get("block") or 0) / energy
+
+
+def card_value(c, deck_size):
+    cid = card_key(c)
+    v = RARITY.get(c.get("rarity"), 1.0) + GOOD.get(cid, 0.0) + stat_value(c)
     if c.get("type") == "Attack":
-        v += 0.5
+        v += 0.3
     elif c.get("type") == "Power":
         v += 0.3
     if c.get("type") in ("Curse", "Status"):
@@ -90,12 +109,12 @@ def choose_card_reward(st):
 
 
 def upgrade_priority(c):
-    cid = (c.get("id") or "").replace("CARD.", "")
+    cid = card_key(c)
     if cid == "BASH":
         return 10
     if cid.startswith(BASIC):
         return 0 if cid.startswith("STRIKE_") else -1
-    return 3 + RARITY.get(c.get("rarity"), 1.0)
+    return 3 + RARITY.get(c.get("rarity"), 1.0) + stat_value(c)
 
 
 def choose_card_select(st):
@@ -106,9 +125,11 @@ def choose_card_select(st):
     room = (st.get("context") or {}).get("room_type")
     if room == "RestSite":                       # smith
         order = sorted(cards, key=upgrade_priority, reverse=True)
-    else:                                        # shop removal / event remove-transform: basics first
-        order = sorted(cards, key=lambda c: (0 if (c.get("id") or "").replace("CARD.", "").startswith(BASIC) else 1,
-                                             RARITY.get(c.get("rarity"), 1.0)))
+    else:                                        # shop removal / event remove-transform: Strikes, then Defends
+        def rank(c):
+            k = card_key(c)
+            return (0 if k.startswith("STRIKE_") else 1 if k.startswith("DEFEND_") else 2, RARITY.get(c.get("rarity"), 1.0))
+        order = sorted(cards, key=rank)
     n = max(1, lo) if hi >= 1 else lo
     return ("select_cards", {"indices": ",".join(str(c.get("index", i)) for i, c in enumerate(order[:n]))})
 
@@ -131,8 +152,37 @@ def choose_event(st):
     return ("choose_option", {"option_index": best["index"]})
 
 
-def decide(sim, st, avoid=()):
-    """avoid: JSON-encoded actions that made no progress from this exact state before."""
+def choose_shop(st, memo):
+    """Remove a Strike, then buy up to two good cards and one potion if affordable."""
+    ctx = st.get("context") or {}
+    m = memo.setdefault(("shop", ctx.get("act"), ctx.get("floor")), {"removed": False, "cards": 0, "potions": 0})
+    gold = (st.get("player") or {}).get("gold") or 0
+    cost = st.get("card_removal_cost")
+    if not m["removed"] and isinstance(cost, int) and gold >= cost:
+        m["removed"] = True
+        return ("remove_card", {})
+    deck = (st.get("player") or {}).get("deck_size") or 10
+    cards = [c for c in st.get("cards") or [] if c.get("is_stocked", True) and (c.get("cost") or 9999) <= gold]
+    if cards and m["cards"] < 2:
+        best = max(cards, key=lambda c: card_value(c, deck))
+        if card_value(best, deck) >= 2.6:
+            m["cards"] += 1
+            return ("buy_card", {"card_index": best["index"]})
+    held = len([p for p in (st.get("player") or {}).get("potions") or [] if p])
+    pots = [p for p in st.get("potions") or [] if p.get("is_stocked", True) and (p.get("cost") or 9999) <= gold]
+    if pots and held < 2 and m["potions"] < 1:
+        m["potions"] += 1
+        return ("buy_potion", {"potion_index": min(pots, key=lambda p: p.get("cost") or 0)["index"]})
+    return ("leave_room", {})
+
+
+def decide(sim, st, avoid=(), memo=None):
+    """avoid: JSON-encoded actions that made no progress from this exact state before.
+    memo: per-run scratch dict (shop visits)."""
+    if st.get("decision") == "shop":
+        a = choose_shop(st, memo if memo is not None else {})
+        if json.dumps(a, sort_keys=True) not in avoid:
+            return a
     a = _decide(sim, st)
     if json.dumps(a, sort_keys=True) not in avoid:
         return a

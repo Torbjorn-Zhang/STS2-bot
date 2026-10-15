@@ -26,7 +26,7 @@ def play_run(sim, seed, character, acts, max_nodes):
     planner = TurnPlanner(sim, max_nodes=max_nodes)
     st = sim.send({"cmd": "start_run", "character": character, "seed": seed})
     t0, steps, fights, hp_log = time.perf_counter(), 0, 0, []
-    dead_ends, loops = {}, 0
+    dead_ends, loops, memo = {}, 0, {}
     while steps < 5000:
         d = st.get("decision")
         act = (st.get("context") or {}).get("act") or 1
@@ -48,7 +48,7 @@ def play_run(sim, seed, character, acts, max_nodes):
                            "hp_after": (st.get("player") or {}).get("hp"), "won": st.get("decision") != "game_over",
                            "enemy_hp_left": last_enemies.get("hp"), "rounds": last_enemies.get("round")})
             continue
-        a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()))
+        a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
         nxt = sim.act(a[0], **a[1])
         steps += 1
         if nxt.get("type") != "error" and _key(nxt) == _key(st):
