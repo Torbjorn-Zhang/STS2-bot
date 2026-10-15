@@ -115,14 +115,21 @@ def canon(st):
     return json.dumps(st, sort_keys=True)
 
 
+STALL_ROUND = 30   # past this round the learned value is ignored for the rest of the fight
+
+
 class TurnPlanner:
     """value: optional learned model (value.ValueModel) that scores leaves instead of
     the hand-written evaluate(); explore: probability of picking a random top-3 leaf
     (data collection only); recorder(state): called with each end-of-turn state."""
 
-    def __init__(self, sim, max_nodes=400, max_depth=10, value=None, explore=0.0, rng=None, recorder=None):
+    def __init__(self, sim, max_nodes=400, max_depth=10, value=None, explore=0.0, rng=None, recorder=None,
+                 value_weight=None):
         self.sim, self.max_nodes, self.max_depth = sim, max_nodes, max_depth
         self.value, self.explore, self.rng, self.recorder = value, explore, rng, recorder
+        # None: the model's prediction is the score. A number w: hand-written evaluation
+        # plus w * prediction (the model only adds its longer-horizon judgement).
+        self.value_weight = value_weight
         self.stats = Counter()
 
     def _snap(self):
@@ -134,18 +141,26 @@ class TurnPlanner:
     def _score_leaves(self, root, leaves):
         """leaves: [(kind, path, state)], kind in end / terminal / partial."""
         scores = [evaluate(root, st) for _, _, st in leaves]
-        if self.value is None:
+        if self.value is None or (root.get("round") or 0) > STALL_ROUND:
+            # a fight this long means the model is stalling (e.g. predicting more than the
+            # current HP for a live position, so it never lands the kill): finish it by hand
             return [sc - (0.01 if kind == "partial" else 0.0) for sc, (kind, _, _) in zip(scores, leaves)]
         from value import DEATH_VALUE
         idx = [i for i, (kind, _, st) in enumerate(leaves) if kind != "terminal"]
         preds = self.value.predict([leaves[i][2] for i in idx])
         out = list(scores)
         for i, v in zip(idx, preds):
-            out[i] = float(v) + 1e-3 * scores[i]          # tiny heuristic tie-break
+            if self.value_weight is None:
+                # the fight can't end with more HP than now (in-combat heals are rare), and a
+                # prediction above it would rank "keep the enemy alive" over winning
+                hp = (leaves[i][2].get("player") or {}).get("hp") or 0
+                out[i] = min(float(v), hp) + 1e-3 * scores[i]      # tiny heuristic tie-break
+            else:
+                out[i] = scores[i] + self.value_weight * float(v)
         for i, (kind, _, st) in enumerate(leaves):
-            if kind == "terminal":
+            if kind == "terminal" and self.value_weight is None:
                 won = st.get("decision") != "game_over" or st.get("victory")
-                out[i] = ((st.get("player") or {}).get("hp") or 0) + 1.0 if won else DEATH_VALUE
+                out[i] = ((st.get("player") or {}).get("hp") or 0) + 2.0 if won else DEATH_VALUE
         return out
 
     def plan(self, root):

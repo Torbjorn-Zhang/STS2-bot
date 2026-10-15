@@ -29,7 +29,7 @@ def collect_run(sim, seed, args, model):
     pending = []
     planner = TurnPlanner(sim, max_nodes=args.nodes, value=model, explore=args.explore, rng=rng,
                           recorder=lambda s: pending.append((features(s), s.get("round"))))
-    st = sim.send({"cmd": "start_run", "character": args.character, "seed": seed})
+    st = sim.send({"cmd": "start_run", "character": args.character, "seed": seed, "ascension": args.ascension})
     rows, fight, steps, dead_ends, memo = [], 0, 0, {}, {}
     while steps < 5000:
         d = st.get("decision")
@@ -66,6 +66,7 @@ def main():
     ap.add_argument("--explore", type=float, default=0.1)
     ap.add_argument("--model", default=None)
     ap.add_argument("--acts", type=int, default=1)
+    ap.add_argument("--ascension", type=int, default=0)
     ap.add_argument("--nodes", type=int, default=400)
     ap.add_argument("--character", default="Ironclad")
     ap.add_argument("--seed-prefix", default="data")

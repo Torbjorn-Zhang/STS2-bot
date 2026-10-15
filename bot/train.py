@@ -33,6 +33,8 @@ def main():
     ap.add_argument("data", nargs="+")
     ap.add_argument("--out", default=os.path.join(HERE, "models", "value.pkl"))
     ap.add_argument("--test-frac", type=float, default=0.2)
+    ap.add_argument("--monotonic", action="store_true",
+                    help="force common-sense directions (more block/HP better, more enemy HP/strength worse)")
     args = ap.parse_args()
 
     rows = load(args.data)
@@ -44,8 +46,15 @@ def main():
     Xtr, ytr = np.array([r["x"] for r in tr]), np.array([r["y"] for r in tr])
     Xte, yte = np.array([r["x"] for r in te]), np.array([r["y"] for r in te])
 
+    cst = None
+    if args.monotonic:
+        up = {"hp", "hp_frac", "block", "hp_after", "strength", "dexterity", "enemy_vuln", "enemy_weak", "potions"}
+        down = {"unblocked", "incoming", "enemy_hp", "enemy_hp_max_single", "enemy_block", "enemy_strength",
+                "n_enemies", "p_vuln", "p_weak", "p_frail", "enemy_scaling", "n_attacking"}
+        cst = [1 if f in up else -1 if f in down else 0 for f in FEATURES]
     model = HistGradientBoostingRegressor(max_iter=400, learning_rate=0.05, max_leaf_nodes=31,
-                                          min_samples_leaf=40, l2_regularization=1.0, random_state=0)
+                                          min_samples_leaf=40, l2_regularization=1.0, random_state=0,
+                                          monotonic_cst=cst)
     model.fit(Xtr, ytr)
     pred = model.predict(Xte)
 

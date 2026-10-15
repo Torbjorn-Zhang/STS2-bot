@@ -5,6 +5,12 @@ target = player HP when the fight ends, or DEATH_VALUE if the player dies.
 """
 
 import os
+
+# Workers already run in parallel; one predict call must not grab every core
+# (HistGradientBoosting uses OpenMP: 6 workers x 10 threads pushed the load to ~40).
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 import pickle
 
 from combat import alive, incoming_damage, potions, powers
