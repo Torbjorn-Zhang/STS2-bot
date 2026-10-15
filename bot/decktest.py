@@ -26,18 +26,38 @@ def graded(won, hp, enemy_left, enemy_max):
 
 
 def _to_map(sim, st):
-    for _ in range(6):
+    """Finish the current room with simple, sim-free choices until the map shows."""
+    import policy
+    for _ in range(40):
         d = st.get("decision")
         if d == "map_select":
             return st
-        if d == "card_reward":
-            st = sim.act("skip_card_reward")
-        elif d in ("rest_site", "event_choice", "shop"):
-            st = sim.act("leave_room")
-        else:
-            st = sim.act("proceed")
-        if st.get("type") == "error":
+        if d is None or st.get("type") == "error" or d == "game_over":
             return None
+        if d == "card_reward":
+            a = policy.choose_card_reward_tier(st)
+        elif d == "card_select":
+            a = quick_policy(st) if (st.get("context") or {}).get("room_type") in ("Monster", "Elite", "Boss") \
+                else policy.choose_card_select(st)
+        elif d == "combat_play":
+            a = quick_policy(st)
+        elif d == "event_choice":
+            a = policy.choose_event(st)
+        elif d == "bundle_select":
+            a = ("select_bundle", {"bundle_index": 0})
+        elif d in ("rest_site", "shop"):
+            a = ("leave_room", {})
+        else:
+            a = ("proceed", {})
+        nxt = sim.act(a[0], **a[1])
+        if nxt.get("type") == "error":
+            if d == "combat_play":
+                nxt = sim.act("end_turn")
+            elif d in ("event_choice", "rest_site", "shop", "card_reward"):
+                nxt = sim.act("leave_room") if d != "card_reward" else sim.act("skip_card_reward")
+            if nxt.get("type") == "error":
+                return None
+        st = nxt
     return st if st.get("decision") == "map_select" else None
 
 
@@ -158,3 +178,10 @@ def evaluate_buys(sim, st, card_indices):
     arms = {i: [("buy_card", {"card_index": i})] for i in card_indices}
     arms[None] = []
     return evaluate_arms(sim, st, arms, tag="shop/")
+
+
+def evaluate_event(sim, st):
+    """Event / Neow / Ancient options: {option index: mean graded score}."""
+    opts = [o for o in st.get("options") or [] if not o.get("is_locked")]
+    arms = {o["index"]: [("choose_option", {"option_index": o["index"]})] for o in opts}
+    return evaluate_arms(sim, st, arms, tag="event/")

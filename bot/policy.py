@@ -65,7 +65,7 @@ ELITE_HP = {1: 0.55, 2: 0.7, 3: 0.7}   # take elites (relics) only from this HP 
 ELITE_VALUE = {1: 3.5, 2: 2.0, 3: 2.0}
 
 
-def node_value(kind, hp, row, act=1):
+def node_value(kind, hp, row, act=1, gold=0):
     if kind == "Monster":
         return 1.0 if hp > 0.4 else -1.0
     if kind == "Elite":
@@ -79,7 +79,8 @@ def node_value(kind, hp, row, act=1):
     if kind == "Unknown":
         return 1.0
     if kind == "Shop":
-        return 0.3
+        # removals and relics: gold left unspent at the end of an act is wasted strength
+        return 4.0 if gold >= 350 else 3.0 if gold >= 200 else 1.5 if gold >= 90 else 0.3
     return 0.0
 
 
@@ -102,6 +103,7 @@ def choose_map(sim, st):
     m = sim.send({"cmd": "get_map"})
     nodes = {(n["col"], n["row"]): n for row in m.get("rows", []) for n in row}
     act = (st.get("context") or {}).get("act") or 1
+    gold = (st.get("player") or {}).get("gold") or 0
     memo = {}
 
     def value(c, hp):
@@ -111,7 +113,7 @@ def choose_map(sim, st):
             if n is None:
                 memo[key] = 0.0
             else:
-                v = node_value(n["type"], hp, n["row"], act)
+                v = node_value(n["type"], hp, n["row"], act, gold)
                 hp2 = _hp_after(n["type"], hp, act)
                 if hp2 <= 0.05:
                     v -= 20.0
@@ -262,19 +264,50 @@ def boss_is_next(sim, st):
     return boss.get("row") is not None and cur.get("row") is not None and cur["row"] >= boss["row"] - 1
 
 
+HEAL_BELOW = 0.5   # away from the boss, smith unless HP is below this
+
+
 def choose_rest(st, sim=None):
     opts = [o for o in st.get("options") or [] if o.get("is_enabled", True)]
     # arrive at the boss healthy: the last rest site before it heals unless nearly full
-    want = "HEAL" if hp_ratio(st) < (0.9 if boss_is_next(sim, st) else 0.65) else "SMITH"
+    want = "HEAL" if hp_ratio(st) < (0.9 if boss_is_next(sim, st) else HEAL_BELOW) else "SMITH"
     pick = next((o for o in opts if o.get("option_id") == want), None) or (opts[0] if opts else None)
     return ("choose_option", {"option_index": pick["index"]}) if pick else ("leave_room", {})
 
 
-def choose_event(st):
+EVENT_TEXT_WEIGHT = 3.0   # graded-score points per keyword-score point in event choices
+# Neow's opening options, by title (the boss test says little on floor 1, where every
+# option still loses to the boss). Values are in keyword-score units; unknown titles
+# fall back to the keyword score.
+NEOW = {
+    "Precarious Shears": 3.0,   # remove 2 cards for a little HP
+    "Hefty Tablet": 2.5,        # choose a Rare card (plus an Injury)
+    "Booming Conch": 2.0,       # extra draw and energy in elite fights
+    "Neow's Torment": 1.8,      # a strong card
+    "Lead Paperweight": 1.5,    # choose a Colorless card
+    "Golden Pearl": 1.5,        # gold: removals and relics in shops
+    "Neow's Bones": 1.2,        # random relics, but curses
+    "Neow's Talisman": 0.8,     # upgrades a Strike and a Defend
+    "Winged Boots": 0.3,        # path freedom the bot does not use
+}
+
+
+def choose_event(st, sim=None):
     opts = [o for o in st.get("options") or [] if not o.get("is_locked")]
     if not opts:
         return ("leave_room", {})
     hp = hp_ratio(st)
+    neow = [o for o in opts if o.get("title") in NEOW]
+    if len(neow) == len(opts):
+        best = max(opts, key=lambda o: NEOW[o["title"]])
+        return ("choose_option", {"option_index": best["index"]})
+    if DECK_TEST and sim is not None and len(opts) > 1:
+        import decktest
+        scores = decktest.evaluate_event(sim, st)
+        if len(scores) > 1:
+            by = {o["index"]: o for o in opts}
+            best = max(scores, key=lambda k: scores[k] + EVENT_TEXT_WEIGHT * text_score(by[k], hp))
+            return ("choose_option", {"option_index": best})
     best = max(opts, key=lambda o: (text_score(o, hp), -o["index"]))
     return ("choose_option", {"option_index": best["index"]})
 
@@ -288,6 +321,18 @@ def choose_shop(st, memo, sim=None):
     if not m["removed"] and isinstance(cost, int) and gold >= cost:
         m["removed"] = True
         return ("remove_card", {})
+    relics = [r for r in st.get("relics") or [] if r.get("is_stocked", True) and (r.get("cost") or 9999) <= gold]
+    if relics and m.get("relics", 0) < 2:
+        best = max(relics, key=lambda r: r.get("cost") or 0)   # price follows rarity
+        veto = False
+        if DECK_TEST and sim is not None:
+            import decktest
+            sc = decktest.evaluate_arms(sim, st, {"buy": [("buy_relic", {"relic_index": best["index"]})], "none": []},
+                                        reps=6, tag="relic/")
+            veto = bool(sc) and sc.get("buy", 0) < sc.get("none", 0) - 5.0
+        m["relics"] = m.get("relics", 0) + 1
+        if not veto:
+            return ("buy_relic", {"relic_index": best["index"]})
     deck = (st.get("player") or {}).get("deck_size") or 10
     full = (st.get("player") or {}).get("deck")
     act = ctx.get("act") or 1
@@ -345,7 +390,7 @@ def _decide(sim, st):
     if d == "rest_site":
         return choose_rest(st, sim)
     if d == "event_choice":
-        return choose_event(st)
+        return choose_event(st, sim)
     if d == "bundle_select":
         return ("select_bundle", {"bundle_index": 0})
     if d == "shop":
