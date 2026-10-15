@@ -116,8 +116,13 @@ def canon(st):
 
 
 class TurnPlanner:
-    def __init__(self, sim, max_nodes=400, max_depth=10):
+    """value: optional learned model (value.ValueModel) that scores leaves instead of
+    the hand-written evaluate(); explore: probability of picking a random top-3 leaf
+    (data collection only); recorder(state): called with each end-of-turn state."""
+
+    def __init__(self, sim, max_nodes=400, max_depth=10, value=None, explore=0.0, rng=None, recorder=None):
         self.sim, self.max_nodes, self.max_depth = sim, max_nodes, max_depth
+        self.value, self.explore, self.rng, self.recorder = value, explore, rng, recorder
         self.stats = Counter()
 
     def _snap(self):
@@ -126,22 +131,35 @@ class TurnPlanner:
     def _restore(self, sid):
         return self.sim.send({"cmd": "restore", "id": sid})
 
+    def _score_leaves(self, root, leaves):
+        """leaves: [(kind, path, state)], kind in end / terminal / partial."""
+        scores = [evaluate(root, st) for _, _, st in leaves]
+        if self.value is None:
+            return [sc - (0.01 if kind == "partial" else 0.0) for sc, (kind, _, _) in zip(scores, leaves)]
+        from value import DEATH_VALUE
+        idx = [i for i, (kind, _, st) in enumerate(leaves) if kind != "terminal"]
+        preds = self.value.predict([leaves[i][2] for i in idx])
+        out = list(scores)
+        for i, v in zip(idx, preds):
+            out[i] = float(v) + 1e-3 * scores[i]          # tiny heuristic tie-break
+        for i, (kind, _, st) in enumerate(leaves):
+            if kind == "terminal":
+                won = st.get("decision") != "game_over" or st.get("victory")
+                out[i] = ((st.get("player") or {}).get("hp") or 0) + 1.0 if won else DEATH_VALUE
+        return out
+
     def plan(self, root):
         """Best action sequence from `root`. It ends with end_turn, a terminal state,
         or an action that revealed hidden information (then the caller replans)."""
         root_snap = self._snap()
-        best = [float("-inf"), [("end_turn", {})]]
+        leaves = []
         seen = {canon(root)}
         nodes = 0
-
-        def consider(score, path):
-            if score > best[0]:
-                best[0], best[1] = score, path
 
         def visit(st, path, snap_id):
             nonlocal nodes
             if st.get("decision") == "combat_play":
-                consider(evaluate(root, st), path + [("end_turn", {})])
+                leaves.append(("end", path + [("end_turn", {})], st))
             for a in legal_actions(st) + potion_actions(st):
                 if a[0] == "end_turn":
                     continue
@@ -160,10 +178,10 @@ class TurnPlanner:
                 p2 = path + [a]
                 d2 = s2.get("decision")
                 if d2 not in ("combat_play", "card_select"):
-                    consider(evaluate(root, s2), p2)
+                    leaves.append(("terminal", p2, s2))
                 elif reveals_hidden_info(st, s2) or len(p2) >= self.max_depth:
                     # stop here: what follows depends on information we don't have yet
-                    consider(evaluate(root, s2) - 0.01, p2)
+                    leaves.append(("partial", p2, s2))
                 else:
                     visit(s2, p2, self._snap())
 
@@ -172,7 +190,15 @@ class TurnPlanner:
         self.sim.send({"cmd": "drop_snapshots"})
         self.stats["plans"] += 1
         self.stats["nodes"] += nodes
-        return best[1], best[0]
+        if not leaves:
+            return [("end_turn", {})], float("-inf")
+        scores = self._score_leaves(root, leaves)
+        order = sorted(range(len(leaves)), key=lambda i: scores[i], reverse=True)
+        pick = order[0]
+        if self.explore and self.rng is not None and len(order) > 1 and self.rng.random() < self.explore:
+            pick = self.rng.choice(order[:3])
+            self.stats["explored"] += 1
+        return leaves[pick][1], scores[pick]
 
     def play_combat(self, state, max_actions=600, on_state=None):
         """Play until the combat ends. Returns the first non-combat state."""
@@ -183,6 +209,8 @@ class TurnPlanner:
             path, _ = self.plan(state)
             before = self._snap()
             for a in path:
+                if a[0] == "end_turn" and self.recorder is not None:
+                    self.recorder(state)
                 nxt = self.sim.act(a[0], **a[1])
                 n += 1
                 if nxt.get("type") == "error":

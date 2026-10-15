@@ -5,10 +5,12 @@ A combat search bot running on the headless engine (`../sts2-cli`), with simple 
 - `combat.py`: the turn planner. At each decision point it snapshots and runs a depth-first search over this turn's plays (cards, potions, card prompts), restoring between branches and merging identical states. It scores the end-of-turn state: HP after the enemies' announced attacks, damage dealt, kills, debuffs left on enemies, and lasting player powers.
   - **Fair play:** a branch stops at any action that reveals hidden information (draws or creates cards, shows draw-pile cards). The bot executes up to that point and replans with the real result. The enemy turn is never simulated; incoming damage comes from the visible intents.
 - `policy.py`: map DP, card rewards, rest/smith, events, Neow, card prompts outside combat.
+- `value.py`, `collect.py`, `train.py`: the learned evaluation. `collect.py` plays self-play runs (with a little exploration) and writes every end-of-turn state, labelled with how the fight ended: final HP, or -40 for death. `train.py` fits a gradient-boosted model, splitting train and test by run. `run.py --model models/value.pkl` uses the model instead of the hand-written evaluation. Iterating collect, train, play is the expert-iteration loop.
+- `engine.py`: restarts a worker's engine process once it passes 1.5 GB (`STS2_RECYCLE_MB`).
 - `run.py`: plays seeds in parallel (one reused engine process per worker) and writes `runs/<tag>.jsonl`.
 
 ```bash
-cd bot && ../.venv/bin/python run.py 30 --workers 6 --tag test     # Ironclad A0, stop after act 1
+cd bot && nice -n 19 ../.venv/bin/python run.py 30 --workers 4 --tag test   # Ironclad A0, stop after act 1
 ```
 
 Results so far (Ironclad, Ascension 0, stop after act 1). Rules were tuned by looking at losses on the `bot_*` seeds; the `val_*` seeds were never looked at:

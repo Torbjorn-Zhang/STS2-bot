@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import policy
 from combat import TurnPlanner
-from engine import Sim
+from engine import fresh_sim, maybe_recycle
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -22,8 +22,8 @@ def _key(st):
     return json.dumps(st, sort_keys=True)
 
 
-def play_run(sim, seed, character, acts, max_nodes):
-    planner = TurnPlanner(sim, max_nodes=max_nodes)
+def play_run(sim, seed, character, acts, max_nodes, model=None):
+    planner = TurnPlanner(sim, max_nodes=max_nodes, value=model)
     st = sim.send({"cmd": "start_run", "character": character, "seed": seed})
     t0, steps, fights, hp_log = time.perf_counter(), 0, 0, []
     dead_ends, loops, memo = {}, 0, {}
@@ -78,12 +78,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("n", type=int)
     ap.add_argument("--acts", type=int, default=1)
-    ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--character", default="Ironclad")
     ap.add_argument("--nodes", type=int, default=400)
     ap.add_argument("--tag", default="act1")
     ap.add_argument("--seed-prefix", default="bot")
+    ap.add_argument("--model", default=None, help="value model (models/value.pkl); default: hand-written evaluation")
     args = ap.parse_args()
+    model = None
+    if args.model:
+        from value import ValueModel
+        model = ValueModel(args.model)
 
     os.makedirs(os.path.join(HERE, "runs"), exist_ok=True)
     out_path = os.path.join(HERE, "runs", f"{args.tag}.jsonl")
@@ -91,11 +96,12 @@ def main():
     chunks = [seeds[i::args.workers] for i in range(args.workers)]
 
     def worker(chunk):
-        sim = Sim("Release", timeout=60)
+        sim = fresh_sim()
         res = []
         try:
             for s in chunk:
-                r = play_run(sim, s, args.character, args.acts, args.nodes)
+                sim = maybe_recycle(sim)
+                r = play_run(sim, s, args.character, args.acts, args.nodes, model)
                 res.append(r)
                 print(json.dumps({k: r[k] for k in ("seed", "cleared_acts", "died", "act", "floor", "room", "hp", "deck_size", "seconds")}), flush=True)
         finally:

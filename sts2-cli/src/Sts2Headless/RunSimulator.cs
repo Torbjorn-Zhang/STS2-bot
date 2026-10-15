@@ -4186,6 +4186,15 @@ public class RunSimulator
         };
     }
 
+    public Dictionary<string, object?> SnapshotStoreStats() => new()
+    {
+        ["checkpoints"] = _checkpoints.Count,
+        ["checkpoint_json_mb"] = _checkpoints.Values.Sum(c => (long)((c.SaveJson?.Length ?? 0) + (c.CommandJson?.Length ?? 0))) * 2 / 1048576.0,
+        ["snapshots"] = _snapshots.Count,
+        ["snapshot_commands"] = _snapshots.Values.Sum(v => (long)v.commands.Count),
+        ["command_log"] = _commandLog.Count,
+    };
+
     public Dictionary<string, object?> DropSnapshots()
     {
         var n = _snapshots.Count;
@@ -4348,8 +4357,45 @@ public class RunSimulator
         catch (Exception ex) { Log($"ResetProfileProgress: {ex.Message}"); }
     }
 
+    // Multiplayer bookkeeping singletons only unwind when a combat ends normally or a load
+    // finishes. Abandoning a run mid-combat (restore, new start_run) left pile subscriptions,
+    // CombatEnded handlers and per-net-service load counts behind, so old run object graphs
+    // stayed reachable: ~0.3-0.5 GB leaked per bot run.
+    private static void ReleaseNetSingletons()
+    {
+        // Nothing to release before the first run, and touching SaveManager.Instance before
+        // EnsureModelDbInitialized creates it too early (InitProfileId then fails).
+        if (!_modelDbInitialized) return;
+        var flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+        try
+        {
+            var db = MegaCrit.Sts2.Core.GameActions.Multiplayer.NetCombatCardDb.Instance;
+            db.GetType().GetMethod("OnCombatEnded", flags)?.Invoke(db, new object?[] { null });
+            db.GetType().GetMethod("ClearCardsForTesting", flags)?.Invoke(db, null);
+        }
+        catch (Exception ex) { Log($"ReleaseNetSingletons(card db): {ex.Message}"); }
+        try
+        {
+            var counts = typeof(MegaCrit.Sts2.Core.Multiplayer.Game.NetLoadingHandle)
+                .GetField("_loadCounts", flags)?.GetValue(null) as System.Collections.IDictionary;
+            counts?.Clear();
+        }
+        catch (Exception ex) { Log($"ReleaseNetSingletons(load counts): {ex.Message}"); }
+        try
+        {
+            // Headless saves go through the game's test MockGodotFileIo, which records every
+            // call with its arguments, including each ~50 KB save JSON written on room entry.
+            // Every restore re-enters a room, so this list was the bulk of the leak (GBs per worker).
+            var sm = SaveManager.Instance;
+            var store = sm.GetType().GetField("_saveStore", flags)?.GetValue(sm);
+            (store?.GetType().GetProperty("Calls", flags)?.GetValue(store) as System.Collections.IList)?.Clear();
+        }
+        catch (Exception ex) { Log($"ReleaseNetSingletons(mock file io): {ex.Message}"); }
+    }
+
     private void ResetPerRunFields()
     {
+        ReleaseNetSingletons();
         ResetProfileProgress();
         try { _cardSelectorScope?.Dispose(); }
         catch (Exception ex) { Log($"Card selector dispose exception: {ex.Message}"); }

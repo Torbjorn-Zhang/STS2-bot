@@ -96,6 +96,8 @@ For search, any decision point can be snapshotted and restored inside the same p
 - `restore` returns the decision point as it was when the snapshot was taken. It typically takes 3–15 ms, and longer when many commands have to be replayed.
 - `checksum` fingerprints the full combat state (the game's own `NetFullCombatState`) and the run-level save. Use it to check that a restore is exact.
 
+Debug commands for memory work: `gc_stats` (heap after a full GC, working set, snapshot store size), `static_audit` (sizes of collections reachable from game statics) and `heap_census` (reachable instances and sizes by type, with root paths for a `focus` type).
+
 How it works: the engine keeps a checkpoint at run start, at every `load_save`, and before entering each map node. It also logs every state-changing command after the checkpoint. A restore rebuilds the checkpoint and replays the logged commands. This is the same design as the game's own combat replays (`CombatReplay`: a `SerializableRun` plus the recorded actions). It depends on the engine being deterministic, which `tests/test_snapshot_restore.py` and `tests/test_process_reuse.py` check.
 
 ## Game Logs

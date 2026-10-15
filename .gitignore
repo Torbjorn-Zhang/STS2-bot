@@ -21,3 +21,5 @@ harness/sts2dd_*/
 
 # Bot run outputs
 bot/runs/
+bot/data/
+bot/models/*.pkl
