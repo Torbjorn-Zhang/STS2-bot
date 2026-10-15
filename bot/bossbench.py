@@ -25,6 +25,45 @@ from run import _key
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def collect_fights(sim, seed, out_dir, ascension=0, act=2, rollouts=None):
+    """Play a run with the default bot; in `act`, save before every combat node the bot
+    picks (hallway, elite, boss). Returns the list of saved metas."""
+    planner = TurnPlanner(sim, rollouts=rollouts)
+    st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
+    dead_ends, memo, steps, saved = {}, {}, 0, []
+    while steps < 6000:
+        d = st.get("decision")
+        ctx = st.get("context") or {}
+        room = ctx.get("room_type")
+        if d == "game_over" or (ctx.get("act") or 1) > act or st.get("type") == "error":
+            return saved
+        if d == "combat_play" or (d == "card_select" and room in ("Monster", "Elite", "Boss")):
+            st = planner.play_combat(st)
+            continue
+        a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
+        if d == "map_select" and (ctx.get("act") or 1) == act and a[0] == "select_map_node":
+            node = next((c for c in st.get("choices") or [] if c["col"] == a[1]["col"] and c["row"] == a[1]["row"]), {})
+            if node.get("type") in ("Monster", "Elite", "Boss"):
+                name = f"{seed}_f{ctx.get('floor')}"
+                path = os.path.join(out_dir, f"{name}.save")
+                if sim.send({"cmd": "write_continue_save", "path": path}).get("success"):
+                    p = st.get("player") or {}
+                    meta = {"seed": name, "path": path, "node": [node["col"], node["row"]], "room": node["type"],
+                            "act": act, "floor": ctx.get("floor"), "hp": p.get("hp"), "max_hp": p.get("max_hp"),
+                            "deck": p.get("deck_size"), "boss": node["type"]}
+                    with open(path + ".json", "w") as fh:
+                        json.dump(meta, fh)
+                    saved.append(meta)
+        nxt = sim.act(a[0], **a[1])
+        steps += 1
+        if nxt.get("type") == "error" or _key(nxt) == _key(st):
+            dead_ends.setdefault(_key(st), set()).add(json.dumps(a, sort_keys=True))
+            if nxt.get("type") == "error":
+                continue
+        st = nxt
+    return saved
+
+
 def collect_one(sim, seed, out_dir, ascension=0, act=1, rollouts=None):
     """Play with the default bot until the boss node is the next choice; save there."""
     planner = TurnPlanner(sim, rollouts=rollouts)
@@ -64,7 +103,7 @@ def collect_one(sim, seed, out_dir, ascension=0, act=1, rollouts=None):
 
 def fight_one(sim, meta, model, value_weight, nodes, rollouts=None, rep=None):
     st = sim.send({"cmd": "load_save", "path": meta["path"]})
-    col, row = meta["boss_node"]
+    col, row = meta.get("node") or meta["boss_node"]
     st = sim.act("select_map_node", col=col, row=row)
     if rep is not None:   # a different hidden future per repetition, the same for every config
         sim.send({"cmd": "determinize", "seed": zlib.crc32(f"{meta['seed']}/{rep}".encode())})
@@ -103,7 +142,7 @@ def parallel(items, fn, workers):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["collect", "eval"])
+    ap.add_argument("mode", choices=["collect", "collect-fights", "eval"])
     ap.add_argument("n", type=int, nargs="?", default=0)
     ap.add_argument("--tag", required=True)
     ap.add_argument("--workers", type=int, default=6)
@@ -119,6 +158,16 @@ def main():
     ap.add_argument("--reps", type=int, default=1, help=">1: fight each save this many times, determinized")
     args = ap.parse_args()
     bench_dir = os.path.join(HERE, "data", f"bossbench_{args.tag}")
+
+    if args.mode == "collect-fights":
+        os.makedirs(bench_dir, exist_ok=True)
+        seeds = [f"fb_{args.tag}_{i}" for i in range(args.n)]
+        roll = json.loads(args.rollouts) if args.rollouts else None
+        metas = [m for part in parallel(seeds, lambda sim, s: collect_fights(sim, s, bench_dir, args.ascension, args.act, roll),
+                                        args.workers) for m in part]
+        print(json.dumps({"saved": len(metas), "of_runs": len(seeds), "dir": bench_dir,
+                          "rooms": {k: sum(1 for m in metas if m["room"] == k) for k in ("Monster", "Elite", "Boss")}}))
+        return
 
     if args.mode == "collect":
         os.makedirs(bench_dir, exist_ok=True)

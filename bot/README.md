@@ -38,4 +38,6 @@ Results (Ironclad, Ascension 0, stop after act 1, the same 120 held-out seeds `v
 
 Boss bench (26 fixed A0 act-1 boss fights): heuristic 15 wins, rollouts 19, rollouts plus power valuation 20.
 
+Full 3-act runs at A0 (60 seeds `full_*`): v10 (v9 plus deck test for smith and shop, act-2 hallway fights in the test set) cleared act 1 in 55 and act 2 in 5, with no victories yet. In act 1, elites are now cheap (1.7 per run, all won, about 10 HP each). In act 2, hallway fights cost 14 HP on average and the boss wins only 5 of 30 fights.
+
 Full 3-act runs at A0 with v7 (60 seeds): no run cleared act 2; deaths were 33 at bosses, 21 in hallway fights and 6 at elites. Act 2 (the Hive) is the wall: Kaiser Crab (Crusher + Rocket, about 400 HP between them) and hallway fights such as Hunter Killer and Slumbering Beetle.
