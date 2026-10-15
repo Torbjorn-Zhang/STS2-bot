@@ -1,0 +1,23 @@
+# Local only
+.venv/
+local/
+# real-game saves: they contain the Steam profile id
+parity/
+# upstream mod clone; our change is patches/STS2MCP-v0.111.0.diff
+STS2MCP/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Harness outputs and tool builds
+harness/**/bin/
+harness/**/obj/
+harness/*.txt
+harness/*.json
+harness/*.jsonl
+harness/qroom_*/
+harness/sts2det_*/
+harness/sts2dd_*/
+
+# Bot run outputs
+bot/runs/
