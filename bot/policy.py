@@ -61,15 +61,17 @@ def text_score(opt, hp):
     return s + bad * (2.0 if hp < 0.5 else 1.0)
 
 
-ELITE_HP = 0.7     # take elites (relics) only from this HP fraction up
+ELITE_HP = {1: 0.55, 2: 0.7, 3: 0.7}   # take elites (relics) only from this HP fraction up
+ELITE_VALUE = {1: 3.5, 2: 2.0, 3: 2.0}
 
 
-def node_value(kind, hp, row):
+def node_value(kind, hp, row, act=1):
     if kind == "Monster":
         return 1.0 if hp > 0.4 else -1.0
     if kind == "Elite":
         # the starter deck loses to elites on the first floors; later, healthy, they pay in relics
-        return 2.0 if hp >= ELITE_HP and row >= 4 else -3.0
+        a = min(max(act, 1), 3)
+        return ELITE_VALUE[a] if hp >= ELITE_HP[a] and row >= 4 else -3.0
     if kind == "RestSite":
         return 3.0 if hp < 0.5 else 2.0 if hp < 0.7 else 0.8
     if kind == "Treasure":
@@ -109,7 +111,7 @@ def choose_map(sim, st):
             if n is None:
                 memo[key] = 0.0
             else:
-                v = node_value(n["type"], hp, n["row"])
+                v = node_value(n["type"], hp, n["row"], act)
                 hp2 = _hp_after(n["type"], hp, act)
                 if hp2 <= 0.05:
                     v -= 20.0
@@ -251,11 +253,19 @@ def choose_card_select(st, sim=None):
     return ("select_cards", {"indices": ",".join(str(c.get("index", i)) for i, c in enumerate(order[:n]))})
 
 
-def choose_rest(st):
+def boss_is_next(sim, st):
+    """True when the boss is the next row of the map (floors differ by act, rows don't)."""
+    if sim is None:
+        return ((st.get("context") or {}).get("floor") or 0) >= 15
+    m = sim.send({"cmd": "get_map"})
+    boss, cur = m.get("boss") or {}, m.get("current_coord") or {}
+    return boss.get("row") is not None and cur.get("row") is not None and cur["row"] >= boss["row"] - 1
+
+
+def choose_rest(st, sim=None):
     opts = [o for o in st.get("options") or [] if o.get("is_enabled", True)]
-    floor = (st.get("context") or {}).get("floor") or 0
-    # arrive at the boss healthy: the last rest sites before it heal unless nearly full
-    want = "HEAL" if hp_ratio(st) < (0.9 if floor >= 15 else 0.65) else "SMITH"
+    # arrive at the boss healthy: the last rest site before it heals unless nearly full
+    want = "HEAL" if hp_ratio(st) < (0.9 if boss_is_next(sim, st) else 0.65) else "SMITH"
     pick = next((o for o in opts if o.get("option_id") == want), None) or (opts[0] if opts else None)
     return ("choose_option", {"option_index": pick["index"]}) if pick else ("leave_room", {})
 
@@ -333,7 +343,7 @@ def _decide(sim, st):
     if d == "card_select":
         return choose_card_select(st, sim)
     if d == "rest_site":
-        return choose_rest(st)
+        return choose_rest(st, sim)
     if d == "event_choice":
         return choose_event(st)
     if d == "bundle_select":

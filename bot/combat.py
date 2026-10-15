@@ -24,6 +24,8 @@ W = {
     "player_debuff": 1.2,
     "potion": 5.0,      # cost of drinking a potion (keeps them for fights that need them)
     "win": 300.0,
+    "late_hallway_big": 0,  # 1: act-2+ hallway fights use dmg_big too
+    "potion_late_hp": 0.65, # act-2+ hallway fights: potions allowed below this HP fraction
 }
 PLAYER_DEBUFFS = ("Vulnerable", "Weak", "Frail")
 COUNTED = ("Strength", "Dexterity") + PLAYER_DEBUFFS
@@ -118,7 +120,8 @@ def evaluate(root, st):
     score = W["hp"] * (hp - max(0, incoming_damage(st) - block))
     root_alive, now_alive = alive(root), alive(st)
     room = (root.get("context") or {}).get("room_type")
-    w_dmg = W["dmg_big"] if room in ("Elite", "Boss") else W["dmg"]
+    late = ((root.get("context") or {}).get("act") or 1) >= 2 and W["late_hallway_big"]
+    w_dmg = W["dmg_big"] if room in ("Elite", "Boss") or late else W["dmg"]
     now_by_id = {eid(e): e for e in now_alive}
     for e in root_alive:
         dealt = e["hp"] - (now_by_id[eid(e)]["hp"] if eid(e) in now_by_id else 0)
@@ -143,7 +146,8 @@ def potion_actions(st):
     """use_potion moves, only where they matter: elite/boss fights or low HP."""
     room = (st.get("context") or {}).get("room_type")
     p = st.get("player") or {}
-    low = (p.get("hp") or 0) < 0.5 * max(1, p.get("max_hp") or 1)
+    late = ((st.get("context") or {}).get("act") or 1) >= 2
+    low = (p.get("hp") or 0) < (W["potion_late_hp"] if late else 0.5) * max(1, p.get("max_hp") or 1)
     if st.get("decision") != "combat_play" or not (room in ("Elite", "Boss") or low):
         return []
     acts = []
@@ -339,8 +343,14 @@ class TurnPlanner:
             return ROLLOUT_DEATH
         return evaluate(root, s)
 
-    def _rollout_rescore(self, root, leaves, scores):
-        cfg = self.rollouts
+    def _rollout_cfg(self, root):
+        """The "big" budget (if given) for elite/boss fights and every fight from act 2 on."""
+        ctx = root.get("context") or {}
+        big = ctx.get("room_type") in ("Elite", "Boss") or (ctx.get("act") or 1) >= 2
+        return self.rollouts.get("big", self.rollouts) if big else self.rollouts
+
+    def _rollout_rescore(self, root, leaves, scores, cfg=None):
+        cfg = cfg or self.rollouts
         cand = [i for i in sorted(range(len(leaves)), key=lambda i: scores[i], reverse=True)
                 if leaves[i][0] != "terminal"][:cfg.get("k", 4)]
         if len(cand) < 2:
@@ -403,7 +413,7 @@ class TurnPlanner:
             return [("end_turn", {})], float("-inf")
         scores = self._score_leaves(root, [l[:3] for l in leaves])
         if self.rollouts and (root.get("round") or 0) <= STALL_ROUND:
-            scores = self._rollout_rescore(root, leaves, scores)
+            scores = self._rollout_rescore(root, leaves, scores, self._rollout_cfg(root))
         self._restore(root_snap)
         self.sim.send({"cmd": "drop_snapshots", "from": root_snap})
         order = sorted(range(len(leaves)), key=lambda i: scores[i], reverse=True)
