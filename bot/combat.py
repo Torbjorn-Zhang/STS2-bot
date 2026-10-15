@@ -24,6 +24,8 @@ W = {
     "player_debuff": 1.2,
     "potion": 5.0,      # cost of drinking a potion (keeps them for fights that need them)
     "win": 300.0,
+    "stun": 8.0,            # fully blocking an attacking Imbalanced enemy (it gets Stunned)
+    "wake": 4.0,            # per Slumber count knocked off a sleeping enemy this turn
     "late_hallway_big": 0,  # 1: act-2+ hallway fights use dmg_big too
     "potion_late_hp": 0.65, # act-2+ hallway fights: potions allowed below this HP fraction
 }
@@ -129,6 +131,18 @@ def evaluate(root, st):
         score += w_dmg * (W["scaling"] if grows else 1.0) * dealt
     # enemies from the root that are dead now (a kill that spawns new enemies is still a kill)
     score += W["kill"] * sum(1 for e in root_alive if eid(e) not in now_by_id)
+    # mechanics the one-turn view misses: a fully blocked Imbalanced attacker is stunned;
+    # every HP loss of a Slumbering enemy brings its waking closer
+    inc_now = incoming_damage(st)
+    for e in now_alive:
+        pw = powers(e.get("powers"))
+        if "Imbalanced" in pw and e.get("intends_attack") and inc_now > 0 and block >= inc_now:
+            score += W["stun"]
+    root_slumber = {eid(e): powers(e.get("powers")).get("Slumber", 0) for e in root_alive}
+    for e in now_alive:
+        before = root_slumber.get(eid(e), 0)
+        if before > 0:
+            score -= W["wake"] * max(0, before - powers(e.get("powers")).get("Slumber", 0))
     for e in now_alive:
         pw = powers(e.get("powers"))
         score += W["vuln"] * pw.get("Vulnerable", 0) + W["weak"] * pw.get("Weak", 0)
@@ -364,7 +378,11 @@ class TurnPlanner:
             _, _, st, snap, last = leaves[i]
             vals = [self._rollout(root, snap, last, base * 1000 + j, cfg.get("turns", 2)) for j in range(cfg.get("m", 3))]
             vals = [v for v in vals if v is not None]
-            out[i] = sum(vals) / len(vals) if vals else scores[i]
+            mean = sum(vals) / len(vals) if vals else scores[i]
+            # shrink toward the leaf's own evaluation: with few noisy rollouts, the max
+            # over candidates otherwise picks whichever one got lucky
+            beta = cfg.get("blend", 0.0)
+            out[i] = (1 - beta) * mean + beta * scores[i]
         return out
 
     def plan(self, root):
