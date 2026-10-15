@@ -1,3 +1,5 @@
+using MegaCrit.Sts2.Core.Random;
+using MegaCrit.Sts2.Core.Entities.Rngs;
 using System.Reflection;
 using MegaCrit.Sts2.Core.Combat;
 using MegaCrit.Sts2.Core.Commands;
@@ -515,6 +517,44 @@ public class RunSimulator
             };
         }
         catch (Exception ex) { return ErrorWithTrace("SetDrawOrder failed", ex); }
+    }
+
+    /// <summary>
+    /// Make the hidden future of the current combat random but reproducible, for search
+    /// rollouts that must not peek: shuffle the draw pile and reseed every combat RNG
+    /// (monster AI, shuffles, targets, card/potion/orb generation, energy costs).
+    /// Reseeding is done in place (LoadFromSerializable) so cached Rng references follow.
+    /// Recorded in the command log like any other action, so snapshots stay exact.
+    /// </summary>
+    public Dictionary<string, object?> Determinize(ulong seed)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var pcs = _runState.Players[0].PlayerCombatState;
+            if (pcs?.DrawPile == null) return Error("Not in combat");
+            var drawList = GetBackingList<CardModel>(pcs.DrawPile, "_cards");
+            if (drawList == null) return Error("Cannot access draw pile");
+            var rnd = new System.Random(unchecked((int)(seed ^ (seed >> 32))));
+            for (int i = drawList.Count - 1; i > 0; i--)
+            {
+                int j = rnd.Next(i + 1);
+                (drawList[i], drawList[j]) = (drawList[j], drawList[i]);
+            }
+            var rngs = _runState.Rng;
+            var types = new[] {
+                RunRngType.Shuffle, RunRngType.CombatCardGeneration, RunRngType.CombatPotionGeneration,
+                RunRngType.CombatCardSelection, RunRngType.CombatEnergyCosts, RunRngType.CombatTargets,
+                RunRngType.MonsterAi, RunRngType.Niche, RunRngType.CombatOrbs,
+            };
+            foreach (var t in types)
+            {
+                var fresh = new Rng(unchecked(seed * 0x9E3779B97F4A7C15UL + (ulong)t + 1));
+                rngs.GetRng(t).LoadFromSerializable(fresh.ToSerializable());
+            }
+            return new Dictionary<string, object?> { ["type"] = "ok", ["draw_pile_count"] = drawList.Count };
+        }
+        catch (Exception ex) { return ErrorWithTrace("Determinize failed", ex); }
     }
 
     // ─── Game actions ───
@@ -2396,7 +2436,8 @@ public class RunSimulator
 
                 return new Dictionary<string, object?>
                 {
-                    ["index"] = i,
+                    ["index"] = i,                 // position among living enemies (target_index)
+                    ["id"] = e.CombatId,           // stable for the whole combat, also across deaths
                     ["name"] = _loc.Monster(e.Monster?.Id.Entry ?? "UNKNOWN"),
                     ["hp"] = e.CurrentHp,
                     ["max_hp"] = e.MaxHp,

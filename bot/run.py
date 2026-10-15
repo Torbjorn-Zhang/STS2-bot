@@ -23,8 +23,8 @@ def _key(st):
     return json.dumps(st, sort_keys=True)
 
 
-def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0):
-    planner = TurnPlanner(sim, max_nodes=max_nodes, value=model, value_weight=value_weight)
+def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0, rollouts=None):
+    planner = TurnPlanner(sim, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
     st = sim.send({"cmd": "start_run", "character": character, "seed": seed, "ascension": ascension})
     t0, steps, fights, hp_log = time.perf_counter(), 0, 0, []
     dead_ends, loops, memo, stuck = {}, 0, {}, False
@@ -89,6 +89,7 @@ def main():
     ap.add_argument("--tag", default="act1")
     ap.add_argument("--seed-prefix", default="bot")
     ap.add_argument("--model", default=None, help="value model (models/value.pkl); default: hand-written evaluation")
+    ap.add_argument("--rollouts", default=None, help='JSON rollout config, e.g. {"k":4,"m":3,"turns":2}')
     ap.add_argument("--value-weight", type=float, default=None,
                     help="with --model: score = hand-written + w * model (default: model only)")
     args = ap.parse_args()
@@ -118,7 +119,8 @@ def main():
             for s in chunk:
                 sim = maybe_recycle(sim)
                 try:
-                    r = play_run(sim, s, args.character, args.acts, args.nodes, model, args.value_weight, args.ascension)
+                    r = play_run(sim, s, args.character, args.acts, args.nodes, model, args.value_weight, args.ascension,
+                                 json.loads(args.rollouts) if args.rollouts else None)
                 except Exception as e:  # engine hang/crash: record it, restart the engine, go on
                     r = {"seed": s, "character": args.character, "ascension": args.ascension, "cleared_acts": 0,
                          "victory": False, "died": False, "act": None, "floor": None, "room": None, "hp": None,

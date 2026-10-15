@@ -35,6 +35,12 @@ def alive(st):
     return [e for e in st.get("enemies") or [] if (e.get("hp") or 0) > 0]
 
 
+def eid(e):
+    """Stable enemy identity: "index" is the position among living enemies and shifts
+    when one dies; "id" is the game's CombatId (older engines: fall back to index)."""
+    return e["id"] if e.get("id") is not None else ("i", e.get("index"))
+
+
 def powers(lst):
     return {p.get("name"): p.get("amount") or 0 for p in lst or []}
 
@@ -61,12 +67,13 @@ def evaluate(root, st):
     root_alive, now_alive = alive(root), alive(st)
     room = (root.get("context") or {}).get("room_type")
     w_dmg = W["dmg_big"] if room in ("Elite", "Boss") else W["dmg"]
-    now_by_index = {e.get("index"): e for e in now_alive}
+    now_by_id = {eid(e): e for e in now_alive}
     for e in root_alive:
-        dealt = e["hp"] - (now_by_index[e.get("index")]["hp"] if e.get("index") in now_by_index else 0)
+        dealt = e["hp"] - (now_by_id[eid(e)]["hp"] if eid(e) in now_by_id else 0)
         grows = any(k in powers(e.get("powers")) for k in ("Strength", "Ritual"))
         score += w_dmg * (W["scaling"] if grows else 1.0) * dealt
-    score += W["kill"] * (len(root_alive) - len(now_alive))
+    # enemies from the root that are dead now (a kill that spawns new enemies is still a kill)
+    score += W["kill"] * sum(1 for e in root_alive if eid(e) not in now_by_id)
     for e in now_alive:
         pw = powers(e.get("powers"))
         score += W["vuln"] * pw.get("Vulnerable", 0) + W["weak"] * pw.get("Weak", 0)
@@ -115,6 +122,72 @@ def canon(st):
     return json.dumps(st, sort_keys=True)
 
 
+def _hits(c):
+    d = (c.get("description") or "").lower()
+    return 2 if "twice" in d else 3 if "3 times" in d or "three times" in d else 1
+
+
+def quick_policy(st):
+    """Fast rule policy for rollouts: no search, one sim call per action.
+    Play the card with the best value per energy (kills, needed block, powers early),
+    end the turn when nothing is worth playing."""
+    d = st.get("decision")
+    if d == "card_select":
+        cards = st.get("cards") or []
+        lo = st.get("min_select") or 0
+        if not cards or lo == 0:
+            return ("skip_select", {}) if not cards or lo == 0 else ("select_cards", {"indices": "0"})
+        def junk(c):
+            k = (c.get("id") or "")
+            return (0 if c.get("type") in ("Status", "Curse") else 1 if ("STRIKE_" in k or "DEFEND_" in k) else 2)
+        order = sorted(range(len(cards)), key=lambda i: junk(cards[i]))
+        return ("select_cards", {"indices": ",".join(str(cards[i].get("index", i)) for i in order[:max(1, lo)])})
+    if d != "combat_play":
+        return ("end_turn", {})
+    p = st.get("player") or {}
+    need = max(0, incoming_damage(st) - (p.get("block") or 0))
+    energy = st.get("energy") or 0
+    en = {e["index"]: e for e in alive(st)}
+    hand = {c["index"]: c for c in st.get("hand") or []}
+    rnd = st.get("round") or 1
+    best, best_v = ("end_turn", {}), 0.4
+    for a in legal_actions(st):
+        if a[0] != "play_card":
+            continue
+        c = hand.get(a[1]["card_index"])
+        if c is None:
+            continue
+        cost = c.get("cost")
+        cost = energy if not isinstance(cost, int) or cost < 0 else cost
+        stt = c.get("stats") or {}
+        dmg = (stt.get("damage") or 0) * _hits(c)
+        blk = stt.get("block") or 0
+        typ = c.get("type")
+        v = 0.0
+        if dmg:
+            desc = (c.get("description") or "").lower()
+            targets = list(en.values()) if "all enemies" in desc else (
+                [en[a[1]["target_index"]]] if a[1].get("target_index") in en else list(en.values())[:1])
+            for e in targets:
+                eff = (e.get("hp") or 0) + (e.get("block") or 0)
+                v += min(dmg, eff) + (6.0 if dmg >= eff else 0.0) + (3.0 if dmg >= eff and e.get("intends_attack") else 0.0)
+        if blk:
+            v += 1.2 * min(blk, need) + 0.1 * blk
+        if typ == "Power":
+            v += 7.0 if rnd <= 2 else 4.0
+        elif typ in ("Status", "Curse"):
+            v += 0.5
+        elif not dmg and not blk:
+            v += 2.5
+        v /= max(cost, 0.6)
+        if v > best_v:
+            best, best_v = a, v
+    return best
+
+
+ROLLOUT_DEATH = -300.0
+
+
 STALL_ROUND = 30   # past this round the learned value is ignored for the rest of the fight
 
 
@@ -124,8 +197,12 @@ class TurnPlanner:
     (data collection only); recorder(state): called with each end-of-turn state."""
 
     def __init__(self, sim, max_nodes=400, max_depth=10, value=None, explore=0.0, rng=None, recorder=None,
-                 value_weight=None):
+                 value_weight=None, rollouts=None):
         self.sim, self.max_nodes, self.max_depth = sim, max_nodes, max_depth
+        # rollouts: {"k": leaves to roll out, "m": rollouts per leaf, "turns": future turns}.
+        # The top-k leaves (by evaluate) are re-scored by the mean outcome of m determinized
+        # rollouts (draw order shuffled, combat RNG reseeded: no peeking) with quick_policy.
+        self.rollouts = rollouts
         self.value, self.explore, self.rng, self.recorder = value, explore, rng, recorder
         # None: the model's prediction is the score. A number w: hand-written evaluation
         # plus w * prediction (the model only adds its longer-horizon judgement).
@@ -163,6 +240,52 @@ class TurnPlanner:
                 out[i] = ((st.get("player") or {}).get("hp") or 0) + 2.0 if won else DEATH_VALUE
         return out
 
+    def _rollout(self, root, snap, last, seed, turns):
+        self._restore(snap)
+        self.sim.send({"cmd": "determinize", "seed": seed})
+        s = self.sim.act(last[0], **last[1])
+        future = 1 if last[0] == "end_turn" else 0
+        for _ in range(80):
+            if s.get("type") == "error" or s.get("decision") not in ("combat_play", "card_select"):
+                break
+            a = quick_policy(s)
+            if a[0] == "end_turn" and future >= turns:
+                break
+            s2 = self.sim.act(a[0], **a[1])
+            if s2.get("type") == "error":
+                if s.get("decision") != "combat_play":
+                    break
+                a, s2 = ("end_turn", {}), self.sim.act("end_turn")
+                if future >= turns or s2.get("type") == "error":
+                    break
+            if a[0] == "end_turn":
+                future += 1
+            s = s2
+        self.stats["rollouts"] += 1
+        if s.get("type") == "error":
+            return None
+        if s.get("decision") == "game_over" and not s.get("victory"):
+            return ROLLOUT_DEATH
+        return evaluate(root, s)
+
+    def _rollout_rescore(self, root, leaves, scores):
+        cfg = self.rollouts
+        cand = [i for i in sorted(range(len(leaves)), key=lambda i: scores[i], reverse=True)
+                if leaves[i][0] != "terminal"][:cfg.get("k", 4)]
+        if len(cand) < 2:
+            return scores
+        base = hash((root.get("round"), len(root.get("hand") or []), root.get("energy"))) & 0xFFFFFFFF
+        out = [float("-inf")] * len(leaves)
+        for i, (kind, _, st, snap, last) in enumerate(leaves):
+            if kind == "terminal":   # a finished fight needs no rollout; put it on the rollout scale
+                out[i] = scores[i] if (st.get("decision") != "game_over" or st.get("victory")) else ROLLOUT_DEATH
+        for i in cand:
+            _, _, st, snap, last = leaves[i]
+            vals = [self._rollout(root, snap, last, base * 1000 + j, cfg.get("turns", 2)) for j in range(cfg.get("m", 3))]
+            vals = [v for v in vals if v is not None]
+            out[i] = sum(vals) / len(vals) if vals else scores[i]
+        return out
+
     def plan(self, root):
         """Best action sequence from `root`. It ends with end_turn, a terminal state,
         or an action that revealed hidden information (then the caller replans)."""
@@ -174,7 +297,7 @@ class TurnPlanner:
         def visit(st, path, snap_id):
             nonlocal nodes
             if st.get("decision") == "combat_play":
-                leaves.append(("end", path + [("end_turn", {})], st))
+                leaves.append(("end", path + [("end_turn", {})], st, snap_id, ("end_turn", {})))
             for a in legal_actions(st) + potion_actions(st):
                 if a[0] == "end_turn":
                     continue
@@ -193,21 +316,25 @@ class TurnPlanner:
                 p2 = path + [a]
                 d2 = s2.get("decision")
                 if d2 not in ("combat_play", "card_select"):
-                    leaves.append(("terminal", p2, s2))
+                    leaves.append(("terminal", p2, s2, snap_id, a))
                 elif reveals_hidden_info(st, s2) or len(p2) >= self.max_depth:
                     # stop here: what follows depends on information we don't have yet
-                    leaves.append(("partial", p2, s2))
+                    leaves.append(("partial", p2, s2, snap_id, a))
                 else:
                     visit(s2, p2, self._snap())
 
         visit(root, [], root_snap)
-        self._restore(root_snap)
-        self.sim.send({"cmd": "drop_snapshots"})
         self.stats["plans"] += 1
         self.stats["nodes"] += nodes
         if not leaves:
+            self._restore(root_snap)
+            self.sim.send({"cmd": "drop_snapshots"})
             return [("end_turn", {})], float("-inf")
-        scores = self._score_leaves(root, leaves)
+        scores = self._score_leaves(root, [l[:3] for l in leaves])
+        if self.rollouts and (root.get("round") or 0) <= STALL_ROUND:
+            scores = self._rollout_rescore(root, leaves, scores)
+        self._restore(root_snap)
+        self.sim.send({"cmd": "drop_snapshots"})
         order = sorted(range(len(leaves)), key=lambda i: scores[i], reverse=True)
         pick = order[0]
         if self.explore and self.rng is not None and len(order) > 1 and self.rng.random() < self.explore:

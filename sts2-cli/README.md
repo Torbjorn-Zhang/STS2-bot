@@ -94,6 +94,8 @@ For search, any decision point can be snapshotted and restored inside the same p
 
 - `snapshot` returns `{"type": "snapshot", "id": N, ...}` and costs almost nothing.
 - `restore` returns the decision point as it was when the snapshot was taken. It typically takes 3–15 ms, and longer when many commands have to be replayed.
+- `{"cmd": "determinize", "seed": N}` (in combat) shuffles the draw pile and reseeds every combat RNG: monster AI, shuffles, targets, card, potion and orb generation, and energy costs. It is for search rollouts that must not peek at the real hidden future. The same seed gives the same future, and it is recorded and replayed like any action, so restoring an earlier snapshot undoes it.
+- Each enemy in a combat state has an `index`, its position among living enemies (use it as `target_index`; it shifts when an enemy dies), and an `id`, the game's `CombatId`, which stays fixed for the whole combat.
 - `checksum` fingerprints the full combat state (the game's own `NetFullCombatState`) and the run-level save. Use it to check that a restore is exact.
 
 Debug commands for memory work: `gc_stats` (heap after a full GC, working set, snapshot store size), `static_audit` (sizes of collections reachable from game statics) and `heap_census` (reachable instances and sizes by type, with root paths for a `focus` type).

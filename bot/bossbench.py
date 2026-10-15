@@ -61,11 +61,11 @@ def collect_one(sim, seed, out_dir, ascension=0, act=1):
     return None
 
 
-def fight_one(sim, meta, model, value_weight, nodes):
+def fight_one(sim, meta, model, value_weight, nodes, rollouts=None):
     st = sim.send({"cmd": "load_save", "path": meta["path"]})
     col, row = meta["boss_node"]
     st = sim.act("select_map_node", col=col, row=row)
-    planner = TurnPlanner(sim, max_nodes=nodes, value=model, value_weight=value_weight)
+    planner = TurnPlanner(sim, max_nodes=nodes, value=model, value_weight=value_weight, rollouts=rollouts)
     hp0 = (st.get("player") or {}).get("hp")
     rounds = [0]
 
@@ -106,6 +106,7 @@ def main():
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--model", default=None)
     ap.add_argument("--value-weight", type=float, default=None)
+    ap.add_argument("--rollouts", default=None, help='JSON rollout config, e.g. {"k":4,"m":3,"turns":2}')
     ap.add_argument("--weights", default=None, help="JSON overrides for combat.W")
     ap.add_argument("--nodes", type=int, default=400)
     ap.add_argument("--ascension", type=int, default=0)
@@ -135,7 +136,8 @@ def main():
     if args.subset:
         metas = [m for m in metas if (int(m["seed"].rsplit("_", 1)[1]) % 2 == 0) == (args.subset == "even")]
     t0 = time.perf_counter()
-    res = parallel(metas, lambda sim, m: fight_one(sim, m, model, args.value_weight, args.nodes), args.workers)
+    res = parallel(metas, lambda sim, m: fight_one(sim, m, model, args.value_weight, args.nodes,
+                                                    json.loads(args.rollouts) if args.rollouts else None), args.workers)
     if args.out:
         with open(args.out, "w") as fh:
             for r in res:

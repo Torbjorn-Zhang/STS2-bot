@@ -60,3 +60,30 @@ def test_unknown_snapshot_is_an_error(game):
     game.start(seed="snap-err")
     r = game.send({"cmd": "restore", "id": 999})
     assert r["type"] == "error"
+
+
+def test_determinize_is_reproducible_and_undone_by_restore(game):
+    state = _into_combat(game, "snap-detz")
+    snap = game.send({"cmd": "snapshot"})
+    before = game.send({"cmd": "checksum"})
+
+    def future(seed):
+        game.send({"cmd": "restore", "id": snap["id"]})
+        if seed is not None:
+            r = game.send({"cmd": "determinize", "seed": seed})
+            assert r["type"] == "ok", r
+        out = []
+        s = state
+        for _ in range(3):
+            if s.get("decision") != "combat_play":
+                break
+            s = game.act("end_turn")
+            out.append(_canon(s))
+        return out
+
+    a, b = future(11), future(11)
+    assert a == b                                     # same seed, same hidden future
+    assert any(future(s) != a for s in (12, 13, 14))  # other seeds change it
+    game.send({"cmd": "restore", "id": snap["id"]})
+    after = game.send({"cmd": "checksum"})
+    assert after["combat"] == before["combat"] and after["run"] == before["run"]
