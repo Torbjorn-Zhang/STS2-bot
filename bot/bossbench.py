@@ -28,6 +28,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 def collect_fights(sim, seed, out_dir, ascension=0, act=2, rollouts=None):
     """Play a run with the default bot; in `act`, save before every combat node the bot
     picks (hallway, elite, boss). Returns the list of saved metas."""
+    policy.ASCENSION = ascension
     planner = TurnPlanner(sim, rollouts=rollouts)
     st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
     dead_ends, memo, steps, saved = {}, {}, 0, []
@@ -66,6 +67,7 @@ def collect_fights(sim, seed, out_dir, ascension=0, act=2, rollouts=None):
 
 def collect_one(sim, seed, out_dir, ascension=0, act=1, rollouts=None):
     """Play with the default bot until the boss node is the next choice; save there."""
+    policy.ASCENSION = ascension
     planner = TurnPlanner(sim, rollouts=rollouts)
     st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
     dead_ends, memo, steps = {}, {}, 0
