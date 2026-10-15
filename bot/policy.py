@@ -179,7 +179,30 @@ def card_value(c, deck_size, deck=None, act=1):
 SKIP_BELOW = 1.7   # a weaker card only dilutes the deck
 
 
-def choose_card_reward(st):
+DECK_TEST = True        # judge card rewards by imagined boss fights (decktest.py)
+TIER_WEIGHT = 4.0       # graded-score points per tier point, on top of the boss test
+
+
+def choose_card_reward(st, sim=None):
+    if DECK_TEST and sim is not None and st.get("cards"):
+        import decktest
+        scores = decktest.evaluate_options(sim, st)
+        if scores:
+            full = (st.get("player") or {}).get("deck")
+            deck_n = (st.get("player") or {}).get("deck_size") or 10
+            act = (st.get("context") or {}).get("act") or 1
+            by_index = {c["index"]: c for c in st["cards"]}
+
+            def total(arm):
+                prior = SKIP_BELOW if arm is None else card_value(by_index[arm], deck_n, full, act)
+                return scores[arm] + TIER_WEIGHT * prior
+
+            best = max(scores, key=total)
+            return ("skip_card_reward", {}) if best is None else ("select_card_reward", {"card_index": best})
+    return choose_card_reward_tier(st)
+
+
+def choose_card_reward_tier(st):
     deck = (st.get("player") or {}).get("deck_size") or 10
     cards = st.get("cards") or []
     if not cards:
@@ -283,7 +306,7 @@ def _decide(sim, st):
     if d == "map_select":
         return choose_map(sim, st)
     if d == "card_reward":
-        return choose_card_reward(st)
+        return choose_card_reward(st, sim)
     if d == "card_select":
         return choose_card_select(st)
     if d == "rest_site":

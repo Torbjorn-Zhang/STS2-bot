@@ -217,7 +217,7 @@ class Program
                     : new Dictionary<string, object?> { ["type"] = "error", ["message"] = "restore requires 'id'" };
 
             case "drop_snapshots":
-                return sim.DropSnapshots();
+                return sim.DropSnapshots(cmd.TryGetProperty("from", out var df) ? df.GetInt32() : null);
 
             case "gc_stats":
             {

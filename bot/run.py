@@ -90,9 +90,12 @@ def main():
     ap.add_argument("--seed-prefix", default="bot")
     ap.add_argument("--model", default=None, help="value model (models/value.pkl); default: hand-written evaluation")
     ap.add_argument("--rollouts", default=None, help='JSON rollout config, e.g. {"k":4,"m":3,"turns":2}')
+    ap.add_argument("--no-deck-test", action="store_true", help="pick card rewards by the tier list only")
     ap.add_argument("--value-weight", type=float, default=None,
                     help="with --model: score = hand-written + w * model (default: model only)")
     args = ap.parse_args()
+    if args.no_deck_test:
+        policy.DECK_TEST = False
     model = None
     if args.model:
         from value import ValueModel

@@ -4247,11 +4247,17 @@ public class RunSimulator
         ["command_log"] = _commandLog.Count,
     };
 
-    public Dictionary<string, object?> DropSnapshots()
+    /// <summary>Drop snapshots; with <paramref name="fromId"/>, only those with id >= fromId
+    /// (a search frees its own snapshots without touching an outer caller's).</summary>
+    public Dictionary<string, object?> DropSnapshots(int? fromId = null)
     {
         var n = _snapshots.Count;
-        _snapshots.Clear();
-        return new Dictionary<string, object?> { ["type"] = "ok", ["dropped"] = n };
+        if (fromId == null)
+            _snapshots.Clear();
+        else
+            foreach (var id in _snapshots.Keys.Where(k => k >= fromId.Value).ToList())
+                _snapshots.Remove(id);
+        return new Dictionary<string, object?> { ["type"] = "ok", ["dropped"] = n - _snapshots.Count };
     }
 
     private static bool IsError(Dictionary<string, object?>? r) =>

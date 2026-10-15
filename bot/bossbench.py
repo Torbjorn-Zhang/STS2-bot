@@ -13,6 +13,7 @@ import glob
 import json
 import os
 import time
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 import combat
@@ -24,9 +25,9 @@ from run import _key
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def collect_one(sim, seed, out_dir, ascension=0, act=1):
+def collect_one(sim, seed, out_dir, ascension=0, act=1, rollouts=None):
     """Play with the default bot until the boss node is the next choice; save there."""
-    planner = TurnPlanner(sim)
+    planner = TurnPlanner(sim, rollouts=rollouts)
     st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
     dead_ends, memo, steps = {}, {}, 0
     while steps < 5000:
@@ -61,10 +62,12 @@ def collect_one(sim, seed, out_dir, ascension=0, act=1):
     return None
 
 
-def fight_one(sim, meta, model, value_weight, nodes, rollouts=None):
+def fight_one(sim, meta, model, value_weight, nodes, rollouts=None, rep=None):
     st = sim.send({"cmd": "load_save", "path": meta["path"]})
     col, row = meta["boss_node"]
     st = sim.act("select_map_node", col=col, row=row)
+    if rep is not None:   # a different hidden future per repetition, the same for every config
+        sim.send({"cmd": "determinize", "seed": zlib.crc32(f"{meta['seed']}/{rep}".encode())})
     planner = TurnPlanner(sim, max_nodes=nodes, value=model, value_weight=value_weight, rollouts=rollouts)
     hp0 = (st.get("player") or {}).get("hp")
     rounds = [0]
@@ -76,7 +79,7 @@ def fight_one(sim, meta, model, value_weight, nodes, rollouts=None):
     t0 = time.perf_counter()
     st = planner.play_combat(st, on_state=watch)
     won = st.get("decision") != "game_over" or bool(st.get("victory"))
-    return {"seed": meta["seed"], "boss": meta["boss"], "won": won, "hp_before": hp0,
+    return {"seed": meta["seed"], "rep": rep, "boss": meta["boss"], "won": won, "hp_before": hp0,
             "hp_after": (st.get("player") or {}).get("hp") if won else 0, "rounds": rounds[0],
             "seconds": round(time.perf_counter() - t0, 1)}
 
@@ -113,13 +116,16 @@ def main():
     ap.add_argument("--act", type=int, default=1, help="collect: which act's boss")
     ap.add_argument("--subset", default=None, help="'even' or 'odd' seeds only (train/validation split)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--reps", type=int, default=1, help=">1: fight each save this many times, determinized")
     args = ap.parse_args()
     bench_dir = os.path.join(HERE, "data", f"bossbench_{args.tag}")
 
     if args.mode == "collect":
         os.makedirs(bench_dir, exist_ok=True)
         seeds = [f"boss_{args.tag}_{i}" for i in range(args.n)]
-        metas = [m for m in parallel(seeds, lambda sim, s: collect_one(sim, s, bench_dir, args.ascension, args.act), args.workers) if m]
+        roll = json.loads(args.rollouts) if args.rollouts else None
+        metas = [m for m in parallel(seeds, lambda sim, s: collect_one(sim, s, bench_dir, args.ascension, args.act, roll),
+                                     args.workers) if m]
         print(json.dumps({"saved": len(metas), "of_runs": len(seeds), "dir": bench_dir}))
         return
 
@@ -136,8 +142,10 @@ def main():
     if args.subset:
         metas = [m for m in metas if (int(m["seed"].rsplit("_", 1)[1]) % 2 == 0) == (args.subset == "even")]
     t0 = time.perf_counter()
-    res = parallel(metas, lambda sim, m: fight_one(sim, m, model, args.value_weight, args.nodes,
-                                                    json.loads(args.rollouts) if args.rollouts else None), args.workers)
+    roll = json.loads(args.rollouts) if args.rollouts else None
+    items = [(m, None) for m in metas] if args.reps <= 1 else [(m, r) for m in metas for r in range(args.reps)]
+    res = parallel(items, lambda sim, it: fight_one(sim, it[0], model, args.value_weight, args.nodes, roll, it[1]),
+                   args.workers)
     if args.out:
         with open(args.out, "w") as fh:
             for r in res:

@@ -399,13 +399,13 @@ class TurnPlanner:
         self.stats["nodes"] += nodes
         if not leaves:
             self._restore(root_snap)
-            self.sim.send({"cmd": "drop_snapshots"})
+            self.sim.send({"cmd": "drop_snapshots", "from": root_snap})
             return [("end_turn", {})], float("-inf")
         scores = self._score_leaves(root, [l[:3] for l in leaves])
         if self.rollouts and (root.get("round") or 0) <= STALL_ROUND:
             scores = self._rollout_rescore(root, leaves, scores)
         self._restore(root_snap)
-        self.sim.send({"cmd": "drop_snapshots"})
+        self.sim.send({"cmd": "drop_snapshots", "from": root_snap})
         order = sorted(range(len(leaves)), key=lambda i: scores[i], reverse=True)
         pick = order[0]
         if self.explore and self.rng is not None and len(order) > 1 and self.rng.random() < self.explore:
@@ -436,5 +436,6 @@ class TurnPlanner:
                 state = nxt
                 if on_state:
                     on_state(state)
+            self.sim.send({"cmd": "drop_snapshots", "from": before})
             # replan after every executed path (end of turn, revealed info, or prompt)
         return state
