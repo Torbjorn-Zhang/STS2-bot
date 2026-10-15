@@ -20,15 +20,25 @@ W = {
     "kill": 7.0,        # enemy removed (no more attacks from it)
     "vuln": 1.2,        # per Vulnerable stack left on a living enemy
     "weak": 1.0,        # per Weak stack left on a living enemy
-    "strength": 2.5,    # per player Strength
-    "dexterity": 2.0,
-    "other_power": 1.5, # any other lasting player power (Demon Form, Barricade, ...)
+    "power_scale": 1.0, # lasting powers: POWER_TURN etc. x expected remaining turns
     "player_debuff": 1.2,
     "potion": 5.0,      # cost of drinking a potion (keeps them for fights that need them)
     "win": 300.0,
 }
 PLAYER_DEBUFFS = ("Vulnerable", "Weak", "Frail")
 COUNTED = ("Strength", "Dexterity") + PLAYER_DEBUFFS
+
+# Lasting player powers, valued per remaining turn of the fight (HP-equivalents per unit
+# of the power's amount; the fight length is estimated from enemy HP / deck damage).
+POWER_TURN = {
+    "Strength": 1.2, "Dexterity": 0.9, "Thorns": 0.7, "Pyre": 4.0, "Barricade": 2.0, "Feel No Pain": 0.4,
+    "Dark Embrace": 1.0, "Rupture": 0.6, "Inferno": 0.5, "Juggernaut": 0.6, "Corruption": 2.0,
+    "Crimson Mantle": 0.5, "Aggression": 2.5, "Hellraiser": 2.0, "Stampede": 2.5, "Vicious": 0.8,
+    "Cruelty": 0.04, "Unmovable": 2.0, "Juggling": 2.0, "Metallicize": 0.9,
+}
+POWER_GROWTH = {"Demon Form": 1.2, "Ritual": 1.2}          # Strength per turn, compounding
+POWER_ONCE = {"Artifact": 2.0, "Intangible": 6.0, "Buffer": 6.0, "Radiance": 4.0, "Vigor": 0.6, "Regen": 1.5}
+POWER_THIS_TURN = {"Rage", "One-Two Punch", "Colossus", "No Draw", "Flame Barrier"}
 
 
 def alive(st):
@@ -54,6 +64,48 @@ def incoming_damage(st):
     return total
 
 
+def damage_rate(st):
+    """Rough damage per turn of this deck (to estimate how long the fight will last)."""
+    deck = (st.get("player") or {}).get("deck") or []
+    per_card = [(c.get("stats") or {}).get("damage") or 0 for c in deck if c.get("type") == "Attack"]
+    avg = sum(per_card) / max(1, len(deck))
+    strength = powers(st.get("player_powers")).get("Strength", 0)
+    return max(6.0, 4.5 * avg + 2 * strength) if deck else 12.0
+
+
+def future_weight(st):
+    """Discounted number of turns the fight is still expected to last (0.9 per turn, <= 10)."""
+    ehp = sum((e.get("hp") or 0) + (e.get("block") or 0) for e in alive(st))
+    t = max(1.0, min(10.0, ehp / damage_rate(st)))
+    whole = int(t)
+    return sum(0.9 ** k for k in range(1, whole + 1)) + (t - whole) * 0.9 ** (whole + 1), t
+
+
+def power_value(st, f, t):
+    v = 0.0
+    for name, amt in powers(st.get("player_powers")).items():
+        amt = amt or 1
+        if name in PLAYER_DEBUFFS:
+            v -= W["player_debuff"] * amt
+        elif name in POWER_THIS_TURN:
+            if name == "Flame Barrier":
+                hits = sum((i.get("hits") or i.get("repeat") or 1) for e in alive(st) for i in e.get("intents") or []
+                           if i.get("type") == "Attack")
+                v += 0.6 * amt * hits
+        elif name in POWER_GROWTH:
+            v += POWER_GROWTH[name] * amt * f * min(t, 10.0) / 2
+        elif name == "Plating":
+            v += 0.8 * sum(max(0, amt - k) for k in range(int(t) + 1))
+        elif name in POWER_ONCE:
+            v += POWER_ONCE[name] * amt
+        else:
+            v += POWER_TURN.get(name, 1.0 / max(1, amt)) * amt * f
+    for e in alive(st):   # enemy scaling costs HP every remaining turn
+        pw = powers(e.get("powers"))
+        v -= 0.5 * pw.get("Strength", 0) * f + 0.5 * pw.get("Ritual", 0) * f * min(t, 10.0) / 2
+    return v
+
+
 def evaluate(root, st):
     d = st.get("decision")
     if d == "game_over":
@@ -77,10 +129,8 @@ def evaluate(root, st):
     for e in now_alive:
         pw = powers(e.get("powers"))
         score += W["vuln"] * pw.get("Vulnerable", 0) + W["weak"] * pw.get("Weak", 0)
-    pp = powers(st.get("player_powers"))
-    score += W["strength"] * pp.get("Strength", 0) + W["dexterity"] * pp.get("Dexterity", 0)
-    score += W["other_power"] * sum(1 for k in pp if k not in COUNTED)
-    score -= W["player_debuff"] * sum(pp.get(k, 0) for k in PLAYER_DEBUFFS)
+    f, t = future_weight(st)
+    score += W["power_scale"] * power_value(st, f, t)
     score -= W["potion"] * max(0, len(potions(root)) - len(potions(st)))
     return score
 
