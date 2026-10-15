@@ -20,10 +20,12 @@ import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 
-from combat import TurnPlanner
+from combat import TurnPlanner, quick_policy
+import decktest
 from engine import fresh_sim, maybe_recycle
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+PILOT = "planner"   # or "quick" (quick_policy: ~100x faster, ranks decks similarly, corr 0.79)
 IRONCLAD = """ANGER ARMAMENTS ASHEN_STRIKE BARRICADE BATTLE_TRANCE BLOOD_WALL BLOODLETTING BLUDGEON BODY_SLAM
 BRAND BREAK BREAKTHROUGH BULLY BURNING_PACT CASCADE CINDER COLOSSUS CONFLAGRATION CORRUPTION CRIMSON_MANTLE
 CRUELTY DARK_EMBRACE DEMON_FORM DISMANTLE DOMINATE DRUM_OF_BATTLE EVIL_EYE EXPECT_A_FIGHT FEED FEEL_NO_PAIN
@@ -43,16 +45,30 @@ def fight(sim, meta, card, rep, rollouts, nodes):
             return {"seed": meta["seed"], "rep": rep, "card": card, "error": r.get("message")}
     st = sim.act("select_map_node", col=meta["boss_node"][0], row=meta["boss_node"][1])
     sim.send({"cmd": "determinize", "seed": zlib.crc32(f"{meta['seed']}/{rep}".encode())})
-    planner = TurnPlanner(sim, max_nodes=nodes, rollouts=rollouts)
-    rounds = [0]
+    enemy_max = sum((e.get("max_hp") or 0) for e in st.get("enemies") or [])
+    rounds, last = [0], {"s": st}
 
     def watch(s):
         rounds[0] = s.get("round") or rounds[0]
+        if s.get("enemies") is not None:
+            last["s"] = s
 
-    st = planner.play_combat(st, on_state=watch)
+    if PILOT == "quick":
+        for _ in range(400):
+            if st.get("decision") not in ("combat_play", "card_select") or st.get("type") == "error":
+                break
+            watch(st)
+            a = quick_policy(st)
+            nxt = sim.act(a[0], **a[1])
+            st = sim.act("end_turn") if nxt.get("type") == "error" and st.get("decision") == "combat_play" else nxt
+    else:
+        st = TurnPlanner(sim, max_nodes=nodes, rollouts=rollouts).play_combat(st, on_state=watch)
     won = st.get("decision") != "game_over" or bool(st.get("victory"))
+    # HP from the last combat state: winning the act boss heals for the next act
+    hp = (last["s"].get("player") or {}).get("hp") if won else 0
+    left = 0 if won else sum((e.get("hp") or 0) for e in last["s"].get("enemies") or [] if (e.get("hp") or 0) > 0)
     return {"seed": meta["seed"], "rep": rep, "card": card, "boss": meta.get("boss"), "won": won,
-            "hp_after": (st.get("player") or {}).get("hp") if won else 0, "rounds": rounds[0]}
+            "hp_after": hp, "graded": decktest.graded(won, hp or 0, left, enemy_max), "rounds": rounds[0]}
 
 
 def summarize(rows):
@@ -62,15 +78,16 @@ def summarize(rows):
         if r["card"] is None or "error" in r or (r["seed"], r["rep"]) not in base:
             continue
         b = base[(r["seed"], r["rep"])]
-        by.setdefault(r["card"], []).append((r["hp_after"] - b["hp_after"], int(r["won"]) - int(b["won"])))
+        key = "graded" if "graded" in r and "graded" in b else "hp_after"
+        by.setdefault(r["card"], []).append((r[key] - b[key], int(r["won"]) - int(b["won"])))
     out = []
     for card, d in by.items():
         n = len(d)
         mean = sum(x for x, _ in d) / n
         sd = math.sqrt(sum((x - mean) ** 2 for x, _ in d) / max(1, n - 1))
-        out.append({"card": card, "n": n, "d_hp": round(mean, 2), "se": round(sd / math.sqrt(n), 2),
+        out.append({"card": card, "n": n, "d_score": round(mean, 2), "se": round(sd / math.sqrt(n), 2),
                     "d_win": round(sum(w for _, w in d) / n, 3)})
-    out.sort(key=lambda x: -x["d_hp"])
+    out.sort(key=lambda x: -x["d_score"])
     base_rows = list(base.values())
     return {"baseline_win": round(sum(r["won"] for r in base_rows) / max(1, len(base_rows)), 3),
             "baseline_hp": round(sum(r["hp_after"] for r in base_rows) / max(1, len(base_rows)), 2),
@@ -87,9 +104,12 @@ def main():
     ap.add_argument("--nodes", type=int, default=400)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--summary-only", action="store_true")
+    ap.add_argument("--pilot", default="planner", choices=["planner", "quick"])
     ap.add_argument("--label", default="heur", help="results file suffix (one per planner config)")
     args = ap.parse_args()
 
+    global PILOT
+    PILOT = args.pilot
     out_path = os.path.join(HERE, "data", f"cardlab_{args.tag}_{args.label}.jsonl")
     rows = []
     if os.path.exists(out_path):

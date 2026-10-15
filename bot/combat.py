@@ -223,13 +223,20 @@ def quick_card_value(c, target, st, need, energy):
             v += min(total, eff)
             if total >= eff:
                 v += 6.0 + (4.0 if e.get("intends_attack") else 0.0)
+    pp = powers(st.get("player_powers"))
     if blk:
-        v += 1.2 * min(blk, need) + 0.1 * blk
+        keep = 0.6 if "Barricade" in pp else 0.1   # Barricade: block beyond this turn's attacks carries over
+        v += 1.2 * min(blk, need) + keep * max(0, blk - need)
     v += 1.5 * (stt.get("vulnerablepower") or 0) * (1 if en else 0)
-    v += 2.0 * (stt.get("cards") or 0) + 2.5 * (stt.get("energy") or 0) - 0.8 * (stt.get("hploss") or 0)
+    v += 1.0 * (stt.get("cards") or 0) + 2.5 * (stt.get("energy") or 0) - 0.8 * (stt.get("hploss") or 0)
     if c.get("type") == "Power":
-        v += 7.0 if (st.get("round") or 1) <= 2 else 4.0
-        v += 2.0 * (stt.get("strengthpower") or 0)
+        # worth its effect over the rest of the fight (the planner's view of powers), so a
+        # 3-cost Demon Form is played before Strikes in a long fight but not in a short one
+        f, t = future_weight(st)
+        per_turn = 2.0 + 1.5 * (stt.get("strengthpower") or 0)
+        if "start of your turn" in desc or "each turn" in desc:
+            per_turn *= 1 + min(t, 10.0) / 4
+        v += 2.0 + f * per_turn
     elif c.get("type") in ("Status", "Curse"):
         v += 0.5
     elif v == 0.0:
