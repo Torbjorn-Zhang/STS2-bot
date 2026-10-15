@@ -367,6 +367,17 @@ public class RunSimulator
                     }
                 }
             }
+            if (args.TryGetValue("add_cards", out var addEl))
+            {
+                // append cards, keeping the rest of the deck (and its upgrades) as it is
+                foreach (var cEl in addEl.EnumerateArray())
+                {
+                    var id = cEl.GetString();
+                    var canonical = id == null ? null : ModelDb.GetById<CardModel>(new ModelId("CARD", id));
+                    if (canonical == null) return Error($"Unknown card: {id}");
+                    player.Deck.AddInternal(_runState.CreateCard(canonical, player), silent: true);
+                }
+            }
             if (args.TryGetValue("deck", out var deckEl))
             {
                 // Remove existing cards from RunState tracking

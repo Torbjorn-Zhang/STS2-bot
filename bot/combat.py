@@ -172,9 +172,51 @@ def canon(st):
     return json.dumps(st, sort_keys=True)
 
 
-def _hits(c):
-    d = (c.get("description") or "").lower()
-    return 2 if "twice" in d else 3 if "3 times" in d or "three times" in d else 1
+def card_numbers(c, energy):
+    """(damage per target, hits, block) of a card from its stats (calculated values first)."""
+    stt = c.get("stats") or {}
+    desc = (c.get("description") or "").lower()
+    dmg = stt.get("calculateddamage") if stt.get("calculateddamage") is not None else stt.get("damage") or 0
+    if stt.get("repeat"):
+        hits = stt["repeat"]
+    elif "x times" in desc:
+        hits = energy
+    else:
+        hits = 2 if "twice" in desc else 3 if "3 times" in desc or "three times" in desc else 1
+    blk = stt.get("calculatedblock") if stt.get("calculatedblock") is not None else stt.get("block") or 0
+    return dmg or 0, hits, blk or 0
+
+
+def quick_card_value(c, target, st, need, energy):
+    """Rough worth of playing card c now (HP-equivalents), for the rollout policy."""
+    stt = c.get("stats") or {}
+    desc = (c.get("description") or "").lower()
+    en = alive(st)
+    dmg, hits, blk = card_numbers(c, energy)
+    v = 0.0
+    if dmg:
+        strength = powers(st.get("player_powers")).get("Strength", 0)
+        per = dmg + strength
+        targets = en if "all enemies" in desc else ([target] if target else en[:1])
+        for e in targets:
+            vul = 1.5 if powers(e.get("powers")).get("Vulnerable") else 1.0
+            total = per * hits * vul
+            eff = (e.get("hp") or 0) + (e.get("block") or 0)
+            v += min(total, eff)
+            if total >= eff:
+                v += 6.0 + (4.0 if e.get("intends_attack") else 0.0)
+    if blk:
+        v += 1.2 * min(blk, need) + 0.1 * blk
+    v += 1.5 * (stt.get("vulnerablepower") or 0) * (1 if en else 0)
+    v += 2.0 * (stt.get("cards") or 0) + 2.5 * (stt.get("energy") or 0) - 0.8 * (stt.get("hploss") or 0)
+    if c.get("type") == "Power":
+        v += 7.0 if (st.get("round") or 1) <= 2 else 4.0
+        v += 2.0 * (stt.get("strengthpower") or 0)
+    elif c.get("type") in ("Status", "Curse"):
+        v += 0.5
+    elif v == 0.0:
+        v = 2.0
+    return v
 
 
 def quick_policy(st):
@@ -186,7 +228,7 @@ def quick_policy(st):
         cards = st.get("cards") or []
         lo = st.get("min_select") or 0
         if not cards or lo == 0:
-            return ("skip_select", {}) if not cards or lo == 0 else ("select_cards", {"indices": "0"})
+            return ("skip_select", {})
         def junk(c):
             k = (c.get("id") or "")
             return (0 if c.get("type") in ("Status", "Curse") else 1 if ("STRIKE_" in k or "DEFEND_" in k) else 2)
@@ -199,7 +241,6 @@ def quick_policy(st):
     energy = st.get("energy") or 0
     en = {e["index"]: e for e in alive(st)}
     hand = {c["index"]: c for c in st.get("hand") or []}
-    rnd = st.get("round") or 1
     best, best_v = ("end_turn", {}), 0.4
     for a in legal_actions(st):
         if a[0] != "play_card":
@@ -209,27 +250,7 @@ def quick_policy(st):
             continue
         cost = c.get("cost")
         cost = energy if not isinstance(cost, int) or cost < 0 else cost
-        stt = c.get("stats") or {}
-        dmg = (stt.get("damage") or 0) * _hits(c)
-        blk = stt.get("block") or 0
-        typ = c.get("type")
-        v = 0.0
-        if dmg:
-            desc = (c.get("description") or "").lower()
-            targets = list(en.values()) if "all enemies" in desc else (
-                [en[a[1]["target_index"]]] if a[1].get("target_index") in en else list(en.values())[:1])
-            for e in targets:
-                eff = (e.get("hp") or 0) + (e.get("block") or 0)
-                v += min(dmg, eff) + (6.0 if dmg >= eff else 0.0) + (3.0 if dmg >= eff and e.get("intends_attack") else 0.0)
-        if blk:
-            v += 1.2 * min(blk, need) + 0.1 * blk
-        if typ == "Power":
-            v += 7.0 if rnd <= 2 else 4.0
-        elif typ in ("Status", "Curse"):
-            v += 0.5
-        elif not dmg and not blk:
-            v += 2.5
-        v /= max(cost, 0.6)
+        v = quick_card_value(c, en.get(a[1].get("target_index")), st, need, energy) / max(cost, 0.6)
         if v > best_v:
             best, best_v = a, v
     return best

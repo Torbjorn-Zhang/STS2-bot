@@ -212,7 +212,9 @@ def choose_card_select(st):
     else:                                        # shop removal / event remove-transform: Strikes, then Defends
         def rank(c):
             k = card_key(c)
-            return (0 if k.startswith("STRIKE_") else 1 if k.startswith("DEFEND_") else 2, RARITY.get(c.get("rarity"), 1.0))
+            first = (-1 if c.get("type") in ("Curse", "Status") else 0 if k.startswith("STRIKE_")
+                     else 1 if k.startswith("DEFEND_") else 2)
+            return (first, TIER.get(base_key(c), RARITY.get(c.get("rarity"), 1.0)))
         order = sorted(cards, key=rank)
     n = max(1, lo) if hi >= 1 else lo
     return ("select_cards", {"indices": ",".join(str(c.get("index", i)) for i, c in enumerate(order[:n]))})
