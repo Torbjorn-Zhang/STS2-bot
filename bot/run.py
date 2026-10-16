@@ -24,7 +24,7 @@ def _key(st):
 
 
 def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0, rollouts=None,
-             rec=None, explore=0.0):
+             rec=None, explore=0.0, decknets=None):
     """rec: optional record.GameRecorder (self-play data for the policy and value nets).
     explore: chance to take a uniformly random card reward option instead (value-net data
     needs decks the policy would not build; such decisions are flagged in the record)."""
@@ -80,8 +80,10 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 stuck = True   # play_combat hit its action cap: give up on the run
                 break
             continue
-        a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
-        extra = policy.pop_last_scores()
+        a, extra = (decknets.decide(sim, st) if decknets is not None else (None, None))
+        if a is None or json.dumps(a, sort_keys=True) in dead_ends.get(_key(st), ()):
+            a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
+            extra = policy.pop_last_scores()
         if explore and d == "card_reward" and rng.random() < explore:
             a = rng.choice(legal_actions(st))
             extra = {**(extra or {}), "explore": True}
@@ -140,6 +142,8 @@ def main():
     ap.add_argument("--rest-net", default=None, help="restnet.py model decides rest sites")
     ap.add_argument("--event-net", default=None, help="eventnet.py model decides events")
     ap.add_argument("--map-net", default=None, help="mapnet.py model decides map choices")
+    ap.add_argument("--deck-sample", type=float, default=None,
+                    help="RL in the expert bot: card/rest/event/map nets (the --*-net / --card-prior files) sample at this temperature")
     ap.add_argument("--card-prior", default=None, help="card network log-probs added to card reward scores")
     ap.add_argument("--card-prior-weight", type=float, default=None)
     ap.add_argument("--value-weight", type=float, default=None,
@@ -207,13 +211,17 @@ def main():
             for s in chunk:
                 sim = maybe_recycle(sim)
                 try:
+                    dn = None
+                    if args.deck_sample is not None:
+                        from decknets import DeckNets
+                        dn = DeckNets(args.card_prior, args.rest_net, args.event_net, args.map_net, args.deck_sample, seed=s)
                     rec = None
                     if args.record:
                         from record import GameRecorder
                         rec = GameRecorder(args.record, rec_lock, s, {"tag": args.tag, "asc": args.ascension})
                     r = play_run(sim, s, args.character, args.acts, args.nodes, model, args.value_weight, args.ascension,
                                  json.loads(args.rollouts) if args.rollouts else None, rec=rec,
-                                 explore=args.explore)
+                                 explore=args.explore, decknets=dn)
                 except Exception as e:  # engine hang/crash: record it, restart the engine, go on
                     r = {"seed": s, "character": args.character, "ascension": args.ascension, "cleared_acts": 0,
                          "victory": False, "died": False, "act": None, "floor": None, "room": None, "hp": None,
