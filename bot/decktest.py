@@ -12,6 +12,12 @@ import zlib
 
 from combat import TurnPlanner, alive, quick_policy
 
+NET_PILOT = None   # optional nets.NetPolicy for the imagined fights instead of quick_policy
+
+
+def _pilot(st):
+    return NET_PILOT(st) if NET_PILOT is not None else quick_policy(st)
+
 REPS = 16
 UPGRADE_REPS = 5   # the engine's smith step sleeps 200 ms, so fewer seeds here
 PILOT = "quick"   # "quick": quick_policy (fast) or "planner": TurnPlanner(NODES)
@@ -38,10 +44,10 @@ def _to_map(sim, st):
         if d == "card_reward":
             a = policy.choose_card_reward_tier(st)
         elif d == "card_select":
-            a = quick_policy(st) if (st.get("context") or {}).get("room_type") in ("Monster", "Elite", "Boss") \
+            a = _pilot(st) if (st.get("context") or {}).get("room_type") in ("Monster", "Elite", "Boss") \
                 else policy.choose_card_select(st)
         elif d == "combat_play":
-            a = quick_policy(st)
+            a = _pilot(st)
         elif d == "event_choice":
             a = policy.choose_event(st)
         elif d == "bundle_select":
@@ -86,7 +92,7 @@ def boss_fight(sim, map_state, boss_id, seed, pilot=None):
             if end.get("decision") not in ("combat_play", "card_select") or end.get("type") == "error":
                 break
             last = end
-            a = quick_policy(end)
+            a = _pilot(end)
             nxt = sim.act(a[0], **a[1])
             if nxt.get("type") == "error":
                 nxt = sim.act("end_turn") if end.get("decision") == "combat_play" else nxt
@@ -227,7 +233,7 @@ def fight_cost(sim, map_state, encounter, seed):
         if end.get("decision") not in ("combat_play", "card_select") or end.get("type") == "error":
             break
         last = end
-        a = quick_policy(end)
+        a = _pilot(end)
         nxt = sim.act(a[0], **a[1])
         end = sim.act("end_turn") if nxt.get("type") == "error" and end.get("decision") == "combat_play" else nxt
     if end.get("type") == "error" or end.get("decision") in ("combat_play", "card_select"):

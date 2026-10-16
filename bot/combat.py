@@ -337,6 +337,14 @@ def quick_policy(st):
 
 ROLLOUT_DEATH = -300.0
 
+# Optional learned fast policy (nets.NetPolicy: the imitation-trained policy network) that
+# replaces quick_policy in the planner's rollouts, like AlphaGo's rollout policy.
+FAST_POLICY = None
+
+
+def fast_policy(st):
+    return FAST_POLICY(st) if FAST_POLICY is not None else quick_policy(st)
+
 
 STALL_ROUND = 30   # past this round the learned value is ignored for the rest of the fight
 
@@ -406,7 +414,7 @@ class TurnPlanner:
         for _ in range(80):
             if s.get("type") == "error" or s.get("decision") not in ("combat_play", "card_select"):
                 break
-            a = quick_policy(s)
+            a = fast_policy(s)
             if a[0] == "end_turn" and future >= turns:
                 break
             s2 = self.sim.act(a[0], **a[1])

@@ -77,15 +77,20 @@ class GameRecorder:
         self._add({"k": "f", "i": self.fight, "run": run_state(st),
                    "enemies": [e.get("name") for e in st.get("enemies") or []]})
 
-    def combat_step(self, st, legal, a):
+    def combat_step(self, st, legal, a, extra=None):
         keys = [act_key(x) for x in legal]
         k = act_key(a)
-        self._add({"k": "c", "i": self.fight, "s": combat_state(st), "A": [[x[0], x[1]] for x in legal],
-                   "a": keys.index(k) if k in keys else -1, "played": [a[0], a[1]]})
+        row = {"k": "c", "i": self.fight, "s": combat_state(st), "A": [[x[0], x[1]] for x in legal],
+               "a": keys.index(k) if k in keys else -1, "played": [a[0], a[1]]}
+        if extra:
+            row["x"] = extra
+        self._add(row)
 
-    def fight_end(self, st, hp_before, won, rounds):
+    def fight_end(self, st, hp_before, won, rounds, hp_last=None):
+        """hp_after: first state after the fight (post-combat heals included); hp_last: HP in
+        the last combat state (an act boss win heals for the next act)."""
         self._add({"k": "fe", "i": self.fight, "won": won, "hp_before": hp_before,
-                   "hp_after": (st.get("player") or {}).get("hp"), "rounds": rounds})
+                   "hp_after": (st.get("player") or {}).get("hp"), "hp_last": hp_last, "rounds": rounds})
 
     def decision(self, st, legal, a, extra=None):
         row = {"k": "d", "dec": st.get("decision"), "s": run_state(st), "A": [[x[0], x[1]] for x in legal],

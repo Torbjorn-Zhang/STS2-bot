@@ -56,6 +56,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                     last_enemies["hp"] = [e.get("hp") for e in s["enemies"]]
                     last_enemies["round"] = s.get("round")
                     last_enemies["potions"] = len([x for x in (s.get("player") or {}).get("potions") or [] if x])
+                    last_enemies["php"] = (s.get("player") or {}).get("hp")
             on_step = None
             if rec:
                 rec.fight_start(st)
@@ -63,7 +64,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                     s, legal_actions(s) + potion_actions(s) if s.get("decision") == "combat_play" else legal_actions(s), a)
             st = planner.play_combat(st, on_state=watch, on_step=on_step)
             if rec:
-                rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"))
+                rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"),
+                              last_enemies.get("php"))
             fights += 1
             hp_log.append({"floor": floor0, "room": room, "enemies": names, "hp_before": hp0,
                            "hp_after": (st.get("player") or {}).get("hp"), "won": st.get("decision") != "game_over",
@@ -124,11 +126,29 @@ def main():
     ap.add_argument("--no-deck-test", action="store_true", help="pick card rewards by the tier list only")
     ap.add_argument("--record", default=None, help="append self-play records to this .jsonl (record.py)")
     ap.add_argument("--explore", type=float, default=0.0, help="chance of a random card reward pick (data collection)")
+    ap.add_argument("--net-rollouts", default=None, help="policy network (nets.py) as the planner's rollout policy")
+    ap.add_argument("--net-decktest", default=None, help="policy network as the deck test's pilot")
+    ap.add_argument("--run-value", default=None, help="run value network (nets.py value) for card rewards")
+    ap.add_argument("--value-weight-run", type=float, default=None, help="graded points per predicted floor")
     ap.add_argument("--value-weight", type=float, default=None,
                     help="with --model: score = hand-written + w * model (default: model only)")
     args = ap.parse_args()
     if args.no_deck_test:
         policy.DECK_TEST = False
+    if args.net_rollouts or args.net_decktest or args.run_value:
+        import torch
+        torch.set_num_threads(1)
+        import combat
+        import decktest
+        import nets
+        if args.net_rollouts:
+            combat.FAST_POLICY = nets.NetPolicy(args.net_rollouts)
+        if args.net_decktest:
+            decktest.NET_PILOT = nets.NetPolicy(args.net_decktest)
+        if args.run_value:
+            policy.RUN_VALUE = nets.RunValue(args.run_value)
+        if args.value_weight_run is not None:
+            policy.VALUE_WEIGHT = args.value_weight_run
     model = None
     if args.model:
         from value import ValueModel

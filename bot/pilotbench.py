@@ -1,8 +1,9 @@
 """Compare fast pilots (no search) on a fight bench: mean graded score per pilot.
 
-usage: pilotbench.py --tag act2a0 [--reps 2]
-Pilots: quick (combat.quick_policy) and distilled (distill.DistilledPolicy). Same fights,
-same determinized seeds for both, so the comparison is paired.
+usage: pilotbench.py --tag act2a0 [--reps 2] [--pilots quick,net:models/policy.pt]
+Pilots: quick (combat.quick_policy), distilled (distill.DistilledPolicy), net:<path>
+(nets.NetPolicy). Same fights, same determinized seeds for all, so the comparison is
+paired (the last pilot is compared with the first).
 """
 
 import argparse
@@ -46,10 +47,25 @@ def main():
     ap.add_argument("--tag", default="act2a0")
     ap.add_argument("--reps", type=int, default=2)
     ap.add_argument("--model", default=os.path.join(HERE, "models", "distill.json"))
+    ap.add_argument("--pilots", default="quick,distilled")
+    ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
-    from distill import DistilledPolicy
-    pilots = {"quick": quick_policy, "distilled": DistilledPolicy(args.model)}
-    metas = [json.load(open(p)) for p in sorted(glob.glob(os.path.join(HERE, "data", f"bossbench_{args.tag}", "*.save.json")))]
+    pilots = {}
+    for name in args.pilots.split(","):
+        if name == "quick":
+            pilots[name] = quick_policy
+        elif name == "distilled":
+            from distill import DistilledPolicy
+            pilots[name] = DistilledPolicy(args.model)
+        elif name.startswith("net:"):
+            import torch
+            from nets import NetPolicy
+            torch.set_num_threads(1)
+            pilots[name] = NetPolicy(name[4:])
+    metas = []
+    for tag in args.tag.split(","):
+        metas += [json.load(open(p)) for p in sorted(glob.glob(os.path.join(HERE, "data", f"bossbench_{tag}", "*.save.json")))]
+    metas = metas[:args.limit] if args.limit else metas
     sim = fresh_sim()
     res = {k: [] for k in pilots}
     for m in metas:
@@ -59,11 +75,13 @@ def main():
                 for k, v in vals.items():
                     res[k].append(v)
     sim.close()
-    d = [b - a for a, b in zip(res["quick"], res["distilled"])]
+    names = list(pilots)
+    d = [b - a for a, b in zip(res[names[0]], res[names[-1]])]
     mean = sum(d) / len(d)
     se = math.sqrt(sum((x - mean) ** 2 for x in d) / (len(d) - 1)) / math.sqrt(len(d))
-    print(json.dumps({"fights": len(d), "quick": round(sum(res["quick"]) / len(d), 2),
-                      "distilled": round(sum(res["distilled"]) / len(d), 2), "diff": round(mean, 2), "se": round(se, 2)}))
+    wins = {k: sum(1 for v in res[k] if v >= 100) for k in names}
+    print(json.dumps({"fights": len(d), **{k: round(sum(res[k]) / len(d), 2) for k in names}, "wins": wins,
+                      "diff": round(mean, 2), "se": round(se, 2)}))
 
 
 if __name__ == "__main__":

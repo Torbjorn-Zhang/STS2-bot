@@ -5,6 +5,8 @@ import os
 import re
 import threading
 
+import numpy as np
+
 from engine import legal_actions
 
 RARITY = {"Rare": 3.0, "Uncommon": 2.0, "Common": 1.0, "Basic": 0.0}
@@ -246,6 +248,25 @@ DECK_TEST = True        # judge card rewards by imagined boss fights (decktest.p
 TIER_WEIGHT = 4.0       # graded-score points per tier point, on top of the boss test
 LAB_WEIGHT = 0.5        # weight of the card lab's average effect (card_prior_a10.json)
 REFINE_REPS = 0         # card rewards: planner-piloted fights for the top two options (0 = off; 3 was 4-5x slower, no gain)
+RUN_VALUE = None        # optional nets.RunValue: the run value network (trained on self-play outcomes)
+VALUE_WEIGHT = 3.0      # graded-score points per floor of predicted further progress
+
+
+def value_bonus(st, arms):
+    """Run value network: predicted further floors for each card reward option (None =
+    skip), relative to skipping. AlphaGo mixes its value network with rollouts; here the
+    deck test is the rollout."""
+    if RUN_VALUE is None:
+        return {}
+    from record import card_tok, run_state
+    rs = run_state(st)
+    by_index = {c["index"]: c for c in st.get("cards") or []}
+    decks = [rs["deck"] if a is None else rs["deck"] + [card_tok(by_index[a])] for a in arms]
+    rem, _ = RUN_VALUE.predict([rs] * len(arms), decks)
+    ref = rem[list(arms).index(None)] if None in arms else float(np.mean(rem))
+    return {a: float(r - ref) for a, r in zip(arms, rem)}
+
+
 def _load_prior(name):
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as fh:
@@ -272,6 +293,7 @@ def choose_card_reward(st, sim=None):
         import decktest
         scores = decktest.evaluate_options(sim, st)
         if scores:
+            vb = value_bonus(st, list(scores))
             full = (st.get("player") or {}).get("deck")
             deck_n = (st.get("player") or {}).get("deck_size") or 10
             act = (st.get("context") or {}).get("act") or 1
@@ -279,12 +301,13 @@ def choose_card_reward(st, sim=None):
 
             def total(arm):
                 if arm is None:
-                    return scores[arm]
+                    return scores[arm] + VALUE_WEIGHT * vb.get(arm, 0.0)
                 c = by_index[arm]
                 # the deck test for this deck, the hand-made tier prior, and the card lab's
                 # average effect across 48 A10 decks (less noisy, same units as the test)
                 return (scores[arm] + TIER_WEIGHT * (card_value(c, deck_n, full, act) - SKIP_BELOW)
-                        + LAB_WEIGHT * lab_value(base_key(c), act, (st.get("context") or {}).get("floor") or 0))
+                        + LAB_WEIGHT * lab_value(base_key(c), act, (st.get("context") or {}).get("floor") or 0)
+                        + VALUE_WEIGHT * vb.get(arm, 0.0))
 
             best = max(scores, key=total)
             if REFINE_REPS and len(scores) > 1:
@@ -297,6 +320,8 @@ def choose_card_reward(st, sim=None):
                     best = max(fine, key=lambda k: fine[k] + total(k) - scores[k])
             _LAST_SCORES.v = {"test": {str(k): round(v, 2) for k, v in scores.items()},
                               "total": {str(k): round(total(k), 2) for k in scores}}
+            if vb:
+                _LAST_SCORES.v["value"] = {str(k): round(v, 3) for k, v in vb.items()}
             return ("skip_card_reward", {}) if best is None else ("select_card_reward", {"card_index": best})
     return choose_card_reward_tier(st)
 
