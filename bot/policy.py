@@ -269,6 +269,8 @@ CARD_PRIOR_WEIGHT = 5.0 # graded points per unit of log-probability
 REST_NET = None         # optional restnet.RestPolicy: rest-site choice by the network (greedy)
 EVENT_NET = None        # optional eventnet.EventPolicy: event choice by the network (greedy)
 MAP_NET = None          # optional mapnet.MapPolicy: next map node by the network (greedy)
+EVENT_NET_NEOW = False  # the event network also picks Neow's opening option (it learns them in self-play)
+CARD_NET_DECIDES = False  # card rewards by the card network alone (CARD_PRIOR), no deck test
 RUN_VALUE = None        # optional nets.RunValue: the run value network (trained on self-play outcomes)
 VALUE_WEIGHT = 3.0      # graded-score points per floor of predicted further progress
 
@@ -312,6 +314,8 @@ def lab_value(cid, act, floor):
 def choose_card_reward(st, sim=None):
     if CARD_NET is not None and not DECK_TEST and st.get("cards"):
         return CARD_NET(st)
+    if CARD_NET_DECIDES and CARD_PRIOR is not None and st.get("cards"):
+        return CARD_PRIOR(st)
     if DECK_TEST and sim is not None and st.get("cards"):
         import decktest
         scores = decktest.evaluate_options(sim, st)
@@ -582,7 +586,7 @@ def choose_event(st, sim=None):
         return ("leave_room", {})
     hp = hp_ratio(st)
     neow = [o for o in opts if o.get("title") in NEOW]
-    if len(neow) == len(opts):
+    if len(neow) == len(opts) and not (EVENT_NET is not None and EVENT_NET_NEOW and sim is not None):
         best = max(opts, key=lambda o: NEOW[o["title"]])
         _remember_event(best)
         return ("choose_option", {"option_index": best["index"]})

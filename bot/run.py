@@ -142,6 +142,8 @@ def main():
     ap.add_argument("--rest-net", default=None, help="restnet.py model decides rest sites")
     ap.add_argument("--event-net", default=None, help="eventnet.py model decides events")
     ap.add_argument("--map-net", default=None, help="mapnet.py model decides map choices")
+    ap.add_argument("--event-net-neow", action="store_true", help="the event net also decides Neow")
+    ap.add_argument("--card-net-decides", action="store_true", help="card rewards by the --card-prior net alone")
     ap.add_argument("--deck-sample", type=float, default=None,
                     help="RL in the expert bot: card/rest/event/map nets (the --*-net / --card-prior files) sample at this temperature")
     ap.add_argument("--card-prior", default=None, help="card network log-probs added to card reward scores")
@@ -179,6 +181,8 @@ def main():
         if args.map_net:
             from mapnet import MapPolicy
             policy.MAP_NET = MapPolicy(args.map_net)
+        policy.EVENT_NET_NEOW = args.event_net_neow
+        policy.CARD_NET_DECIDES = args.card_net_decides
         if args.card_prior_weight is not None:
             policy.CARD_PRIOR_WEIGHT = args.card_prior_weight
         if args.value_weight_run is not None:
