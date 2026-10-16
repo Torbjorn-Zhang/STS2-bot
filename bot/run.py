@@ -144,6 +144,7 @@ def main():
     ap.add_argument("--map-net", default=None, help="mapnet.py model decides map choices")
     ap.add_argument("--event-net-neow", action="store_true", help="the event net also decides Neow")
     ap.add_argument("--card-net-decides", action="store_true", help="card rewards by the --card-prior net alone")
+    ap.add_argument("--shop-net", default=None, help="shopnet.py model decides shop purchases")
     ap.add_argument("--deck-sample", type=float, default=None,
                     help="RL in the expert bot: card/rest/event/map nets (the --*-net / --card-prior files) sample at this temperature")
     ap.add_argument("--card-prior", default=None, help="card network log-probs added to card reward scores")
@@ -154,7 +155,7 @@ def main():
     if args.no_deck_test:
         policy.DECK_TEST = False
     if args.net_rollouts or args.net_decktest or args.run_value or args.rollout_value or args.rollout_xvalue or args.rest_net \
-            or args.event_net or args.card_prior or args.map_net:
+            or args.event_net or args.card_prior or args.map_net or args.shop_net:
         import torch
         torch.set_num_threads(1)
         import combat
@@ -182,6 +183,9 @@ def main():
             from mapnet import MapPolicy
             policy.MAP_NET = MapPolicy(args.map_net)
         policy.EVENT_NET_NEOW = args.event_net_neow
+        if args.shop_net:
+            from shopnet import ShopPolicy
+            policy.SHOP_NET = ShopPolicy(args.shop_net)
         policy.CARD_NET_DECIDES = args.card_net_decides
         if args.card_prior_weight is not None:
             policy.CARD_PRIOR_WEIGHT = args.card_prior_weight

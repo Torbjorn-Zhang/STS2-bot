@@ -271,6 +271,7 @@ EVENT_NET = None        # optional eventnet.EventPolicy: event choice by the net
 MAP_NET = None          # optional mapnet.MapPolicy: next map node by the network (greedy)
 EVENT_NET_NEOW = False  # the event network also picks Neow's opening option (it learns them in self-play)
 CARD_NET_DECIDES = False  # card rewards by the card network alone (CARD_PRIOR), no deck test
+SHOP_NET = None         # optional shopnet.ShopPolicy: shop purchases by the network (greedy)
 RUN_VALUE = None        # optional nets.RunValue: the run value network (trained on self-play outcomes)
 VALUE_WEIGHT = 3.0      # graded-score points per floor of predicted further progress
 
@@ -685,6 +686,19 @@ def choose_shop(st, memo, sim=None):
 def decide(sim, st, avoid=(), memo=None):
     """avoid: JSON-encoded actions that made no progress from this exact state before.
     memo: per-run scratch dict (shop visits)."""
+    if st.get("decision") == "shop" and SHOP_NET is not None and sim is not None:
+        memo = memo if memo is not None else {}
+        ctx = st.get("context") or {}
+        visit = memo.setdefault(("shopnet", ctx.get("act"), ctx.get("floor")), {"removed": False, "bought": 0})
+        opts, _, z = SHOP_NET.scores(sim, st, visit)
+        for i in np.argsort(-z):
+            a = opts[int(i)][1]
+            if json.dumps(a, sort_keys=True) not in avoid:
+                if a[0] == "remove_card":
+                    visit["removed"] = True
+                elif a[0].startswith("buy_"):
+                    visit["bought"] += 1
+                return a
     if st.get("decision") == "shop":
         a = choose_shop(st, memo if memo is not None else {}, sim)
         if json.dumps(a, sort_keys=True) not in avoid:

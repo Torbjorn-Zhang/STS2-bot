@@ -48,7 +48,7 @@ def sample(pilot, st, acts, temperature, rng):
 
 def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card_pol=None, card_temp=0.0,
                   rest_pol=None, rest_temp=0.0, event_pol=None, event_temp=0.0, map_pol=None, map_temp=0.0,
-                  record_map=False):
+                  record_map=False, shop_pol=None, shop_temp=0.0, record_shop=False):
     policy.ASCENSION = ascension
     st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
     memo, steps, in_fight, hp0, last = {}, 0, False, None, None
@@ -121,6 +121,32 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
                 extra = {"rlp": float(math.log(max(pr[i], 1e-12))), "rkeys": ks, "rk": ks[i], "route": route}
             else:
                 a = policy.decide(sim, st, avoid=(), memo=memo)
+        elif d == "shop" and (shop_pol is not None or record_shop):
+            from shopnet import shop_options
+            visit = memo.setdefault(("shopnet", ctx.get("act"), ctx.get("floor")), {"removed": False, "bought": 0})
+            before = [bool(visit["removed"]), visit["bought"]]
+            if shop_pol is not None:
+                opts, route, z = shop_pol.scores(sim, st, visit)
+                zz = (z - z.max()) / max(shop_temp, 1e-6)
+                pr = np.exp(zz)
+                pr /= pr.sum()
+                i = rng.choices(range(len(opts)), weights=pr.tolist())[0] if shop_temp > 0 else int(np.argmax(z))
+                a = opts[i][1]
+                extra = {"sopts": [o for o, _ in opts], "sk": i, "slp": float(math.log(max(pr[i], 1e-12))),
+                         "route": route, "smemo": before}
+            else:
+                a = policy.decide(sim, st, avoid=(), memo=memo)
+                opts = shop_options(st, visit)
+                keys = [json.dumps(list(x), sort_keys=True) for _, x in opts]
+                k = json.dumps([a[0], a[1]], sort_keys=True)
+                if k in keys and len(opts) > 1:
+                    import decktest
+                    route = [t for t, _ in decktest.route_to_boss(sim, st)]
+                    extra = {"sopts": [o for o, _ in opts], "sk": keys.index(k), "route": route, "smemo": before}
+            if a[0] == "remove_card":
+                visit["removed"] = True
+            elif a[0].startswith("buy_"):
+                visit["bought"] += 1
         elif d == "map_select" and map_pol is not None and len(st.get("choices") or []) > 1:
             chs, descs, z = map_pol.scores(sim, st)
             zz = (z - z.max()) / max(map_temp, 1e-6)
@@ -199,6 +225,9 @@ def main():
     ap.add_argument("--map-policy", default=None, help="mapnet.py model for map choices (default: the DP)")
     ap.add_argument("--map-temperature", type=float, default=0.0)
     ap.add_argument("--record-map", action="store_true", help="record the DP's map choices (imitation data)")
+    ap.add_argument("--shop-policy", default=None, help="shopnet.py model for shops (default: rules)")
+    ap.add_argument("--shop-temperature", type=float, default=0.0)
+    ap.add_argument("--record-shop", action="store_true", help="record the rules' shop choices (imitation data)")
     args = ap.parse_args()
     import random
     import torch
@@ -219,6 +248,10 @@ def main():
     if args.event_policy:
         from eventnet import EventPolicy
         event_pol = EventPolicy(args.event_policy)
+    shop_pol = None
+    if args.shop_policy:
+        from shopnet import ShopPolicy
+        shop_pol = ShopPolicy(args.shop_policy)
     map_pol = None
     if args.map_policy:
         from mapnet import MapPolicy
@@ -239,7 +272,8 @@ def main():
             try:
                 r = play_fast_run(sim, s, pilot, args.ascension, args.acts, rec, args.temperature, rng,
                                   card_pol, args.card_temperature, rest_pol, args.rest_temperature,
-                                  event_pol, args.event_temperature, map_pol, args.map_temperature, args.record_map)
+                                  event_pol, args.event_temperature, map_pol, args.map_temperature, args.record_map,
+                                  shop_pol, args.shop_temperature, args.record_shop)
             except Exception as e:
                 r = {"seed": s, "error": repr(e)[:200]}
                 try:
