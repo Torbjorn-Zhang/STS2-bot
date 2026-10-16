@@ -43,7 +43,8 @@ def fight(sim, meta, card, rep, rollouts, nodes):
         r = sim.send({"cmd": "set_player", "add_cards": [card]})
         if r.get("type") == "error":
             return {"seed": meta["seed"], "rep": rep, "card": card, "error": r.get("message")}
-    st = sim.act("select_map_node", col=meta["boss_node"][0], row=meta["boss_node"][1])
+    col, row = meta.get("node") or meta["boss_node"]
+    st = sim.act("select_map_node", col=col, row=row)
     sim.send({"cmd": "determinize", "seed": zlib.crc32(f"{meta['seed']}/{rep}".encode())})
     enemy_max = sum((e.get("max_hp") or 0) for e in st.get("enemies") or [])
     rounds, last = [0], {"s": st}
@@ -105,6 +106,7 @@ def main():
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--summary-only", action="store_true")
     ap.add_argument("--pilot", default="planner", choices=["planner", "quick"])
+    ap.add_argument("--room", default=None, help="fight benches: only this room type (Monster, Elite, Boss)")
     ap.add_argument("--label", default="heur", help="results file suffix (one per planner config)")
     args = ap.parse_args()
 
@@ -120,6 +122,8 @@ def main():
         for p in sorted(glob.glob(os.path.join(HERE, "data", f"bossbench_{args.tag}", "*.save.json"))):
             with open(p) as fh:
                 metas.append(json.load(fh))
+        if args.room:
+            metas = [m for m in metas if m.get("room", "Boss") == args.room]
         cards = args.cards.split(",") if args.cards else IRONCLAD
         done = {(r["seed"], r["rep"], r["card"]) for r in rows}
         jobs = [(m, c, rep) for c in [None] + cards for m in metas for rep in range(args.reps)

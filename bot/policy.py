@@ -208,11 +208,25 @@ SKIP_BELOW = 1.7   # a weaker card only dilutes the deck
 DECK_TEST = True        # judge card rewards by imagined boss fights (decktest.py)
 TIER_WEIGHT = 4.0       # graded-score points per tier point, on top of the boss test
 LAB_WEIGHT = 0.5        # weight of the card lab's average effect (card_prior_a10.json)
-try:
-    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "card_prior_a10.json")) as _fh:
-        LAB = json.load(_fh)["values"]
-except (OSError, ValueError, KeyError):
-    LAB = {}
+def _load_prior(name):
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as fh:
+            return json.load(fh)["values"]
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+LAB = _load_prior("card_prior_a10.json")              # act-1 boss fights
+LAB_HALL2 = _load_prior("card_prior_act2_hall.json")  # act-2 hallway fights
+
+
+def lab_value(cid, act, floor):
+    """Card lab prior: the boss value, averaged with the act-2 hallway value once the
+    deck is heading into act 2 or beyond (mirrors decktest.tests_for)."""
+    boss = LAB.get(cid, 0.0)
+    if act >= 2 or floor >= 8:
+        return 0.5 * (boss + LAB_HALL2.get(cid, 0.0))
+    return boss
 
 
 def choose_card_reward(st, sim=None):
@@ -232,7 +246,7 @@ def choose_card_reward(st, sim=None):
                 # the deck test for this deck, the hand-made tier prior, and the card lab's
                 # average effect across 48 A10 decks (less noisy, same units as the test)
                 return (scores[arm] + TIER_WEIGHT * (card_value(c, deck_n, full, act) - SKIP_BELOW)
-                        + LAB_WEIGHT * LAB.get(base_key(c), 0.0))
+                        + LAB_WEIGHT * lab_value(base_key(c), act, (st.get("context") or {}).get("floor") or 0))
 
             best = max(scores, key=total)
             return ("skip_card_reward", {}) if best is None else ("select_card_reward", {"card_index": best})
