@@ -24,6 +24,14 @@ from record import GameRecorder, combat_state, run_state
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIGHT_ROOMS = ("Monster", "Elite", "Boss")
+# Calibrated fast world: the policy network loses more HP than the search planner, so
+# strategy learned with it overvalues healing and block. With CALIBRATE, hallway and elite
+# losses are refunded down to the planner's (A10 bench decks: planner/net loss 0.8 hallway,
+# 0.87 elite) and boss fights start with BOSS_BONUS extra HP (net 52/108 boss wins at +20
+# vs the planner's 54/108).
+CALIBRATE = False
+LOSS_SCALE = {"Monster": 0.8, "Elite": 0.87}
+BOSS_BONUS = 20
 
 
 def sample(pilot, st, acts, temperature, rng):
@@ -53,11 +61,26 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
         combat = d == "combat_play" or (d == "card_select" and room in FIGHT_ROOMS and in_fight)
         if d == "combat_play" and not in_fight:
             in_fight, hp0, fight_steps = True, (st.get("player") or {}).get("hp"), 0
+            fight_room = room
+            if CALIBRATE and room == "Boss":
+                st = dict(st, player=dict(st.get("player") or {}, hp=(hp0 or 0) + BOSS_BONUS))
+                sim.send({"cmd": "set_player", "hp": (hp0 or 0) + BOSS_BONUS})
             rec.fight_start(st)
             fights += 1
         if in_fight and not combat:
-            rec.fight_end(st, hp0, True, (last or {}).get("round"), (last or st).get("player", {}).get("hp"))
+            hp_last = (last or st).get("player", {}).get("hp")
+            rec.fight_end(st, hp0, True, (last or {}).get("round"), hp_last)
             in_fight = False
+            if CALIBRATE and st.get("decision") != "game_over":
+                p = st.get("player") or {}
+                cur, mhp = p.get("hp") or 0, p.get("max_hp") or 80
+                new = cur
+                if fight_room in LOSS_SCALE and hp0 is not None and hp_last is not None:
+                    new = cur + (1 - LOSS_SCALE[fight_room]) * max(0, hp0 - hp_last)
+                new = int(min(mhp, new))
+                if new != cur:
+                    sim.send({"cmd": "set_player", "hp": new})
+                    st = dict(st, player=dict(p, hp=new))
         steps += 1
         if combat:
             if st.get("enemies") is not None:
@@ -155,12 +178,15 @@ def main():
     ap.add_argument("--rest-temperature", type=float, default=0.0, help=">0: sample rest choices (RL)")
     ap.add_argument("--event-policy", default=None, help="eventnet.py model for events (default: rules)")
     ap.add_argument("--event-temperature", type=float, default=0.0, help=">0: sample event choices (RL)")
+    ap.add_argument("--calibrate", action="store_true", help="refund HP to the planner's losses, boss HP bonus")
     args = ap.parse_args()
     import random
     import torch
     torch.set_num_threads(1)
     from nets import NetPolicy
     policy.DECK_TEST = False
+    global CALIBRATE
+    CALIBRATE = args.calibrate
     card_pol = None
     if args.card_policy:
         from nets import CardPolicy

@@ -27,13 +27,16 @@ def sh(args, log):
     return out.stdout.strip().splitlines()
 
 
+CAL = []   # ["--calibrate"] when the loop runs in the calibrated fast world
+
+
 def evaluate(combat, card, runs, workers, log, rest=None, tag="card", event=None):
     out = os.path.join("data", "rl", f"{tag}_eval.jsonl")
     if os.path.exists(os.path.join(HERE, out)):
         os.remove(os.path.join(HERE, out))
     res = json.loads(sh(["nice", "-n", "19", PY, "selfplay.py", str(runs), "--policy", combat, "--temperature", "0",
                          "--card-policy", card, "--workers", str(workers), "--seed-prefix", "cardeval", "--out", out]
-                        + (["--rest-policy", rest] if rest else []) + (["--event-policy", event] if event else []),
+                        + (["--rest-policy", rest] if rest else []) + (["--event-policy", event] if event else []) + CAL,
                         log)[-1])
     os.remove(os.path.join(HERE, out))
     return res
@@ -52,7 +55,10 @@ def main():
     ap.add_argument("--rest-init", default=None, help="restnet.py model: rest sites learned too")
     ap.add_argument("--event-init", default=None, help="eventnet.py model: events learned too")
     ap.add_argument("--tag", default="cardloop")
+    ap.add_argument("--calibrate", action="store_true", help="self-play in the calibrated fast world")
     args = ap.parse_args()
+    if args.calibrate:
+        CAL.append("--calibrate")
     os.makedirs(os.path.join(HERE, "data", "rl"), exist_ok=True)
     log = os.path.join(HERE, "runs", f"{args.tag}.log")
     cur, rest, event = args.init, args.rest_init, args.event_init
@@ -70,8 +76,8 @@ def main():
                               "--temperature", "0", "--card-policy", cur, "--card-temperature", str(args.temperature),
                               "--workers", str(args.workers), "--seed-prefix", f"{args.tag}{it}", "--out", data]
                              + (["--rest-policy", rest, "--rest-temperature", str(args.temperature)] if rest else [])
-                             + (["--event-policy", event, "--event-temperature", str(args.temperature)] if event else []),
-                             log)[-1])
+                             + (["--event-policy", event, "--event-temperature", str(args.temperature)] if event else [])
+                             + CAL, log)[-1])
         new = os.path.join("models", f"{args.tag}_card{it}.pt")
         sh(["nice", "-n", "19", PY, "nets.py", "cardrl", data, "--init", cur, "--out", new, "--temperature",
             str(args.temperature)], log)

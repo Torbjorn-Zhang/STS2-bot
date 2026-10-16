@@ -912,7 +912,7 @@ class CardPolicy:
         self.model.load_state_dict(blob["state"])
         self.model.eval()
 
-    def __call__(self, st):
+    def scores(self, st):
         from engine import legal_actions
         from record import card_tok, run_state
         acts = legal_actions(st)
@@ -922,12 +922,193 @@ class CardPolicy:
         with torch.no_grad():
             z = self.model(torch.from_numpy(self.enc.encode(run_state(st))[None]), torch.from_numpy(np.stack(opts)),
                            torch.zeros(len(acts), dtype=torch.long)).numpy()
+        return acts, z
+
+    def __call__(self, st):
+        acts, z = self.scores(st)
         return acts[int(np.argmax(z))]
+
+
+def train_card_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, batch=256, clip=0.2, ent=0.01):
+    """PPO on card reward choices in self-play (the RL stage for deck building). Return: the
+    run's final progress (floors), baseline: mean final progress of runs at the same
+    (act, floor) in this data."""
+    blob = torch.load(init, weights_only=False)
+    enc = RunEncoder.from_json(blob["enc"])
+    model = PolicyNet(enc.dim, len(enc.cards) + 2, blob["hidden"])
+    model.load_state_dict(blob["state"])
+    runs = load_runs(paths)
+    items, by_bucket = [], defaultdict(list)
+    for rows in runs.values():
+        fin = final_progress(rows[-1])
+        for r in rows:
+            if r["k"] == "d" and r["dec"] == "card_reward" and (r.get("x") or {}).get("lp") is not None and len(r["A"]) > 1:
+                key = (r["s"]["act"], r["s"]["floor"])
+                items.append((r, fin, key))
+                by_bucket[key].append(fin)
+    base = {k: float(np.mean(v)) for k, v in by_bucket.items()}
+    S, A, start, chosen, lp_old, adv = [], [], [], [], [], []
+    for r, fin, key in items:
+        S.append(enc.encode(r["s"]))
+        start.append(len(A))
+        chosen.append(r["a"])
+        lp_old.append(r["x"]["lp"])
+        adv.append(fin - base[key])
+        cards = r.get("cards") or []
+        for a in r["A"]:
+            i = (a[1] or {}).get("card_index")
+            A.append(card_option(enc, cards[i] if a[0] == "select_card_reward" and i is not None and i < len(cards) else None))
+    start.append(len(A))
+    S, A, start, chosen = np.stack(S), np.stack(A), np.asarray(start), np.asarray(chosen)
+    lp_old, adv = np.asarray(lp_old, dtype=np.float32), np.asarray(adv, dtype=np.float32)
+    print("card rl decisions", len(chosen), "runs", len(runs), "adv std", round(float(adv.std()), 3), flush=True)
+    adv = (adv - adv.mean()) / (adv.std() + 1e-6)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    for ep in range(epochs):
+        order = np.random.RandomState(ep).permutation(len(chosen))
+        stats, nb = defaultdict(float), 0
+        for sel in _batches(order, batch):
+            a_idx, owner = [], []
+            for k, d in enumerate(sel):
+                a_idx.extend(range(start[d], start[d + 1]))
+                owner.extend([k] * (start[d + 1] - start[d]))
+            logits = model(torch.from_numpy(S[sel]), torch.from_numpy(A[a_idx]), torch.as_tensor(owner))
+            sizes = np.asarray([start[d + 1] - start[d] for d in sel])
+            logp = F.log_softmax(grouped(logits / temperature, np.asarray(owner), sizes), dim=1)
+            lp_new = logp.gather(1, torch.as_tensor(chosen[sel])[:, None]).squeeze(1)
+            ratio = torch.exp(lp_new - torch.from_numpy(lp_old[sel]))
+            ad = torch.from_numpy(adv[sel])
+            pg = -torch.min(ratio * ad, ratio.clamp(1 - clip, 1 + clip) * ad).mean()
+            entropy = -(logp.exp() * logp.clamp(min=-30)).sum(1).mean()
+            loss = pg - ent * entropy
+            opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+            stats["pg"] += pg.item()
+            stats["ent"] += entropy.item()
+            stats["clipfrac"] += ((ratio - 1).abs() > clip).float().mean().item()
+            nb += 1
+        print(json.dumps({"epoch": ep, **{k: round(v / nb, 4) for k, v in stats.items()}}), flush=True)
+    torch.save({**blob, "state": model.state_dict(), "rl_from": init, "rl_data": paths}, out)
+    print("saved", out)
+
+
+
+# ---------------------------------------------------------------- combat value from expert play
+
+class ExpertValueNet(nn.Module):
+    """Heads: P(win this fight) and HP change until its end (scaled), under the planner's
+    play (trained on the expert games' outcomes, like AlphaGo's value network)."""
+
+    def __init__(self, state_dim, hidden=256):
+        super().__init__()
+        self.body = nn.Sequential(nn.Dropout(0.2), nn.Linear(state_dim, hidden), nn.ReLU(), nn.Dropout(0.3),
+                                  nn.Linear(hidden, hidden), nn.ReLU())
+        self.win = nn.Linear(hidden, 1)
+        self.dhp = nn.Linear(hidden, 1)
+
+    def forward(self, xs):
+        h = self.body(xs)
+        return self.win(h).squeeze(-1), self.dhp(h).squeeze(-1)
+
+
+EV_PHASE = "all"   # "end": only end-of-turn states (the planner's leaves: hand played out)
+
+
+def expert_value_dataset(runs, enc, rooms=None):
+    S, W, D, keys = [], [], [], []
+    for key, rows in runs.items():
+        header, ends = {}, {}
+        for r in rows:
+            if r["k"] == "fe":
+                ends[r["i"]] = r
+        for r in rows:
+            if r["k"] == "f":
+                header[r["i"]] = r["run"]
+            elif r["k"] == "c" and r["i"] in header and r["i"] in ends and r["s"]["d"] == "combat_play":
+                h = header[r["i"]]
+                if rooms and h.get("room") not in rooms:
+                    continue
+                if EV_PHASE == "end" and r["played"][0] != "end_turn":
+                    continue
+                e = ends[r["i"]]
+                hp = r["s"]["hp"] or 0
+                end = e.get("hp_last") if e.get("hp_last") is not None else e.get("hp_after") or 0
+                won = bool(e.get("won"))
+                S.append(enc.state(r["s"], h))
+                W.append(float(won))
+                D.append(((end - hp) if won else (-hp - DEATH_HP)) / RETURN_SCALE)
+                keys.append(key)
+    return S, np.asarray(W, dtype=np.float32), np.asarray(D, dtype=np.float32), keys
+
+
+def train_expert_value(paths, out, init_enc, epochs=6, hidden=128, lr=3e-4, batch=512):
+    t0 = time.time()
+    enc = CombatEncoder.from_json(torch.load(init_enc, weights_only=False)["enc"])
+    runs = load_runs(paths)
+    tr, va = split_runs(runs)
+    Str, Wtr, Dtr, _ = expert_value_dataset(tr, enc)
+    Sva, Wva, Dva, _ = expert_value_dataset(va, enc)
+    Ctr, Cva = _csr(Str, enc.state_dim), _csr(Sva, enc.state_dim)
+    print("expert value states", len(Wtr), len(Wva), "win rate", round(float(Wtr.mean()), 3), "encoded",
+          round(time.time() - t0), "s", flush=True)
+    torch.manual_seed(0)
+    model = ExpertValueNet(enc.state_dim, hidden)
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    best = (1e9, None)
+    for ep in range(epochs):
+        model.train()
+        for sel in _batches(np.random.RandomState(ep).permutation(len(Wtr)), batch):
+            pw, pd = model(_dense(Ctr, sel))
+            loss = F.binary_cross_entropy_with_logits(pw, torch.from_numpy(Wtr[sel])) + \
+                F.mse_loss(pd, torch.from_numpy(Dtr[sel]))
+            opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+        model.eval()
+        with torch.no_grad():
+            pw, pd = [], []
+            for sel in _batches(np.arange(len(Wva)), 4096):
+                a, b = model(_dense(Cva, sel))
+                pw.append(a)
+                pd.append(b)
+            pw, pd = torch.cat(pw), torch.cat(pd)
+            bce = F.binary_cross_entropy_with_logits(pw, torch.from_numpy(Wva)).item()
+            mse = F.mse_loss(pd, torch.from_numpy(Dva)).item()
+        base_bce = float(-np.mean(Wva * np.log(Wtr.mean()) + (1 - Wva) * np.log(1 - Wtr.mean())))
+        print(json.dumps({"epoch": ep, "val_win_bce": round(bce, 4), "base_bce": round(base_bce, 4), "val_dhp_mse": round(mse, 4),
+                          "dhp_var": round(float(Dva.var()), 4)}), flush=True)
+        if bce + mse < best[0]:
+            best = (bce + mse, {k: v.clone() for k, v in model.state_dict().items()})
+    model.load_state_dict(best[1])
+    torch.save({"kind": "expert_value", "enc": enc.to_json(), "hidden": hidden, "state": model.state_dict(),
+                "sources": paths}, out)
+    print("saved", out)
+
+
+class ExpertValue:
+    """Full sim state -> (P(win), expected HP change to the fight's end) under expert play."""
+
+    def __init__(self, path):
+        blob = torch.load(path, weights_only=False)
+        self.enc = CombatEncoder.from_json(blob["enc"])
+        self.net = ExpertValueNet(self.enc.state_dim, blob["hidden"])
+        self.net.load_state_dict(blob["state"])
+        self.net.eval()
+
+    def __call__(self, st):
+        from record import combat_state, run_state
+        S = _csr([self.enc.state(combat_state(st), run_state(st))], self.enc.state_dim)
+        with torch.no_grad():
+            w, d = self.net(_dense(S, [0]))
+        return float(torch.sigmoid(w)[0]), float(d[0]) * RETURN_SCALE
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["policy", "value", "rl", "card"])
+    ap.add_argument("mode", choices=["policy", "value", "rl", "card", "cardrl", "xvalue"])
     ap.add_argument("--init", default=None, help="rl: policy to improve")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("data", nargs="+")
@@ -940,6 +1121,12 @@ def main():
     if args.mode == "policy":
         train_policy(args.data, args.out or os.path.join(HERE, "models", "policy.pt"), epochs=args.epochs or 8,
                      hidden=args.hidden, max_runs=args.max_runs)
+    elif args.mode == "xvalue":
+        global EV_PHASE
+        EV_PHASE = os.environ.get("EV_PHASE", "all")
+        train_expert_value(args.data, args.out, args.init, epochs=args.epochs or 6, hidden=args.hidden if args.hidden != 256 else 128)
+    elif args.mode == "cardrl":
+        train_card_rl(args.data, args.init, args.out, temperature=args.temperature, epochs=args.epochs or 3)
     elif args.mode == "card":
         train_card(args.data, args.out or os.path.join(HERE, "models", "card.pt"), epochs=args.epochs or 40)
     elif args.mode == "rl":

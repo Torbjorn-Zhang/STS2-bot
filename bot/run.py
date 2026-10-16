@@ -136,6 +136,7 @@ def main():
     ap.add_argument("--value-weight-run", type=float, default=None, help="graded points per predicted floor")
     ap.add_argument("--rest-value", action="store_true", help="heal vs smith by the run value network")
     ap.add_argument("--rollout-value", default=None, help="RL policy file whose combat value net ends rollouts")
+    ap.add_argument("--rollout-xvalue", default=None, help="expert value net (nets.py xvalue) ends rollouts")
     ap.add_argument("--rest-net", default=None, help="restnet.py model decides rest sites")
     ap.add_argument("--event-net", default=None, help="eventnet.py model decides events")
     ap.add_argument("--card-prior", default=None, help="card network log-probs added to card reward scores")
@@ -145,7 +146,7 @@ def main():
     args = ap.parse_args()
     if args.no_deck_test:
         policy.DECK_TEST = False
-    if args.net_rollouts or args.net_decktest or args.run_value or args.rollout_value or args.rest_net \
+    if args.net_rollouts or args.net_decktest or args.run_value or args.rollout_value or args.rollout_xvalue or args.rest_net \
             or args.event_net or args.card_prior:
         import torch
         torch.set_num_threads(1)
@@ -160,6 +161,8 @@ def main():
             policy.RUN_VALUE = nets.RunValue(args.run_value)
         if args.rollout_value:
             combat.ROLLOUT_VALUE = nets.CombatValue(args.rollout_value)
+        if args.rollout_xvalue:
+            combat.ROLLOUT_VALUE = nets.ExpertValue(args.rollout_xvalue)
         if args.rest_net:
             from restnet import RestPolicy
             policy.REST_NET = RestPolicy(args.rest_net)

@@ -166,6 +166,9 @@ def main():
     ap.add_argument("--nodes", type=int, default=400)
     ap.add_argument("--net-rollouts", default=None, help="policy network as the planner's rollout policy")
     ap.add_argument("--rollout-value", default=None, help="RL policy file whose combat value net ends rollouts")
+    ap.add_argument("--rollout-xvalue", default=None, help="expert value net (nets.py xvalue) ends rollouts")
+    ap.add_argument("--leaf-xvalue", default=None, help="expert value net scores the planner's leaves")
+    ap.add_argument("--leaf-mu", type=float, default=1.0)
     ap.add_argument("--ascension", type=int, default=0)
     ap.add_argument("--act", type=int, default=1, help="collect: which act's boss")
     ap.add_argument("--subset", default=None, help="'even' or 'odd' seeds only (train/validation split)")
@@ -196,7 +199,7 @@ def main():
 
     if args.weights:
         combat.W.update(json.loads(args.weights))
-    if args.net_rollouts or args.rollout_value:
+    if args.net_rollouts or args.rollout_value or args.rollout_xvalue or args.leaf_xvalue:
         import torch
         torch.set_num_threads(1)
         import nets
@@ -204,6 +207,11 @@ def main():
             combat.FAST_POLICY = nets.NetPolicy(args.net_rollouts)
         if args.rollout_value:
             combat.ROLLOUT_VALUE = nets.CombatValue(args.rollout_value)
+        if args.rollout_xvalue:
+            combat.ROLLOUT_VALUE = nets.ExpertValue(args.rollout_xvalue)
+        if args.leaf_xvalue:
+            combat.LEAF_VALUE = nets.ExpertValue(args.leaf_xvalue)
+            combat.LEAF_MU = args.leaf_mu
     model = None
     if args.model:
         from value import ValueModel

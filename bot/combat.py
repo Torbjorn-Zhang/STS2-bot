@@ -379,6 +379,10 @@ FAST_POLICY = None
 # learned from self-play). A rollout's end state is then judged by
 # (1 - lam) * evaluate + lam * (win + HP + predicted change), lam from the rollout config.
 ROLLOUT_VALUE = None
+# Optional expert value network scoring the planner's leaves directly (AlphaGo's value
+# network at the leaves): score = (1 - LEAF_MU) * evaluate + LEAF_MU * (win * P(win) + HP + change).
+LEAF_VALUE = None
+LEAF_MU = 1.0
 
 
 def fast_policy(st):
@@ -415,6 +419,14 @@ class TurnPlanner:
     def _score_leaves(self, root, leaves):
         """leaves: [(kind, path, state)], kind in end / terminal / partial."""
         scores = [evaluate(root, st) for _, _, st in leaves]
+        if LEAF_VALUE is not None and (root.get("round") or 0) <= STALL_ROUND:
+            out = list(scores)
+            for i, (kind, _, st) in enumerate(leaves):
+                if kind != "terminal" and st.get("decision") in ("combat_play", "card_select"):
+                    pw, dhp = LEAF_VALUE(st)
+                    hp = (st.get("player") or {}).get("hp") or 0
+                    out[i] = (1 - LEAF_MU) * scores[i] + LEAF_MU * (W["win"] * pw + W["hp"] * (hp + dhp))
+            return [sc - (0.01 if kind == "partial" else 0.0) for sc, (kind, _, _) in zip(out, leaves)]
         if self.value is None or (root.get("round") or 0) > STALL_ROUND:
             # a fight this long means the model is stalling (e.g. predicting more than the
             # current HP for a live position, so it never lands the kill): finish it by hand
@@ -474,7 +486,12 @@ class TurnPlanner:
         sc = evaluate(root, s)
         if lam and ROLLOUT_VALUE is not None and s.get("decision") in ("combat_play", "card_select"):
             hp = (s.get("player") or {}).get("hp") or 0
-            sc = (1 - lam) * sc + lam * (W["win"] + W["hp"] * (hp + ROLLOUT_VALUE(s)))
+            v = ROLLOUT_VALUE(s)
+            if isinstance(v, tuple):   # expert value net: (P(win), HP change to the end)
+                pw, dhp = v
+                sc = (1 - lam) * sc + lam * (W["win"] * pw + W["hp"] * (hp + dhp))
+            else:
+                sc = (1 - lam) * sc + lam * (W["win"] + W["hp"] * (hp + v))
         elif lam and ROLLOUT_VALUE is not None:
             sc = (1 - lam) * sc + lam * evaluate(root, s)
         return sc

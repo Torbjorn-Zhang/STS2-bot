@@ -20,10 +20,16 @@ from engine import fresh_sim
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+HP_BONUS = 0
+
+
 def fight(sim, meta, rep, pilot):
     sim.send({"cmd": "load_save", "path": meta["path"]})
     col, row = meta.get("node") or meta["boss_node"]
     st = sim.act("select_map_node", col=col, row=row)
+    if HP_BONUS and st.get("decision") == "combat_play":
+        p = st.get("player") or {}
+        sim.send({"cmd": "set_player", "hp": min(p.get("max_hp") or 80, (p.get("hp") or 0) + HP_BONUS)})
     if st.get("decision") != "combat_play":
         return None
     sim.send({"cmd": "determinize", "seed": zlib.crc32(f"{meta['seed']}/{rep}".encode())})
@@ -49,7 +55,10 @@ def main():
     ap.add_argument("--model", default=os.path.join(HERE, "models", "distill.json"))
     ap.add_argument("--pilots", default="quick,distilled")
     ap.add_argument("--limit", type=int, default=None)
+    ap.add_argument("--hp-bonus", type=int, default=0)
     args = ap.parse_args()
+    global HP_BONUS
+    HP_BONUS = args.hp_bonus
     pilots = {}
     for name in args.pilots.split(","):
         if name == "quick":
