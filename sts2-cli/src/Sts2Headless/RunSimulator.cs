@@ -1808,6 +1808,18 @@ public class RunSimulator
                 // Give the action time to complete (heal HP, dig for relic, etc.)
                 WaitForActionExecutor();
                 _syncCtx.Pump();
+                // A relic can turn the option into a reward or a prompt (Dream Catcher: rest,
+                // then pick a card). Surface it here: forcing to the map first let it pop up
+                // after the next map choice, outside the node checkpoint, and every restore of
+                // that fight then failed to replay it.
+                for (int i = 0; i < 200 && !_cardSelector.HasPendingReward && !_cardSelector.HasPending
+                                && _pendingBundles == null && !(_bgTask?.IsCompleted ?? true); i++)
+                {
+                    _syncCtx.Pump();
+                    Thread.Sleep(1);
+                }
+                if (_cardSelector.HasPendingReward || _cardSelector.HasPending || _pendingBundles != null)
+                    return DetectDecisionPoint();
                 SettleBackground();   // was a fixed 200 ms sleep
                 _syncCtx.Pump();
                 WaitForActionExecutor();
