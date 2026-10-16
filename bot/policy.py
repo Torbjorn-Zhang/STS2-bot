@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import threading
 
 from engine import legal_actions
 
@@ -290,7 +291,7 @@ def choose_card_select(st, sim=None):
     if not cards:
         return ("skip_select", {})
     room = (st.get("context") or {}).get("room_type")
-    if room == "RestSite":                       # smith
+    if room == "RestSite" and getattr(_LAST_REST, "option", None) != "COOK":   # smith (Cook's prompt is a removal)
         order = sorted(cards, key=upgrade_priority, reverse=True)
         if DECK_TEST and sim is not None and hi == 1 and len(order) > 1:
             import decktest
@@ -300,6 +301,8 @@ def choose_card_select(st, sim=None):
                 prio = {c.get("index", i): upgrade_priority(c) for i, c in enumerate(cards)}
                 best = max(scores, key=lambda k: scores[k] + 1.0 * prio.get(k, 0))
                 return ("select_cards", {"indices": str(best)})
+    elif room == "Event" and event_prompt_kind() == "better":   # event upgrade / duplicate / enchant
+        order = sorted(cards, key=upgrade_priority, reverse=True)
     else:                                        # shop removal / event remove-transform: Strikes, then Defends
         def rank(c):
             k = card_key(c)
@@ -323,12 +326,27 @@ def boss_is_next(sim, st):
 HEAL_BELOW = 0.5   # away from the boss, smith unless HP is below this
 
 
+# Rest-site options besides Rest and Smith come from relics. Cook removes cards and adds
+# max HP, Dig finds a relic, Train (LIFT) gives +1 Strength in every later battle, Hatch
+# hatches the Byrdonis Egg, Kindle recharges a relic, Clone copies enchanted cards, Mend
+# heals another player (nothing in single player).
+REST_PRIORITY = {"COOK": 5.0, "DIG": 4.0, "LIFT": 3.5, "HATCH": 3.0, "SMITH": 2.0, "KINDLE": 1.5,
+                 "CLONE": 1.0, "HEAL": 0.0, "MEND": -1.0}
+_LAST_REST = threading.local()   # per worker thread: the option that opened the next card prompt
+
+
 def choose_rest(st, sim=None):
     opts = [o for o in st.get("options") or [] if o.get("is_enabled", True)]
+    if not opts:
+        return ("leave_room", {})
+    by = {o.get("option_id"): o for o in opts}
     # arrive at the boss healthy: the last rest site before it heals unless nearly full
-    want = "HEAL" if hp_ratio(st) < (0.9 if boss_is_next(sim, st) else HEAL_BELOW) else "SMITH"
-    pick = next((o for o in opts if o.get("option_id") == want), None) or (opts[0] if opts else None)
-    return ("choose_option", {"option_index": pick["index"]}) if pick else ("leave_room", {})
+    if "HEAL" in by and hp_ratio(st) < (0.9 if boss_is_next(sim, st) else HEAL_BELOW):
+        pick = by["HEAL"]
+    else:
+        pick = max(opts, key=lambda o: REST_PRIORITY.get(o.get("option_id"), 0.5))
+    _LAST_REST.option = pick.get("option_id")
+    return ("choose_option", {"option_index": pick["index"]})
 
 
 EVENT_TEXT_WEIGHT = 3.0   # graded-score points per keyword-score point in event choices
@@ -356,6 +374,7 @@ def choose_event(st, sim=None):
     neow = [o for o in opts if o.get("title") in NEOW]
     if len(neow) == len(opts):
         best = max(opts, key=lambda o: NEOW[o["title"]])
+        _remember_event(best)
         return ("choose_option", {"option_index": best["index"]})
     if DECK_TEST and sim is not None and len(opts) > 1:
         import decktest
@@ -363,9 +382,27 @@ def choose_event(st, sim=None):
         if len(scores) > 1:
             by = {o["index"]: o for o in opts}
             best = max(scores, key=lambda k: scores[k] + EVENT_TEXT_WEIGHT * text_score(by[k], hp))
+            _remember_event(by[best])
             return ("choose_option", {"option_index": best})
     best = max(opts, key=lambda o: (text_score(o, hp), -o["index"]))
+    _remember_event(best)
     return ("choose_option", {"option_index": best["index"]})
+
+
+_LAST_EVENT = threading.local()   # per worker thread: text of the event option just chosen
+
+
+def _remember_event(opt):
+    _LAST_EVENT.text = f"{opt.get('title', '')} {opt.get('description', '')}".lower()
+
+
+def event_prompt_kind():
+    """What the card prompt after an event option is for: 'better' (upgrade, duplicate,
+    enchant: pick the best cards) or 'worse' (remove, transform: pick the worst)."""
+    t = getattr(_LAST_EVENT, "text", "") or ""
+    if re.search(r"upgrade|duplicate|copy|clone|enchant", t) and not re.search(r"remove|transform", t):
+        return "better"
+    return "worse"
 
 
 def choose_shop(st, memo, sim=None):
@@ -413,9 +450,10 @@ def choose_shop(st, memo, sim=None):
         if card_value(best, deck, full, act) >= 2.8:
             m["cards"] += 1
             return ("buy_card", {"card_index": best["index"]})
-    held = len([p for p in (st.get("player") or {}).get("potions") or [] if p])
+    slots = (st.get("player") or {}).get("potions") or []   # one entry per slot, None when empty
+    empty = sum(1 for p in slots if not p)
     pots = [p for p in st.get("potions") or [] if p.get("is_stocked", True) and (p.get("cost") or 9999) <= gold]
-    if pots and held < 2 and m["potions"] < 1:
+    if pots and empty > 0 and m["potions"] < 2:   # potions decide boss fights; fill free slots
         m["potions"] += 1
         return ("buy_potion", {"potion_index": min(pots, key=lambda p: p.get("cost") or 0)["index"]})
     return ("leave_room", {})

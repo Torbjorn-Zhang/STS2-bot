@@ -78,7 +78,7 @@ def phi(st, a):
             kills_att += 1 if e.get("intends_attack") else 0
     tpw = powers(tgt.get("powers")) if tgt else {}
     threat = sum(i["damage"] * (i.get("hits") or i.get("repeat") or 1) for i in (tgt or {}).get("intents") or []
-                 if i.get("type") == "Attack" and i.get("damage") is not None) if tgt else 0
+                 if i.get("type") in ("Attack", "DeathBlow") and i.get("damage") is not None) if tgt else 0
     f, _ = future_weight(st)
     vals = {"cost": cost / 3, "free": float(cost == 0), "energy_after": (energy - cost) / 5,
             "dmg_target": min(dtot, 60) / 30 if not aoe else 0.0, "dmg_total": min(dtot, 80) / 30, "aoe": float(aoe),

@@ -130,7 +130,7 @@ def fight_one(sim, meta, model, value_weight, nodes, rollouts=None, rep=None):
     st = planner.play_combat(st, on_state=watch2)
     won = st.get("decision") != "game_over" or bool(st.get("victory"))
     hp = (last["s"].get("player") or {}).get("hp") if won else 0   # (a won act boss heals for the next act)
-    left = 0 if won else sum((e.get("hp") or 0) for e in last["s"].get("enemies") or [] if (e.get("hp") or 0) > 0)
+    left = 0 if won else sum((e.get("hp") or 0) for e in combat.alive(last["s"]))
     return {"seed": meta["seed"], "rep": rep, "boss": meta["boss"], "won": won, "hp_before": hp0,
             "hp_after": hp or 0, "graded": decktest.graded(won, hp or 0, left, enemy_max), "rounds": rounds[0],
             "seconds": round(time.perf_counter() - t0, 1)}

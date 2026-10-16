@@ -20,7 +20,7 @@ import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor
 
-from combat import TurnPlanner, quick_policy
+from combat import TurnPlanner, alive, quick_policy
 import decktest
 from engine import fresh_sim, maybe_recycle
 
@@ -67,7 +67,7 @@ def fight(sim, meta, card, rep, rollouts, nodes):
     won = st.get("decision") != "game_over" or bool(st.get("victory"))
     # HP from the last combat state: winning the act boss heals for the next act
     hp = (last["s"].get("player") or {}).get("hp") if won else 0
-    left = 0 if won else sum((e.get("hp") or 0) for e in last["s"].get("enemies") or [] if (e.get("hp") or 0) > 0)
+    left = 0 if won else sum((e.get("hp") or 0) for e in alive(last["s"]))
     return {"seed": meta["seed"], "rep": rep, "card": card, "boss": meta.get("boss"), "won": won,
             "hp_after": hp, "graded": decktest.graded(won, hp or 0, left, enemy_max), "rounds": rounds[0]}
 

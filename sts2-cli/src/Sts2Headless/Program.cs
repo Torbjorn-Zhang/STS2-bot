@@ -199,6 +199,14 @@ class Program
                 return sim.SetDrawOrder(cards);
             }
 
+            case "executor_state":   // debug: is the game's action executor paused / busy?
+            {
+                var ex = MegaCrit.Sts2.Core.Runs.RunManager.Instance.ActionExecutor;
+                return new Dictionary<string, object?> { ["type"] = "executor", ["paused"] = ex.IsPaused,
+                    ["running"] = ex.IsRunning, ["current"] = ex.CurrentlyRunningAction?.GetType().Name,
+                    ["room"] = sim.CurrentRoomName(), ["bg_task"] = sim.BackgroundTaskStatus() };
+            }
+
             case "determinize":
                 return sim.Determinize(cmd.TryGetProperty("seed", out var ds) ? ds.GetUInt64() : 0UL);
 

@@ -7,9 +7,18 @@ if (args[1] == "GENERIC_STATICS") {  // static fields declared in generic types
       Console.WriteLine($"{t.FullName}::{f.Name} : {f.FieldType.FullName}");
   return;
 }
+if (args[1] == "BODY_MODE") {   // every instruction of Type::Method (exact names, nested types with /)
+    foreach (var t in module.GetTypes().Where(t => t.FullName == args[2] || t.Name == args[2]))
+        foreach (var m in t.Methods.Where(m => m.Name == args[3] && m.HasBody))
+        {
+            Console.WriteLine($"== {t.FullName}::{m.Name}");
+            foreach (var ins in m.Body.Instructions) Console.WriteLine($"   IL_{ins.Offset:x4} {ins.OpCode} {ins.Operand}");
+        }
+    return;
+}
 if (args[1] == "SIGS_MODE") {   // method signatures with parameter names: SIGS_MODE Type Method
     foreach (var t in module.GetTypes().Where(t => t.Name == args[2]))
-        foreach (var m in t.Methods.Where(m => m.Name == args[3]))
+        foreach (var m in t.Methods.Where(m => args[3] == "*" || m.Name == args[3]))
             Console.WriteLine($"{t.FullName}::{m.Name}(" + string.Join(", ", m.Parameters.Select(p => $"{p.ParameterType.Name} {p.Name}{(p.HasDefault ? " = default" : "")}")) + ")");
     return;
 }

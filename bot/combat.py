@@ -48,8 +48,15 @@ POWER_ONCE = {"Artifact": 2.0, "Intangible": 6.0, "Buffer": 6.0, "Radiance": 4.0
 POWER_THIS_TURN = {"Rage", "One-Two Punch", "Colossus", "No Draw", "Flame Barrier"}
 
 
+# A killed enemy that still acts once more shows up with a huge placeholder HP (the
+# Waterfall Giant's Steam Eruption: ~1e9 HP and a DeathBlow intent at the end of the next
+# turn). It is dead for damage and kills, but its blow still has to be blocked.
+PLACEHOLDER_HP = 10 ** 8
+HITS = ("Attack", "DeathBlow")
+
+
 def alive(st):
-    return [e for e in st.get("enemies") or [] if (e.get("hp") or 0) > 0]
+    return [e for e in st.get("enemies") or [] if 0 < (e.get("hp") or 0) < PLACEHOLDER_HP]
 
 
 def eid(e):
@@ -64,9 +71,11 @@ def powers(lst):
 
 def incoming_damage(st):
     total = 0
-    for e in alive(st):
+    for e in st.get("enemies") or []:   # placeholders too: their DeathBlow still lands
+        if (e.get("hp") or 0) <= 0:
+            continue
         for i in e.get("intents") or []:
-            if i.get("type") == "Attack" and i.get("damage") is not None:
+            if i.get("type") in HITS and i.get("damage") is not None:
                 total += i["damage"] * (i.get("hits") or i.get("repeat") or 1)
     return total
 
@@ -104,7 +113,7 @@ def future_loss(st):
     for e in en:
         pw = powers(e.get("powers"))
         shown = sum(i["damage"] * (i.get("hits") or i.get("repeat") or 1) for i in e.get("intents") or []
-                    if i.get("type") == "Attack" and i.get("damage") is not None)
+                    if i.get("type") in HITS and i.get("damage") is not None)
         base = max(shown, min(15.0, 0.1 * (e.get("max_hp") or 0))) + 1.5 * pw.get("Strength", 0)
         threat += base * (0.75 if pw.get("Weak") else 1.0)
     # we block about a third of it on average; the rest is HP
@@ -120,7 +129,7 @@ def power_value(st, f, t):
         elif name in POWER_THIS_TURN:
             if name == "Flame Barrier":
                 hits = sum((i.get("hits") or i.get("repeat") or 1) for e in alive(st) for i in e.get("intents") or []
-                           if i.get("type") == "Attack")
+                           if i.get("type") in HITS)
                 v += 0.6 * amt * hits
         elif name in POWER_GROWTH:
             v += POWER_GROWTH[name] * amt * f * min(t, 10.0) / 2

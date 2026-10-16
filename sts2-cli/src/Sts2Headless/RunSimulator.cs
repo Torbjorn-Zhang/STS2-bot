@@ -543,6 +543,9 @@ public class RunSimulator
     /// Reseeding is done in place (LoadFromSerializable) so cached Rng references follow.
     /// Recorded in the command log like any other action, so snapshots stay exact.
     /// </summary>
+    public string? CurrentRoomName() => _runState?.CurrentRoom?.GetType().Name;
+    public string? BackgroundTaskStatus() => _bgTask?.Status.ToString();
+
     public Dictionary<string, object?> Determinize(ulong seed)
     {
         try
@@ -1828,8 +1831,17 @@ public class RunSimulator
                     {
                         _eventOptionChosen = true;
                         _lastEventOptionCount = options.Count;
-                        // Run on thread pool so GetSelectedCards/GetSelectedCardReward can block
-                        var task = Task.Run(() => options[optionIndex].Chosen());
+                        // Run on the thread pool, but with our synchronization context: the
+                        // option's continuations then run when we pump, like everything else.
+                        // Without it, a fight the event starts (EnterCombatWithoutExitingEvent)
+                        // ran its combat loop on pool threads: end_turn never advanced and
+                        // raced with us ("Collection was modified").
+                        var ctx = _syncCtx;
+                        var task = Task.Run(() =>
+                        {
+                            SynchronizationContext.SetSynchronizationContext(ctx);
+                            return options[optionIndex].Chosen();
+                        });
                         _bgTask = task;
                         for (int i = 0; i < 100; i++)
                         {
@@ -1846,6 +1858,8 @@ public class RunSimulator
                         }
                         if (!task.IsCompleted) task.Wait(2000);
                         _syncCtx.Pump();
+                        if (task.IsFaulted)   // a failed option leaves the event on the same page; say why
+                            Console.Error.WriteLine($"[WARN] Event option faulted: {task.Exception?.GetBaseException()}");
                     }
                     catch (Exception ex) { Log($"Event choose: {ex.Message}"); }
                 }
@@ -3313,6 +3327,8 @@ public class RunSimulator
         // moves (e.g. BygoneEffigy.WakeMove) NRE in headless and break the enemy turn.
         PatchTalkCmd();
         PatchPresentationHooks();
+        PatchNGameCalls();
+        PatchCrystalSphere();
 
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
@@ -3483,6 +3499,169 @@ public class RunSimulator
                 Console.Error.WriteLine($"[INFO] Guarded presentation hook {typeName.Split('.').Last()}.{methodName}");
             }
             catch (Exception ex) { Console.Error.WriteLine($"[WARN] Guarding {typeName}.{methodName}: {ex.Message}"); }
+        }
+    }
+
+    // Gameplay code that calls the Godot game node NGame for presentation (screen shake).
+    // NGame.Instance is null headless, and where the call is not null-guarded the exception
+    // aborted the rest of the method: PunchOff.Nab added its Injury, then never gave the
+    // relic or finished the event, and the next combat broke ("Collection was modified").
+    // The transpiler replaces every void instance call on NGame with pops of its operands,
+    // so presentation is skipped and the gameplay after it runs.
+    private static readonly string[] NGameCallers =
+    {
+        "MegaCrit.Sts2.Core.Models.Events.PunchOff", "MegaCrit.Sts2.Core.Models.Events.Amalgamator",
+        "MegaCrit.Sts2.Core.Models.Events.DenseVegetation", "MegaCrit.Sts2.Core.Models.Events.TheArchitect",
+        "MegaCrit.Sts2.Core.Models.Events.Trial",
+        "MegaCrit.Sts2.Core.Models.Cards.Nightmare", "MegaCrit.Sts2.Core.Models.Monsters.CeremonialBeast",
+        "MegaCrit.Sts2.Core.Models.Monsters.DecimillipedeSegment", "MegaCrit.Sts2.Core.Models.Monsters.MechaKnight",
+        "MegaCrit.Sts2.Core.Models.Monsters.Vantom",
+    };
+
+    private static void PatchNGameCalls()
+    {
+        var harmony = new Harmony("sts2headless.ngame");
+        var asm = typeof(CombatManager).Assembly;
+        var transpiler = new HarmonyMethod(typeof(RunSimulator).GetMethod(nameof(StripNGameCalls),
+            BindingFlags.Static | BindingFlags.NonPublic));
+        const BindingFlags all = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public |
+                                 BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        int patched = 0;
+        // every event (their option handlers drive the event screen), plus the listed others
+        var names = NGameCallers.Concat(SafeTypes(asm)
+            .Where(t => t.Namespace == "MegaCrit.Sts2.Core.Models.Events" && !t.IsNested)
+            .Select(t => t.FullName!)).Distinct();
+        foreach (var name in names)
+        {
+            var outer = asm.GetType(name);
+            if (outer == null) { Console.Error.WriteLine($"[WARN] NGame caller not found: {name}"); continue; }
+            foreach (var t in new[] { outer }.Concat(outer.GetNestedTypes(all)))
+                foreach (var m in t.GetMethods(all))
+                {
+                    try
+                    {
+                        if (m.IsAbstract || m.GetMethodBody() == null) continue;
+                        var calls = PatchProcessor.GetOriginalInstructions(m).Any(i =>
+                            i.operand is MethodInfo mi && IsNGameVoidCall(mi));
+                        if (!calls) continue;
+                        harmony.Patch(m, transpiler: transpiler);
+                        patched++;
+                    }
+                    catch (Exception ex) { Console.Error.WriteLine($"[WARN] NGame strip {t.Name}.{m.Name}: {ex.Message}"); }
+                }
+        }
+        Console.Error.WriteLine($"[INFO] Stripped NGame presentation calls in {patched} methods");
+    }
+
+    // Instance calls on Godot node types (MegaCrit.Sts2.Core.Nodes.*) that a headless run can
+    // drop: void ones, ones returning a reference (they yield null, so a chain such as
+    // NEventRoom.Instance.Layout.RemoveNodesOnPortrait() collapses) and ones returning a Task
+    // (they yield a completed task, so an await on presentation finishes at once).
+    private static IEnumerable<Type> SafeTypes(Assembly asm)
+    {
+        try { return asm.GetTypes(); }
+        catch (ReflectionTypeLoadException e) { return e.Types.Where(t => t != null)!; }
+    }
+
+    private static bool IsPresentationCall(MethodInfo mi)
+    {
+        var dt = mi.DeclaringType;
+        if (dt == null || mi.IsStatic || dt.IsValueType || dt.Namespace == null) return false;
+        // the game's node and audio classes, and Godot's own reference types (stubs headless); never structs
+        if (!dt.Namespace.StartsWith("MegaCrit.Sts2.Core.Nodes") && !dt.Namespace.StartsWith("MegaCrit.Sts2.Core.Audio")
+            && !dt.Namespace.StartsWith("Godot")) return false;
+        var rt = mi.ReturnType;
+        return rt == typeof(void) || rt == typeof(Task) || rt == typeof(int) || rt == typeof(bool) || rt == typeof(float)
+               || !rt.IsValueType && !rt.IsGenericType;
+    }
+
+    private static bool IsNGameVoidCall(MethodInfo mi) => IsPresentationCall(mi);
+
+    private static IEnumerable<CodeInstruction> StripNGameCalls(IEnumerable<CodeInstruction> instructions)
+    {
+        var completed = typeof(Task).GetProperty(nameof(Task.CompletedTask))!.GetGetMethod()!;
+        foreach (var ins in instructions)
+        {
+            if ((ins.opcode == System.Reflection.Emit.OpCodes.Callvirt || ins.opcode == System.Reflection.Emit.OpCodes.Call)
+                && ins.operand is MethodInfo mi && IsPresentationCall(mi))
+            {
+                var first = new CodeInstruction(System.Reflection.Emit.OpCodes.Pop);
+                first.labels.AddRange(ins.labels);
+                first.blocks.AddRange(ins.blocks);
+                yield return first;                                   // the node instance
+                for (int i = 0; i < mi.GetParameters().Length; i++)  // and each argument
+                    yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Pop);
+                if (mi.ReturnType == typeof(Task))
+                    yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Call, completed);
+                else if (mi.ReturnType == typeof(int) || mi.ReturnType == typeof(bool))
+                    yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Ldc_I4_0);
+                else if (mi.ReturnType == typeof(float))
+                    yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Ldc_R4, 0f);
+                else if (mi.ReturnType != typeof(void))
+                    yield return new CodeInstruction(System.Reflection.Emit.OpCodes.Ldnull);
+                continue;
+            }
+            yield return ins;
+        }
+    }
+
+    // The Crystal Sphere event is a click-the-grid minigame driven by its screen
+    // (NCrystalSphereScreen), which does not exist headless. PlayMinigame is replaced by an
+    // automatic player: it clicks hidden cells in a fixed spread-out order (centre first)
+    // with the current tool until the divinations are spent, then completes the minigame,
+    // so the rewards it reveals are granted as in a played event. Deterministic.
+    private static void PatchCrystalSphere()
+    {
+        try
+        {
+            var harmony = new Harmony("sts2headless.crystalsphere");
+            var t = typeof(CombatManager).Assembly.GetType("MegaCrit.Sts2.Core.Events.Custom.CrystalSphereEvent.CrystalSphereMinigame");
+            var m = t?.GetMethod("PlayMinigame", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (m == null) { Console.Error.WriteLine("[WARN] CrystalSphereMinigame.PlayMinigame not found"); return; }
+            harmony.Patch(m, prefix: new HarmonyMethod(typeof(RunSimulator).GetMethod(nameof(CrystalSpherePrefix),
+                BindingFlags.Static | BindingFlags.NonPublic)));
+        }
+        catch (Exception ex) { Console.Error.WriteLine($"[WARN] Patching Crystal Sphere: {ex.Message}"); }
+    }
+
+    private static bool CrystalSpherePrefix(object __instance, ref Task __result)
+    {
+        __result = AutoPlayCrystalSphere(__instance);
+        return false;
+    }
+
+    private static async Task AutoPlayCrystalSphere(object game)
+    {
+        const BindingFlags all = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        var t = game.GetType();
+        var cells = t.GetField("cells", all)?.GetValue(game) as Array;
+        var finished = t.GetProperty("IsFinished", all);
+        var divinations = t.GetProperty("DivinationCount", all);
+        var click = t.GetMethod("CellClicked", all);
+        bool Done() => (bool)(finished?.GetValue(game) ?? true) || (int)(divinations?.GetValue(game) ?? 0) <= 0;
+        if (cells != null && click != null)
+        {
+            int w = cells.GetLength(0), h = cells.GetLength(1);
+            var order = new List<(int x, int y)>();
+            for (int x = 0; x < w; x++)
+                for (int y = 0; y < h; y++)
+                    order.Add((x, y));
+            // spread out from the centre: clicking reveals the neighbours too
+            order = order.OrderBy(c => ((c.x % 3 == 1) && (c.y % 3 == 1)) ? 0 : 1)
+                         .ThenBy(c => Math.Abs(c.x - w / 2) + Math.Abs(c.y - h / 2)).ToList();
+            foreach (var (x, y) in order)
+            {
+                if (Done()) break;
+                var cell = cells.GetValue(x, y);
+                var hidden = cell?.GetType().GetProperty("IsHidden", all)?.GetValue(cell) as bool?;
+                if (cell == null || hidden == false) continue;
+                if (click.Invoke(game, new[] { cell }) is Task task) await task;
+            }
+        }
+        if (!(bool)(finished?.GetValue(game) ?? true))
+        {
+            var complete = t.GetMethod("CompleteMinigame", all);
+            if (complete?.Invoke(game, null) is Task ct) await ct;
         }
     }
 
