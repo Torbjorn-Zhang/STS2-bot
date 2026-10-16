@@ -1,6 +1,7 @@
 """Out-of-combat decisions: small, explainable rules (map DP, card picks, rest, events)."""
 
 import json
+import os
 import re
 
 from engine import legal_actions
@@ -201,6 +202,12 @@ SKIP_BELOW = 1.7   # a weaker card only dilutes the deck
 
 DECK_TEST = True        # judge card rewards by imagined boss fights (decktest.py)
 TIER_WEIGHT = 4.0       # graded-score points per tier point, on top of the boss test
+LAB_WEIGHT = 0.5        # weight of the card lab's average effect (card_prior_a10.json)
+try:
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "card_prior_a10.json")) as _fh:
+        LAB = json.load(_fh)["values"]
+except (OSError, ValueError, KeyError):
+    LAB = {}
 
 
 def choose_card_reward(st, sim=None):
@@ -214,8 +221,13 @@ def choose_card_reward(st, sim=None):
             by_index = {c["index"]: c for c in st["cards"]}
 
             def total(arm):
-                prior = SKIP_BELOW if arm is None else card_value(by_index[arm], deck_n, full, act)
-                return scores[arm] + TIER_WEIGHT * prior
+                if arm is None:
+                    return scores[arm]
+                c = by_index[arm]
+                # the deck test for this deck, the hand-made tier prior, and the card lab's
+                # average effect across 48 A10 decks (less noisy, same units as the test)
+                return (scores[arm] + TIER_WEIGHT * (card_value(c, deck_n, full, act) - SKIP_BELOW)
+                        + LAB_WEIGHT * LAB.get(base_key(c), 0.0))
 
             best = max(scores, key=total)
             return ("skip_card_reward", {}) if best is None else ("select_card_reward", {"card_index": best})

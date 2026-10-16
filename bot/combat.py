@@ -24,6 +24,7 @@ W = {
     "player_debuff": 1.2,
     "potion": 5.0,      # cost of drinking a potion (keeps them for fights that need them)
     "win": 300.0,
+    "fight_model": 0.0,     # 0..1: replace fixed damage weights by -future_loss (turns to kill x threat)
     "stun": 8.0,            # fully blocking an attacking Imbalanced enemy (it gets Stunned)
     "wake": 4.0,            # per Slumber count knocked off a sleeping enemy this turn
     "late_hallway_big": 0,  # 1: act-2+ hallway fights use dmg_big too
@@ -85,6 +86,29 @@ def future_weight(st):
     return sum(0.9 ** k for k in range(1, whole + 1)) + (t - whole) * 0.9 ** (whole + 1), t
 
 
+def future_loss(st):
+    """HP still to be lost in this fight: turns to kill everything (enemy HP / our damage
+    rate) times what the enemies deal per turn beyond the block we usually make."""
+    en = alive(st)
+    if not en:
+        return 0.0
+    rate = damage_rate(st)
+    ehp = 0.0
+    for e in en:
+        vul = 1.25 if powers(e.get("powers")).get("Vulnerable") else 1.0
+        ehp += ((e.get("hp") or 0) + (e.get("block") or 0)) / vul
+    turns = min(12.0, ehp / rate)
+    threat = 0.0
+    for e in en:
+        pw = powers(e.get("powers"))
+        shown = sum(i["damage"] * (i.get("hits") or i.get("repeat") or 1) for i in e.get("intents") or []
+                    if i.get("type") == "Attack" and i.get("damage") is not None)
+        base = max(shown, min(15.0, 0.1 * (e.get("max_hp") or 0))) + 1.5 * pw.get("Strength", 0)
+        threat += base * (0.75 if pw.get("Weak") else 1.0)
+    # we block about a third of it on average; the rest is HP
+    return turns * 0.65 * threat
+
+
 def power_value(st, f, t):
     v = 0.0
     for name, amt in powers(st.get("player_powers")).items():
@@ -125,10 +149,13 @@ def evaluate(root, st):
     late = ((root.get("context") or {}).get("act") or 1) >= 2 and W["late_hallway_big"]
     w_dmg = W["dmg_big"] if room in ("Elite", "Boss") or late else W["dmg"]
     now_by_id = {eid(e): e for e in now_alive}
+    fm = W["fight_model"]
     for e in root_alive:
         dealt = e["hp"] - (now_by_id[eid(e)]["hp"] if eid(e) in now_by_id else 0)
         grows = any(k in powers(e.get("powers")) for k in ("Strength", "Ritual"))
-        score += w_dmg * (W["scaling"] if grows else 1.0) * dealt
+        score += (1 - fm) * w_dmg * (W["scaling"] if grows else 1.0) * dealt
+    if fm:
+        score -= fm * future_loss(st)
     # enemies from the root that are dead now (a kill that spawns new enemies is still a kill)
     score += W["kill"] * sum(1 for e in root_alive if eid(e) not in now_by_id)
     # mechanics the one-turn view misses: a fully blocked Imbalanced attacker is stunned;
