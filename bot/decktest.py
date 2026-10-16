@@ -8,6 +8,7 @@ future. The graded score rewards winning and HP left, and for a loss, how much o
 boss's HP the deck removed (early decks lose to every boss; this still ranks them).
 """
 
+import os
 import zlib
 
 from combat import TurnPlanner, alive, quick_policy
@@ -68,9 +69,9 @@ def _to_map(sim, st):
     return st if st.get("decision") == "map_select" else None
 
 
-def boss_fight(sim, map_state, boss_id, seed, pilot=None):
-    """From a map state: heal to full, enter the boss encounter, fight; return the graded score."""
-    sim.send({"cmd": "set_player", "hp": (map_state.get("player") or {}).get("max_hp") or 80})
+def boss_fight(sim, map_state, boss_id, seed, pilot=None, hp=None):
+    """From a map state: heal to full (or set `hp`), enter the boss encounter, fight; return the graded score."""
+    sim.send({"cmd": "set_player", "hp": hp if hp is not None else (map_state.get("player") or {}).get("max_hp") or 80})
     st = sim.send({"cmd": "enter_room", "type": "combat", "encounter": boss_id})
     if st.get("decision") != "combat_play":
         return None
@@ -139,10 +140,215 @@ def tests_for(st):
     return tests
 
 
+def _apply(sim, s, moves):
+    """Apply an arm's moves; a move is (action, kwargs) or a function state -> (action, kwargs)."""
+    for m in moves:
+        a, kw = m(s) if callable(m) else m
+        if a == "noop":
+            continue
+        if a is None:
+            break
+        s = sim.act(a, **kw)
+        if s.get("type") == "error":
+            return s
+    return s
+
+
+# ---------------------------------------------------------------- path test
+# Every out-of-combat choice trades deck strength against HP, max HP, potions, relics and
+# gold, and which matters more depends on the deck: an upgrade can be worth more than a
+# heal when the deck cannot win without it, or nothing when the deck wins anyway. The
+# path test plays the rest of the act forward from each alternative: walk the bot's
+# planned route to the boss, lose the HP this deck loses in each hallway / elite fight
+# (simulated against the act's pools, public knowledge, scaled to the planner's play),
+# heal at rest sites like the bot would, then fight the boss at the HP that is left.
+
+PATH_TEST = os.environ.get("STS2_PATH_TEST", "0") == "1"
+PATH_REPS = 12          # boss fights per alternative (same seeds for every alternative)
+COST_REPS = 1           # simulated fights per pool encounter for the HP cost
+UNKNOWN_FIGHT = 0.35    # share of "?" rooms that turn out to be fights
+GOLD_POINTS = 0.02      # graded points per gold (not simulated: shops later in the act)
+
+
+def end_of_combat_heal(st):
+    """HP healed after each fight by relics such as Burning Blood."""
+    heal = 0
+    for r in (st.get("player") or {}).get("relics") or []:
+        d = (r.get("description") or "").lower()
+        if "end of combat" in d and "heal" in d:
+            heal += (r.get("vars") or {}).get("Heal") or 0
+    return heal
+
+
+def route_to_boss(sim, st):
+    """Node types of the bot's planned path from the current map position up to the boss
+    (exclusive), using the map DP's choices (with its HP projection)."""
+    import policy
+    m = sim.send({"cmd": "get_map"})
+    nodes = {(n["col"], n["row"]): n for row in m.get("rows", []) for n in row}
+    cur = m.get("current_coord") or {}
+    here = nodes.get((cur.get("col"), cur.get("row")))
+    if here is None:   # not on the map yet (e.g. act start): every first-row node is a start
+        kids = [{"col": n["col"], "row": n["row"]} for n in (m.get("rows") or [[]])[0]]
+    else:
+        kids = here.get("children") or []
+    act = (st.get("context") or {}).get("act") or 1
+    gold = (st.get("player") or {}).get("gold") or 0
+    memo = {}
+
+    def value(c, hp):
+        key = (c, round(hp, 2))
+        if key not in memo:
+            n = nodes.get(c)
+            if n is None:
+                memo[key] = (0.0, [])
+            else:
+                v = policy.node_value(n["type"], hp, n["row"], act, gold)
+                hp2 = policy._hp_after(n["type"], hp, act)
+                if hp2 <= 0.05:
+                    v -= 20.0
+                best = max([value((k["col"], k["row"]), hp2) for k in n.get("children") or []] or [(0.0, [])],
+                           key=lambda t: t[0])
+                memo[key] = (v + best[0], [n["type"]] + best[1])
+        return memo[key]
+
+    hp = policy.hp_ratio(st)
+    opts = [value((k["col"], k["row"]), hp) for k in kids]
+    if not opts:
+        return []
+    route = max(opts, key=lambda t: t[0])[1]
+    return [t for t in route if t != "Boss"]
+
+
+# HP lost by the planner per fight relative to the pilot, on the same decks and pools at
+# full HP (A10 boss-bench decks, act-1 pools: planner 0.115 hallway / 0.29 elite of max HP,
+# quick_policy 0.151 / 0.434, policy network rl11 0.144 / 0.333)
+PATH_HANDICAP = {"quick": {"Monster": 0.76, "Elite": 0.67}, "net": {"Monster": 0.8, "Elite": 0.87}}
+
+
+def path_value(sim, s_map, route, seed_tag, pilot=None, reps=PATH_REPS):
+    """From a map state: walk `route` with sampled fight losses (this deck's simulated
+    losses in the act's pools, scaled to the planner), heal at rest sites, then fight the
+    boss at the HP left. Each rep samples its own losses, so low HP risks dying on the way
+    (scored 0). Returns (mean graded score, mean HP at the boss)."""
+    import random
+    ctx = s_map.get("context") or {}
+    boss = (ctx.get("boss") or {}).get("id")
+    if not boss:
+        return None, None
+    p = s_map.get("player") or {}
+    hp0, mhp = p.get("hp") or 0, max(1, p.get("max_hp") or 1)
+    need = {k for k in route if k in ("Monster", "Elite")} | ({"Monster"} if "Unknown" in route else set())
+    losses = _costs(sim, s_map, need, seed_tag) if need else {}
+    heal = end_of_combat_heal(s_map)
+    snap = sim.send({"cmd": "snapshot"})["id"]
+    vals, hps = [], []
+    try:
+        for rep in range(reps):
+            rng = random.Random(f"route/{seed_tag}/{rep}")
+            hp, rests_left, dead = hp0, route.count("RestSite"), False
+            for kind in route:
+                fight = kind in ("Monster", "Elite") or (kind == "Unknown" and rng.random() < UNKNOWN_FIGHT)
+                if fight:
+                    pool = losses.get("Elite" if kind == "Elite" else "Monster") or [0.0]
+                    hp -= rng.choice(pool) * mhp
+                    if hp <= 0:
+                        dead = True
+                        break
+                    hp = min(mhp, hp + heal)
+                elif kind == "RestSite":
+                    rests_left -= 1
+                    if hp < (0.9 if rests_left == 0 else 0.6) * mhp:
+                        hp = min(mhp, hp + int(0.3 * mhp))
+            if dead:
+                vals.append(0.0)
+                hps.append(0)
+                continue
+            hp = max(1, int(round(hp)))
+            sim.send({"cmd": "restore", "id": snap})
+            v = boss_fight(sim, s_map, boss, zlib.crc32(f"path/{seed_tag}/{rep}".encode()), pilot, hp=hp)
+            if v is not None:
+                vals.append(v)
+                hps.append(hp)
+    finally:
+        sim.send({"cmd": "restore", "id": snap})
+        sim.send({"cmd": "drop_snapshots", "from": snap})
+    if not vals:
+        return None, None
+    return sum(vals) / len(vals), round(sum(hps) / len(hps), 1)
+
+
+def _costs(sim, s_map, kinds, seed_tag):
+    """Sampled HP fractions lost per hallway / elite fight for this deck at full HP (the
+    act's pools), scaled to the planner's play. {kind: [loss, ...]}"""
+    name = (s_map.get("context") or {}).get("act_name")
+    pools = {"Elite": ELITES.get(name), "Monster": HALLWAYS.get(name)}
+    hc = PATH_HANDICAP["net" if NET_PILOT is not None else "quick"]
+    p = s_map.get("player") or {}
+    full = dict(s_map, player=dict(p, hp=p.get("max_hp")))
+    snap = sim.send({"cmd": "snapshot"})["id"]
+    out = {}
+    try:
+        for kind in kinds:
+            vals = []
+            for enc in pools.get(kind) or []:
+                for rep in range(COST_REPS):
+                    sim.send({"cmd": "restore", "id": snap})
+                    sim.send({"cmd": "set_player", "hp": p.get("max_hp")})
+                    v = fight_cost(sim, full, enc, zlib.crc32(f"pcost/{seed_tag}/{enc}/{rep}".encode()))
+                    if v is not None:
+                        vals.append(hc[kind] * v)
+            if vals:
+                out[kind] = vals
+    finally:
+        sim.send({"cmd": "restore", "id": snap})
+        sim.send({"cmd": "drop_snapshots", "from": snap})
+    return out
+
+
+LAST_PATH = None   # debug / records: {key: (score, projected HP)} of the last path test
+
+
+def evaluate_arms_path(sim, st, arms, tag="", pilot=None, reps=PATH_REPS):
+    """Like evaluate_arms, but each alternative is judged by the path test (HP carried to
+    the boss). Gold differences add GOLD_POINTS per gold. Returns {key: score}; restores st."""
+    global LAST_PATH
+    if len(arms) < 2:
+        return {}
+    ctx = st.get("context") or {}
+    snap = sim.send({"cmd": "snapshot"})["id"]
+    route = None
+    out, info = {}, {}
+    seed_tag = f"{tag}{ctx.get('act')}/{ctx.get('floor')}"
+    gold0 = (st.get("player") or {}).get("gold") or 0
+    try:
+        for key, moves in arms.items():
+            sim.send({"cmd": "restore", "id": snap})
+            s = _apply(sim, st, moves)
+            s = _to_map(sim, s) if s.get("type") != "error" else None
+            if s is None:
+                continue
+            if route is None:   # one route for every alternative (same draws, less noise)
+                route = route_to_boss(sim, s)
+            v, hp = path_value(sim, s, route, seed_tag, pilot, reps)
+            if v is None:
+                continue
+            gold = (s.get("player") or {}).get("gold") or 0
+            out[key] = v + GOLD_POINTS * (gold - gold0)
+            info[key] = (round(out[key], 2), hp)
+    finally:
+        sim.send({"cmd": "restore", "id": snap})
+        sim.send({"cmd": "drop_snapshots", "from": snap})
+    LAST_PATH = {"route": route, "arms": {str(k): v for k, v in info.items()}}
+    return out
+
+
 def evaluate_arms(sim, st, arms, reps=REPS, tag="", pilot=None):
     """arms: {key: [(action, kwargs), ...]}, the moves that make each alternative from st.
     Each arm is applied in the sandbox, then the bot walks to the map and fights the test
     encounters (same seeds for every arm). Returns {key: mean graded score}; restores st."""
+    if PATH_TEST:
+        return evaluate_arms_path(sim, st, arms, tag=tag, pilot=pilot)
     tests = tests_for(st)
     if not tests or len(arms) < 2:
         return {}
@@ -154,11 +360,7 @@ def evaluate_arms(sim, st, arms, reps=REPS, tag="", pilot=None):
             vals = []
             for rep in range(reps):
                 sim.send({"cmd": "restore", "id": snap})
-                s = st
-                for a, kw in moves:
-                    s = sim.act(a, **kw)
-                    if s.get("type") == "error":
-                        break
+                s = _apply(sim, st, moves)
                 s = _to_map(sim, s) if s.get("type") != "error" else None
                 if s is None:
                     continue

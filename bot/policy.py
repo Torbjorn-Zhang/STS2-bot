@@ -368,6 +368,13 @@ def choose_card_select(st, sim=None):
     room = (st.get("context") or {}).get("room_type")
     if room == "RestSite" and getattr(_LAST_REST, "option", None) != "COOK":   # smith (Cook's prompt is a removal)
         order = sorted(cards, key=upgrade_priority, reverse=True)
+        token = getattr(_REST_PICK, "token", None)
+        if token and hi == 1:   # the path test already chose this upgrade
+            from record import card_tok
+            _REST_PICK.token = None
+            for c in cards:
+                if card_tok(c) == token:
+                    return ("select_cards", {"indices": str(c.get("index"))})
         if DECK_TEST and sim is not None and hi == 1 and len(order) > 1:
             import decktest
             top = [c.get("index", i) for i, c in enumerate(order[:4])]
@@ -398,7 +405,7 @@ def boss_is_next(sim, st):
     return boss.get("row") is not None and cur.get("row") is not None and cur["row"] >= boss["row"] - 1
 
 
-HEAL_BELOW = 0.5   # away from the boss, smith unless HP is below this (0.4 lost HP and elites at A10: v21)
+HEAL_BELOW = float(os.environ.get("STS2_HEAL_BELOW", "0.5"))   # away from the boss, smith unless HP is below this (0.4 lost HP and elites at A10: v21)
 
 
 # Rest-site options besides Rest and Smith come from relics. Cook removes cards and adds
@@ -431,11 +438,76 @@ def rest_by_value(st):
     return "HEAL" if rem[0] > rem[1] else "SMITH"
 
 
+REST_SMITH_CANDIDATES = 3   # path test: upgrades considered at a rest site (by upgrade_priority)
+_REST_PICK = threading.local()   # per worker thread: the card the path test chose to smith
+
+
+def _set_rest(opt_id):
+    def move(s):
+        _LAST_REST.option = opt_id
+        return ("noop", {})
+    return move
+
+
+def _smith_card(token):
+    """Arm move for the smith prompt: upgrade the card with this token."""
+    from record import card_tok
+
+    def move(s):
+        for c in s.get("cards") or []:
+            if card_tok(c) == token:
+                return ("select_cards", {"indices": str(c.get("index"))})
+        return (None, {})
+    return move
+
+
+def rest_by_path(sim, st, opts):
+    """Every rest option (heal, each of the top smith targets, dig, lift, ...) played
+    forward to the act boss by the path test; the best one wins. Returns (option, card token)."""
+    import decktest
+    from record import card_tok
+    deck = (st.get("player") or {}).get("deck") or []
+    cand = sorted((c for c in deck if not c.get("upgraded") and c.get("type") not in ("Curse", "Status")),
+                  key=upgrade_priority, reverse=True)
+    seen, tokens = set(), []
+    for c in cand:
+        t = card_tok(c)
+        if t not in seen:
+            seen.add(t)
+            tokens.append(t)
+        if len(tokens) >= REST_SMITH_CANDIDATES:
+            break
+    arms = {}
+    for o in opts:
+        oid = o.get("option_id")
+        if oid == "SMITH":
+            for t in tokens:
+                arms[("SMITH", t)] = [_set_rest("SMITH"), ("choose_option", {"option_index": o["index"]}), _smith_card(t)]
+        elif oid not in ("CLONE",):   # (clone's prompt picks a card to copy: tier order handles it)
+            arms[(oid, None)] = [_set_rest(oid), ("choose_option", {"option_index": o["index"]})]
+    scores = decktest.evaluate_arms_path(sim, st, {k: v for k, v in arms.items()}, tag="rest/")
+    if len(scores) < 2:
+        return None, None
+    _LAST_SCORES.v = {"path": {f"{k[0]}:{k[1]}": round(v, 2) for k, v in scores.items()},
+                      "route": (decktest.LAST_PATH or {}).get("route")}
+    best = max(scores, key=lambda k: (scores[k], REST_PRIORITY.get(k[0], 0.5)))
+    return best
+
+
 def choose_rest(st, sim=None):
     opts = [o for o in st.get("options") or [] if o.get("is_enabled", True)]
     if not opts:
         return ("leave_room", {})
     by = {o.get("option_id"): o for o in opts}
+    _REST_PICK.token = None
+    if DECK_TEST and sim is not None and len(opts) > 1:
+        import decktest
+        if decktest.PATH_TEST:
+            oid, token = rest_by_path(sim, st, opts)
+            if oid in by:
+                _LAST_REST.option = oid
+                _REST_PICK.token = token
+                return ("choose_option", {"option_index": by[oid]["index"]})
     if REST_VALUE and RUN_VALUE is not None and "HEAL" in by and "SMITH" in by \
             and max(opts, key=lambda o: REST_PRIORITY.get(o.get("option_id"), 0.5)).get("option_id") in ("HEAL", "SMITH"):
         pick = by[rest_by_value(st)]
@@ -451,6 +523,7 @@ def choose_rest(st, sim=None):
 
 
 EVENT_TEXT_WEIGHT = 3.0   # graded-score points per keyword-score point in event choices
+EVENT_TEXT_WEIGHT_PATH = 1.0   # ... with the path test (it simulates the HP side itself)
 # Neow's opening options, by title (the boss test says little on floor 1, where every
 # option still loses to the boss). Values are in keyword-score units; unknown titles
 # fall back to the keyword score.
@@ -482,7 +555,10 @@ def choose_event(st, sim=None):
         scores = decktest.evaluate_event(sim, st)
         if len(scores) > 1:
             by = {o["index"]: o for o in opts}
-            best = max(scores, key=lambda k: scores[k] + EVENT_TEXT_WEIGHT * text_score(by[k], hp))
+            # the path test simulates HP, max HP, relics and cards; the keyword score then
+            # only adds what it cannot see (gold, curses' later cost, ...)
+            w = EVENT_TEXT_WEIGHT_PATH if decktest.PATH_TEST else EVENT_TEXT_WEIGHT
+            best = max(scores, key=lambda k: scores[k] + w * text_score(by[k], hp))
             _remember_event(by[best])
             return ("choose_option", {"option_index": best})
     best = max(opts, key=lambda o: (text_score(o, hp), -o["index"]))
