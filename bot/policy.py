@@ -683,6 +683,31 @@ def choose_shop(st, memo, sim=None):
     return ("leave_room", {})
 
 
+def load_deck_nets(cfg):
+    """cfg: {"card": path, "rest": path, "event": path, "map": path, "shop": path,
+    "card_decides": bool, "neow": bool} -> sets the deck-network globals (the v33 setup)."""
+    import torch
+    torch.set_num_threads(1)
+    global CARD_PRIOR, REST_NET, EVENT_NET, MAP_NET, SHOP_NET, CARD_NET_DECIDES, EVENT_NET_NEOW
+    if cfg.get("card"):
+        import nets
+        CARD_PRIOR = nets.CardPolicy(cfg["card"])
+    if cfg.get("rest"):
+        from restnet import RestPolicy
+        REST_NET = RestPolicy(cfg["rest"])
+    if cfg.get("event"):
+        from eventnet import EventPolicy
+        EVENT_NET = EventPolicy(cfg["event"])
+    if cfg.get("map"):
+        from mapnet import MapPolicy
+        MAP_NET = MapPolicy(cfg["map"])
+    if cfg.get("shop"):
+        from shopnet import ShopPolicy
+        SHOP_NET = ShopPolicy(cfg["shop"])
+    CARD_NET_DECIDES = bool(cfg.get("card_decides"))
+    EVENT_NET_NEOW = bool(cfg.get("neow"))
+
+
 def decide(sim, st, avoid=(), memo=None):
     """avoid: JSON-encoded actions that made no progress from this exact state before.
     memo: per-run scratch dict (shop visits)."""

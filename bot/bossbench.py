@@ -173,10 +173,13 @@ def main():
     ap.add_argument("--act", type=int, default=1, help="collect: which act's boss")
     ap.add_argument("--subset", default=None, help="'even' or 'odd' seeds only (train/validation split)")
     ap.add_argument("--boss", default=None, help="only fights against this boss (name)")
+    ap.add_argument("--deck-nets", default=None, help='collect: JSON for policy.load_deck_nets (decks built like v33)')
     ap.add_argument("--out", default=None)
     ap.add_argument("--reps", type=int, default=1, help=">1: fight each save this many times, determinized")
     args = ap.parse_args()
     bench_dir = os.path.join(HERE, "data", f"bossbench_{args.tag}")
+    if args.deck_nets:
+        policy.load_deck_nets(json.loads(args.deck_nets))
 
     if args.mode == "collect-fights":
         os.makedirs(bench_dir, exist_ok=True)

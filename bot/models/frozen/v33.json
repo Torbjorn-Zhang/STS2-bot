@@ -1,0 +1,1 @@
+{"card": "models/frozen/deckd_card8.pt", "rest": "models/frozen/deckd_rest8.pt", "event": "models/frozen/deckd_event8.pt", "map": "models/frozen/deckd_map8.pt", "card_decides": true, "neow": true}
