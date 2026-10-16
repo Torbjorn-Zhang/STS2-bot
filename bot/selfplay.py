@@ -38,7 +38,8 @@ def sample(pilot, st, acts, temperature, rng):
     return acts[i], float(math.log(max(p[i], 1e-12)))
 
 
-def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng):
+def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card_pol=None, card_temp=0.0,
+                  rest_pol=None, rest_temp=0.0):
     policy.ASCENSION = ascension
     st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
     memo, steps, in_fight, hp0, last = {}, 0, False, None, None
@@ -74,8 +75,31 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng):
                 break
             st = nxt
             continue
-        a = policy.decide(sim, st, avoid=(), memo=memo)
-        rec.decision(st, legal_actions(st), a, None)
+        extra = None
+        if d == "card_reward" and card_pol is not None and card_temp > 0 and st.get("cards"):
+            cacts, z = card_pol.scores(st)
+            z = (z - z.max()) / card_temp
+            pr = np.exp(z)
+            pr /= pr.sum()
+            i = rng.choices(range(len(cacts)), weights=pr.tolist())[0]
+            a, extra = cacts[i], {"lp": float(math.log(max(pr[i], 1e-12))), "T": card_temp}
+        elif d == "rest_site" and rest_pol is not None:
+            keys, ks, z, route = rest_pol.scores(sim, st)
+            if len(ks) >= 1:
+                zz = (z - z.max()) / max(rest_temp, 1e-6)
+                pr = np.exp(zz)
+                pr /= pr.sum()
+                i = rng.choices(range(len(ks)), weights=pr.tolist())[0] if rest_temp > 0 else int(np.argmax(z))
+                idx, tok = keys[ks[i]]
+                policy._LAST_REST.option = ks[i].split(":")[0]
+                policy._REST_PICK.token = tok
+                a = ("choose_option", {"option_index": idx})
+                extra = {"rlp": float(math.log(max(pr[i], 1e-12))), "rkeys": ks, "rk": ks[i], "route": route}
+            else:
+                a = policy.decide(sim, st, avoid=(), memo=memo)
+        else:
+            a = policy.decide(sim, st, avoid=(), memo=memo)
+        rec.decision(st, legal_actions(st), a, extra)
         nxt = sim.act(a[0], **a[1])
         if nxt.get("type") == "error" or json.dumps(nxt, sort_keys=True) == json.dumps(st, sort_keys=True):
             alts = [x for x in legal_actions(st) if x != a]   # no progress: try something else
@@ -108,15 +132,23 @@ def main():
     ap.add_argument("--seed-prefix", default="rl")
     ap.add_argument("--out", required=True)
     ap.add_argument("--card-policy", default=None, help="nets.py card model for card rewards (default: tier rules)")
+    ap.add_argument("--card-temperature", type=float, default=0.0, help=">0: sample card rewards (deck RL)")
+    ap.add_argument("--rest-policy", default=None, help="restnet.py model for rest sites (default: rules)")
+    ap.add_argument("--rest-temperature", type=float, default=0.0, help=">0: sample rest choices (RL)")
     args = ap.parse_args()
     import random
     import torch
     torch.set_num_threads(1)
     from nets import NetPolicy
     policy.DECK_TEST = False
+    card_pol = None
     if args.card_policy:
         from nets import CardPolicy
-        policy.CARD_NET = CardPolicy(args.card_policy)
+        policy.CARD_NET = card_pol = CardPolicy(args.card_policy)
+    rest_pol = None
+    if args.rest_policy:
+        from restnet import RestPolicy
+        rest_pol = RestPolicy(args.rest_policy)
     pilot = NetPolicy(args.policy)
     seeds = [f"{args.seed_prefix}_{i}" for i in range(args.n)]
     lock = threading.Lock()
@@ -131,7 +163,8 @@ def main():
             rec = GameRecorder(args.out, lock, s, {"tag": "selfplay", "asc": args.ascension, "T": args.temperature,
                                                    "policy": os.path.basename(args.policy)})
             try:
-                r = play_fast_run(sim, s, pilot, args.ascension, args.acts, rec, args.temperature, rng)
+                r = play_fast_run(sim, s, pilot, args.ascension, args.acts, rec, args.temperature, rng,
+                                  card_pol, args.card_temperature, rest_pol, args.rest_temperature)
             except Exception as e:
                 r = {"seed": s, "error": repr(e)[:200]}
                 try:
