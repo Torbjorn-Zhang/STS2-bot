@@ -32,6 +32,7 @@ W = {
     "late_hallway_big": 0,  # 1: act-2+ hallway fights use dmg_big too
     "potion_late_hp": 0.65, # act-2+ hallway fights: potions allowed below this HP fraction
     "potions_any_fight_asc": 99,  # from this ascension potions are considered in every fight
+    "steam_lethal": 0.0,    # Waterfall Giant: penalty when its death blast (Steam Eruption) would kill us (80: 9 vs 7 of 44 WG fights)
 }
 PLAYER_DEBUFFS = ("Vulnerable", "Weak", "Frail")
 COUNTED = ("Strength", "Dexterity") + PLAYER_DEBUFFS
@@ -146,6 +147,33 @@ def power_value(st, f, t):
     return v
 
 
+def deck_block(st):
+    """Rough block the next hand can make (5 cards, 3 energy) from the deck's block cards."""
+    deck = (st.get("player") or {}).get("deck") or []
+    blocks = sorted(((c.get("stats") or {}).get("block") or 0 for c in deck), reverse=True)
+    if not blocks:
+        return 0.0
+    per_card = sum(blocks) / len(blocks)
+    return min(5 * per_card, sum(blocks[:3]))
+
+
+def steam_threat(root, st):
+    """Waterfall Giant explodes one turn after it dies, for its Steam Eruption stacks (+3
+    a turn while it lives). Guides: kill it early and keep enough HP + block for the blast.
+    Returns the expected blast, or 0 (no Giant, or the blast is already an announced intent)."""
+    blast = 0
+    for e in st.get("enemies") or []:
+        pw = powers(e.get("powers"))
+        if (e.get("hp") or 0) >= PLACEHOLDER_HP:
+            if any(i.get("type") == "DeathBlow" for i in e.get("intents") or []):
+                return 0   # counted by incoming_damage
+            root_steam = max([powers(r.get("powers")).get("Steam Eruption", 0) for r in root.get("enemies") or []] + [0])
+            blast = max(blast, pw.get("Steam Eruption", 0) or root_steam)
+        elif "Steam Eruption" in pw and (e.get("hp") or 0) > 0:
+            blast = max(blast, pw["Steam Eruption"] + 3)
+    return blast
+
+
 def evaluate(root, st):
     d = st.get("decision")
     if d == "game_over":
@@ -195,6 +223,13 @@ def evaluate(root, st):
     f, t = future_weight(st)
     score += W["power_scale"] * power_value(st, f, t)
     score -= W["potion"] * max(0, len(potions(root)) - len(potions(st)))
+    if W["steam_lethal"]:
+        blast = steam_threat(root, st)
+        if blast:
+            left = hp - max(0, incoming_damage(st) - block)
+            deficit = blast - deck_block(st) - left
+            if deficit >= 0:
+                score -= W["steam_lethal"] + deficit
     return score
 
 
@@ -340,6 +375,10 @@ ROLLOUT_DEATH = -300.0
 # Optional learned fast policy (nets.NetPolicy: the imitation-trained policy network) that
 # replaces quick_policy in the planner's rollouts, like AlphaGo's rollout policy.
 FAST_POLICY = None
+# Optional combat value network (nets.CombatValue: expected HP change until the fight ends,
+# learned from self-play). A rollout's end state is then judged by
+# (1 - lam) * evaluate + lam * (win + HP + predicted change), lam from the rollout config.
+ROLLOUT_VALUE = None
 
 
 def fast_policy(st):
@@ -398,7 +437,7 @@ class TurnPlanner:
                 out[i] = ((st.get("player") or {}).get("hp") or 0) + 2.0 if won else DEATH_VALUE
         return out
 
-    def _rollout(self, root, snap, last, seed, turns, pilot_nodes=0):
+    def _rollout(self, root, snap, last, seed, turns, pilot_nodes=0, lam=0.0):
         self._restore(snap)
         self.sim.send({"cmd": "determinize", "seed": seed})
         s = self.sim.act(last[0], **last[1])
@@ -432,7 +471,13 @@ class TurnPlanner:
             return None
         if s.get("decision") == "game_over" and not s.get("victory"):
             return ROLLOUT_DEATH
-        return evaluate(root, s)
+        sc = evaluate(root, s)
+        if lam and ROLLOUT_VALUE is not None and s.get("decision") in ("combat_play", "card_select"):
+            hp = (s.get("player") or {}).get("hp") or 0
+            sc = (1 - lam) * sc + lam * (W["win"] + W["hp"] * (hp + ROLLOUT_VALUE(s)))
+        elif lam and ROLLOUT_VALUE is not None:
+            sc = (1 - lam) * sc + lam * evaluate(root, s)
+        return sc
 
     def _planner_rollout(self, s, future, turns, nodes):
         """Play the imagined future with a small planner (one-turn search, heuristic leaves)
@@ -478,8 +523,8 @@ class TurnPlanner:
                 out[i] = scores[i] if (st.get("decision") != "game_over" or st.get("victory")) else ROLLOUT_DEATH
         for i in cand:
             _, _, st, snap, last = leaves[i]
-            vals = [self._rollout(root, snap, last, base * 1000 + j, cfg.get("turns", 2), cfg.get("pilot_nodes", 0))
-                    for j in range(cfg.get("m", 3))]
+            vals = [self._rollout(root, snap, last, base * 1000 + j, cfg.get("turns", 2), cfg.get("pilot_nodes", 0),
+                                  cfg.get("lam", 0.0)) for j in range(cfg.get("m", 3))]
             vals = [v for v in vals if v is not None]
             mean = sum(vals) / len(vals) if vals else scores[i]
             # shrink toward the leaf's own evaluation: with few noisy rollouts, the max

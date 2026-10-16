@@ -108,7 +108,7 @@ class GameRecorder:
         if st.get("decision") in ("card_reward", "card_select"):
             row["cards"] = [card_tok(c) for c in st.get("cards") or []]
         if st.get("decision") in ("event_choice", "rest_site"):
-            row["opts"] = [(o.get("id") or o.get("title") or o.get("text") or "")[:60] for o in st.get("options") or []]
+            row["opts"] = [(o.get("option_id") or o.get("id") or o.get("title") or o.get("text") or "")[:60] for o in st.get("options") or []]
         if st.get("decision") == "map_select":
             row["opts"] = [c.get("type") or c.get("room_type") for c in st.get("choices") or []]
         if extra:

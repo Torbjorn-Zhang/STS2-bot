@@ -135,12 +135,13 @@ def main():
     ap.add_argument("--run-value", default=None, help="run value network (nets.py value) for card rewards")
     ap.add_argument("--value-weight-run", type=float, default=None, help="graded points per predicted floor")
     ap.add_argument("--rest-value", action="store_true", help="heal vs smith by the run value network")
+    ap.add_argument("--rollout-value", default=None, help="RL policy file whose combat value net ends rollouts")
     ap.add_argument("--value-weight", type=float, default=None,
                     help="with --model: score = hand-written + w * model (default: model only)")
     args = ap.parse_args()
     if args.no_deck_test:
         policy.DECK_TEST = False
-    if args.net_rollouts or args.net_decktest or args.run_value:
+    if args.net_rollouts or args.net_decktest or args.run_value or args.rollout_value:
         import torch
         torch.set_num_threads(1)
         import combat
@@ -152,6 +153,8 @@ def main():
             decktest.NET_PILOT = nets.NetPolicy(args.net_decktest)
         if args.run_value:
             policy.RUN_VALUE = nets.RunValue(args.run_value)
+        if args.rollout_value:
+            combat.ROLLOUT_VALUE = nets.CombatValue(args.rollout_value)
         if args.value_weight_run is not None:
             policy.VALUE_WEIGHT = args.value_weight_run
         policy.REST_VALUE = args.rest_value

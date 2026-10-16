@@ -72,6 +72,7 @@ def final_progress(o):
 # ---------------------------------------------------------------- combat encoding
 
 def incoming(es):
+    es = [e for e in es if (e[1] or 0) < 10 ** 8]
     tot = 0
     for e in es:
         for t, d, h in e[5]:
@@ -159,8 +160,9 @@ class CombatEncoder:
         return cls(*(Vocab.from_json(d[k]) for k in ("cards", "powers", "enemies", "relics", "pots", "intents")))
 
     def _slots(self, s):
-        es = sorted(s["es"], key=lambda e: e[6] if e[6] is not None else 99)[:MAX_ENEMIES]
-        return es
+        # Waterfall Giant's ~1e9-HP Steam Eruption placeholder is not a real enemy
+        es = sorted((e for e in s["es"] if (e[1] or 0) < 10 ** 8), key=lambda e: e[6] if e[6] is not None else 99)
+        return es[:MAX_ENEMIES]
 
     def state(self, s, run):
         """-> (indices, values)"""
@@ -325,7 +327,7 @@ def _dense(csr, sel):
     for r, i in enumerate(sel):
         a, b = crow[i], crow[i + 1]
         out[r, cols[a:b]] = vals[a:b]
-    return torch.from_numpy(out)
+    return torch.from_numpy(np.clip(out, -5.0, 5.0))
 
 
 SOFT_TAU = 4.0    # temperature (score units) of the search-score target distribution
@@ -409,7 +411,7 @@ def policy_loss(model, Scsr, Acsr, start, chosen, sel, soft=None):
     return loss, acc
 
 
-def train_policy(paths, out, epochs=8, hidden=256, lr=2e-3, batch=256, max_runs=None):
+def train_policy(paths, out, epochs=8, hidden=256, lr=7e-4, batch=256, max_runs=None):
     t0 = time.time()
     runs = load_runs(paths)
     keys = sorted(runs)
@@ -441,6 +443,7 @@ def train_policy(paths, out, epochs=8, hidden=256, lr=2e-3, batch=256, max_runs=
             loss, acc = policy_loss(model, Str, Atr, st_tr, ch_tr, sel, so_tr)
             opt.zero_grad()
             loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             tl += loss.item()
             ta += acc
@@ -665,6 +668,24 @@ class CombatValueNet(nn.Module):
         return self.net(xs).squeeze(-1)
 
 
+class CombatValue:
+    """The combat value network saved with an RL policy: full sim state -> expected HP
+    change until the end of the fight (potions and death priced as in fight_returns)."""
+
+    def __init__(self, path):
+        blob = torch.load(path, weights_only=False)
+        self.enc = CombatEncoder.from_json(blob["enc"])
+        self.net = CombatValueNet(self.enc.state_dim)
+        self.net.load_state_dict(blob["value_state"])
+        self.net.eval()
+
+    def __call__(self, st):
+        from record import combat_state, run_state
+        S = _csr([self.enc.state(combat_state(st), run_state(st))], self.enc.state_dim)
+        with torch.no_grad():
+            return float(self.net(_dense(S, [0]))[0]) * RETURN_SCALE
+
+
 def fight_returns(rows):
     """Per combat step: HP change from this step to the end of the fight, minus potion
     costs from here on and a death penalty (scaled by 1/RETURN_SCALE)."""
@@ -722,42 +743,53 @@ def grouped(logits, owner, sizes):
     return pad
 
 
-def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=3e-4, batch=512, clip=0.2, ent=0.01):
+def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, batch=512, clip=0.2, ent=0.01):
+    """One PPO update. Advantages come from the value network as it was before this data
+    (standard PPO): fitting the baseline on the same returns first would memorize them and
+    leave no advantage signal. A fresh value network gets one light epoch first."""
     t0 = time.time()
     blob = torch.load(init, weights_only=False)
     enc = CombatEncoder.from_json(blob["enc"])
     model = PolicyNet(enc.state_dim, enc.action_dim, blob["hidden"])
     model.load_state_dict(blob["state"])
     vnet = CombatValueNet(enc.state_dim)
-    if blob.get("value_state"):
-        vnet.load_state_dict(blob["value_state"])
+    vopt = torch.optim.Adam(vnet.parameters(), lr=1e-3)
     runs = load_runs(paths)
     S, A, start, chosen, lp_old, G = rl_dataset(runs, enc)
     Scsr, Acsr = _csr(S, enc.state_dim), _csr(A, enc.action_dim)
     n = len(chosen)
     print("rl decisions", n, "runs", len(runs), "mean return", round(float(G.mean()), 3), "encoded",
           round(time.time() - t0), "s", flush=True)
-    opt = torch.optim.Adam(model.parameters(), lr=lr)
-    vopt = torch.optim.Adam(vnet.parameters(), lr=1e-3)
-    # fit the baseline first so the first policy step has sensible advantages
-    for ep in range(epochs + 2):
+
+    def fit_value(ep):
         order = np.random.RandomState(100 + ep).permutation(n)
-        stats = defaultdict(float)
-        nb = 0
+        tot, nb = 0.0, 0
         for sel in _batches(order, batch):
-            xs = _dense(Scsr, sel)
-            g = torch.from_numpy(G[sel])
-            v = vnet(xs)
-            vloss = F.mse_loss(v, g)
+            vloss = F.mse_loss(vnet(_dense(Scsr, sel)), torch.from_numpy(G[sel]))
             vopt.zero_grad()
             vloss.backward()
             vopt.step()
-            stats["vloss"] += vloss.item()
+            tot += vloss.item()
             nb += 1
-            if ep < 2:
-                continue
-            adv = (g - v.detach())
-            adv = (adv - adv.mean()) / (adv.std() + 1e-6)
+        return tot / nb
+
+    if blob.get("value_state"):
+        vnet.load_state_dict(blob["value_state"])
+    else:
+        print(json.dumps({"value_warmup": round(fit_value(-1), 4)}), flush=True)
+    with torch.no_grad():
+        V = np.concatenate([vnet(_dense(Scsr, sel)).numpy() for sel in _batches(np.arange(n), 4096)])
+    ADV = G - V
+    print(json.dumps({"adv_std": round(float(ADV.std()), 4), "value_mse_before": round(float((ADV ** 2).mean()), 4),
+                      "return_var": round(float(G.var()), 4)}), flush=True)
+    ADV = (ADV - ADV.mean()) / (ADV.std() + 1e-6)
+    opt = torch.optim.Adam(model.parameters(), lr=lr)
+    for ep in range(epochs):
+        order = np.random.RandomState(ep).permutation(n)
+        stats = defaultdict(float)
+        nb = 0
+        for sel in _batches(order, batch):
+            adv = torch.from_numpy(ADV[sel].astype(np.float32))
             logits, owner = policy_logits(model, Scsr, Acsr, start, sel)
             sizes = np.asarray([start[d + 1] - start[d] for d in sel])
             pad = grouped(logits / temperature, owner, sizes)
@@ -771,16 +803,20 @@ def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=3e-4, batch=512, cl
             loss = pg - ent * entropy
             opt.zero_grad()
             loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
             stats["pg"] += pg.item()
             stats["ent"] += entropy.item()
             stats["clipfrac"] += ((ratio - 1).abs() > clip).float().mean().item()
+            stats["kl"] += (torch.from_numpy(lp_old[sel]) - lp_new).mean().item()
+            nb += 1
         print(json.dumps({"epoch": ep, **{k: round(v / nb, 4) for k, v in stats.items()}, "s": round(time.time() - t0)}),
               flush=True)
+    vl = [fit_value(ep) for ep in range(2)]   # the baseline for the next iteration
+    print(json.dumps({"value_after": [round(x, 4) for x in vl]}), flush=True)
     torch.save({**blob, "state": model.state_dict(), "value_state": vnet.state_dict(),
                 "rl_from": init, "rl_data": paths, "temperature": temperature}, out)
     print("saved", out)
-
 
 # ---------------------------------------------------------------- card reward policy (imitation of the deck test)
 

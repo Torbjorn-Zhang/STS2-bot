@@ -164,9 +164,12 @@ def main():
     ap.add_argument("--rollouts", default=None, help='JSON rollout config, e.g. {"k":4,"m":3,"turns":2}')
     ap.add_argument("--weights", default=None, help="JSON overrides for combat.W")
     ap.add_argument("--nodes", type=int, default=400)
+    ap.add_argument("--net-rollouts", default=None, help="policy network as the planner's rollout policy")
+    ap.add_argument("--rollout-value", default=None, help="RL policy file whose combat value net ends rollouts")
     ap.add_argument("--ascension", type=int, default=0)
     ap.add_argument("--act", type=int, default=1, help="collect: which act's boss")
     ap.add_argument("--subset", default=None, help="'even' or 'odd' seeds only (train/validation split)")
+    ap.add_argument("--boss", default=None, help="only fights against this boss (name)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--reps", type=int, default=1, help=">1: fight each save this many times, determinized")
     args = ap.parse_args()
@@ -193,6 +196,14 @@ def main():
 
     if args.weights:
         combat.W.update(json.loads(args.weights))
+    if args.net_rollouts or args.rollout_value:
+        import torch
+        torch.set_num_threads(1)
+        import nets
+        if args.net_rollouts:
+            combat.FAST_POLICY = nets.NetPolicy(args.net_rollouts)
+        if args.rollout_value:
+            combat.ROLLOUT_VALUE = nets.CombatValue(args.rollout_value)
     model = None
     if args.model:
         from value import ValueModel
@@ -203,6 +214,8 @@ def main():
             metas.append(json.load(fh))
     if args.subset:
         metas = [m for m in metas if (int(m["seed"].rsplit("_", 1)[1]) % 2 == 0) == (args.subset == "even")]
+    if args.boss:
+        metas = [m for m in metas if m.get("boss") == args.boss]
     t0 = time.perf_counter()
     roll = json.loads(args.rollouts) if args.rollouts else None
     items = [(m, None) for m in metas] if args.reps <= 1 else [(m, r) for m in metas for r in range(args.reps)]
