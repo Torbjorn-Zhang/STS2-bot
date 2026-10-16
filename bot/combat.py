@@ -25,6 +25,8 @@ W = {
     "potion": 5.0,      # cost of drinking a potion (keeps them for fights that need them)
     "win": 300.0,
     "fight_model": 0.0,     # 0..1: replace fixed damage weights by -future_loss (turns to kill x threat)
+    "leader": 1.0,          # damage weight on the leader of Minions (they leave when it dies)
+    "illusion_credit": 1.0, # kill/damage credit for Illusions (they revive; killing still stops one attack)
     "stun": 8.0,            # fully blocking an attacking Imbalanced enemy (it gets Stunned)
     "wake": 4.0,            # per Slumber count knocked off a sleeping enemy this turn
     "late_hallway_big": 0,  # 1: act-2+ hallway fights use dmg_big too
@@ -150,14 +152,21 @@ def evaluate(root, st):
     w_dmg = W["dmg_big"] if room in ("Elite", "Boss") or late else W["dmg"]
     now_by_id = {eid(e): e for e in now_alive}
     fm = W["fight_model"]
+    # Minions leave with their leader; Illusions revive at full HP. Damage to an Illusion
+    # is wasted (its attack prevented this turn still counts via incoming damage), and the
+    # leader's HP is what ends the fight.
+    has_minions = any("Minion" in powers(e.get("powers")) for e in root_alive)
     for e in root_alive:
+        pw = powers(e.get("powers"))
         dealt = e["hp"] - (now_by_id[eid(e)]["hp"] if eid(e) in now_by_id else 0)
-        grows = any(k in powers(e.get("powers")) for k in ("Strength", "Ritual"))
-        score += (1 - fm) * w_dmg * (W["scaling"] if grows else 1.0) * dealt
+        grows = any(k in pw for k in ("Strength", "Ritual"))
+        mult = W["illusion_credit"] if "Illusion" in pw else W["leader"] if has_minions and "Minion" not in pw else 1.0
+        score += (1 - fm) * w_dmg * (W["scaling"] if grows else 1.0) * dealt * mult
     if fm:
         score -= fm * future_loss(st)
     # enemies from the root that are dead now (a kill that spawns new enemies is still a kill)
-    score += W["kill"] * sum(1 for e in root_alive if eid(e) not in now_by_id)
+    score += W["kill"] * sum((W["illusion_credit"] if "Illusion" in powers(e.get("powers")) else 1.0)
+                             for e in root_alive if eid(e) not in now_by_id)
     # mechanics the one-turn view misses: a fully blocked Imbalanced attacker is stunned;
     # every HP loss of a Slumbering enemy brings its waking closer
     inc_now = incoming_damage(st)
@@ -243,11 +252,16 @@ def quick_card_value(c, target, st, need, energy):
         strength = powers(st.get("player_powers")).get("Strength", 0)
         per = dmg + strength
         targets = en if "all enemies" in desc else ([target] if target else en[:1])
+        minions = any("Minion" in powers(x.get("powers")) for x in en)
         for e in targets:
-            vul = 1.5 if powers(e.get("powers")).get("Vulnerable") else 1.0
+            epw = powers(e.get("powers"))
+            vul = 1.5 if epw.get("Vulnerable") else 1.0
             total = per * hits * vul
             eff = (e.get("hp") or 0) + (e.get("block") or 0)
-            v += min(total, eff)
+            if "Illusion" in epw and W["illusion_credit"] < 1.0:   # revives at full HP
+                v += (4.0 if total >= eff and e.get("intends_attack") else 0.0)
+                continue
+            v += min(total, eff) * (W["leader"] if minions and "Minion" not in epw else 1.0)
             if total >= eff:
                 v += 6.0 + (4.0 if e.get("intends_attack") else 0.0)
     pp = powers(st.get("player_powers"))

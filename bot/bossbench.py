@@ -17,6 +17,7 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 
 import combat
+import decktest
 import policy
 from combat import TurnPlanner
 from engine import fresh_sim, maybe_recycle
@@ -118,10 +119,20 @@ def fight_one(sim, meta, model, value_weight, nodes, rollouts=None, rep=None):
             rounds[0] = s["round"]
 
     t0 = time.perf_counter()
-    st = planner.play_combat(st, on_state=watch)
+    enemy_max = sum((e.get("max_hp") or 0) for e in st.get("enemies") or [])
+    last = {"s": st}
+
+    def watch2(s):
+        watch(s)
+        if s.get("enemies") is not None:
+            last["s"] = s
+
+    st = planner.play_combat(st, on_state=watch2)
     won = st.get("decision") != "game_over" or bool(st.get("victory"))
+    hp = (last["s"].get("player") or {}).get("hp") if won else 0   # (a won act boss heals for the next act)
+    left = 0 if won else sum((e.get("hp") or 0) for e in last["s"].get("enemies") or [] if (e.get("hp") or 0) > 0)
     return {"seed": meta["seed"], "rep": rep, "boss": meta["boss"], "won": won, "hp_before": hp0,
-            "hp_after": (st.get("player") or {}).get("hp") if won else 0, "rounds": rounds[0],
+            "hp_after": hp or 0, "graded": decktest.graded(won, hp or 0, left, enemy_max), "rounds": rounds[0],
             "seconds": round(time.perf_counter() - t0, 1)}
 
 

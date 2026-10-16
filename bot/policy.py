@@ -208,7 +208,7 @@ SKIP_BELOW = 1.7   # a weaker card only dilutes the deck
 DECK_TEST = True        # judge card rewards by imagined boss fights (decktest.py)
 TIER_WEIGHT = 4.0       # graded-score points per tier point, on top of the boss test
 LAB_WEIGHT = 0.5        # weight of the card lab's average effect (card_prior_a10.json)
-REFINE_REPS = 3         # card rewards: planner-piloted fights for the top two options (0 = off)
+REFINE_REPS = 0         # card rewards: planner-piloted fights for the top two options (0 = off; 3 was 4-5x slower, no gain)
 def _load_prior(name):
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as fh:
