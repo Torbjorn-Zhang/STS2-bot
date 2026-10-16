@@ -259,6 +259,10 @@ TIER_WEIGHT = 4.0       # graded-score points per tier point, on top of the boss
 LAB_WEIGHT = 0.5        # weight of the card lab's average effect (card_prior_a10.json)
 REFINE_REPS = 0         # card rewards: planner-piloted fights for the top two options (0 = off; 3 was 4-5x slower, no gain)
 CARD_NET = None         # optional nets.CardPolicy: card rewards without the deck test (fast self-play)
+CARD_PRIOR = None       # optional nets.CardPolicy whose log-probabilities are added to the deck test's scores
+CARD_PRIOR_WEIGHT = 5.0 # graded points per unit of log-probability
+REST_NET = None         # optional restnet.RestPolicy: rest-site choice by the network (greedy)
+EVENT_NET = None        # optional eventnet.EventPolicy: event choice by the network (greedy)
 RUN_VALUE = None        # optional nets.RunValue: the run value network (trained on self-play outcomes)
 VALUE_WEIGHT = 3.0      # graded-score points per floor of predicted further progress
 
@@ -307,6 +311,14 @@ def choose_card_reward(st, sim=None):
         scores = decktest.evaluate_options(sim, st)
         if scores:
             vb = value_bonus(st, list(scores))
+            if CARD_PRIOR is not None:   # the RL card network as a prior (AlphaGo's policy prior)
+                acts_, z_ = CARD_PRIOR.scores(st)
+                z_ = z_ - z_.max()
+                lp_ = z_ - np.log(np.exp(z_).sum())
+                for a_, l_ in zip(acts_, lp_):
+                    k_ = a_[1].get("card_index") if a_[0] == "select_card_reward" else None
+                    if k_ in scores:
+                        vb[k_] = vb.get(k_, 0.0) + CARD_PRIOR_WEIGHT * float(l_) / VALUE_WEIGHT
             full = (st.get("player") or {}).get("deck")
             deck_n = (st.get("player") or {}).get("deck_size") or 10
             act = (st.get("context") or {}).get("act") or 1
@@ -510,6 +522,14 @@ def choose_rest(st, sim=None):
         return ("leave_room", {})
     by = {o.get("option_id"): o for o in opts}
     _REST_PICK.token = None
+    if REST_NET is not None and sim is not None and len(opts) > 1:
+        keys, ks, z, _ = REST_NET.scores(sim, st)
+        if ks:
+            k = ks[int(np.argmax(z))]
+            idx, tok = keys[k]
+            _LAST_REST.option = k.split(":")[0]
+            _REST_PICK.token = tok
+            return ("choose_option", {"option_index": idx})
     if DECK_TEST and sim is not None and len(opts) > 1:
         import decktest
         if decktest.PATH_TEST:
@@ -560,6 +580,12 @@ def choose_event(st, sim=None):
         best = max(opts, key=lambda o: NEOW[o["title"]])
         _remember_event(best)
         return ("choose_option", {"option_index": best["index"]})
+    if EVENT_NET is not None and sim is not None and len(opts) > 1:
+        eo, _, z, _ = EVENT_NET.scores(sim, st)
+        if z is not None:
+            best = eo[int(np.argmax(z))]
+            _remember_event(best)
+            return ("choose_option", {"option_index": best["index"]})
     if DECK_TEST and sim is not None and len(opts) > 1:
         import decktest
         scores = decktest.evaluate_event(sim, st)
