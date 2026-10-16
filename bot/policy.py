@@ -125,7 +125,17 @@ def _hp_after(kind, hp, act, costs=None):
 
 def choose_map(sim, st):
     """Best path by DP over the map, with HP projected along it (an elite deep in the
-    path is judged at the HP the bot will likely have there, not the HP it has now)."""
+    path is judged at the HP the bot will likely have there, not the HP it has now).
+    With the map path test on, the next node is chosen by walking each option's route to
+    the boss with this deck's simulated fight losses (decktest.evaluate_map)."""
+    if DECK_TEST and sim is not None and len(st.get("choices") or []) > 1:
+        import decktest
+        if decktest.MAP_PATH:
+            scores = decktest.evaluate_map(sim, st)
+            if scores:
+                _LAST_SCORES.v = {"map": (decktest.LAST_PATH or {}).get("map")}
+                col, row = max(scores, key=lambda c: (scores[c], -c[0]))
+                return ("select_map_node", {"col": col, "row": row})
     m = sim.send({"cmd": "get_map"})
     nodes = {(n["col"], n["row"]): n for row in m.get("rows", []) for n in row}
     act = (st.get("context") or {}).get("act") or 1

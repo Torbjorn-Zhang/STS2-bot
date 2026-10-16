@@ -8,6 +8,7 @@ future. The graded score rewards winning and HP left, and for a loss, how much o
 boss's HP the deck removed (early decks lose to every boss; this still ranks them).
 """
 
+import json
 import os
 import zlib
 
@@ -167,6 +168,29 @@ PATH_TEST = os.environ.get("STS2_PATH_TEST", "0") == "1"
 PATH_REPS = 12          # boss fights per alternative (same seeds for every alternative)
 COST_REPS = 1           # simulated fights per pool encounter for the HP cost
 UNKNOWN_FIGHT = 0.35    # share of "?" rooms that turn out to be fights
+NEAR_FIGHTS = 2         # fights fought with this deck's own simulated losses; later ones (the
+                        # deck will have changed) draw from the bot's real losses at that floor
+
+
+def _load_losses():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fight_losses_a10.json")) as fh:
+            return json.load(fh)["losses"]
+    except (OSError, ValueError, KeyError):
+        return {}
+
+
+EMPIRICAL = _load_losses()
+
+
+def empirical_losses(act, kind, row):
+    """The A10 bot's real HP-fraction losses for this act, room type and floor bucket."""
+    for a in (act, act - 1, 1):
+        for key in (f"{a}/{kind}/{min(4, max(0, row) // 3)}", f"{a}/{kind}/all"):
+            v = EMPIRICAL.get(key)
+            if v and len(v) >= 20:
+                return v
+    return None
 GOLD_POINTS = 0.02      # graded points per gold (not simulated: shops later in the act)
 
 
@@ -180,15 +204,17 @@ def end_of_combat_heal(st):
     return heal
 
 
-def route_to_boss(sim, st):
-    """Node types of the bot's planned path from the current map position up to the boss
-    (exclusive), using the map DP's choices (with its HP projection)."""
+def route_to_boss(sim, st, start=None, m=None):
+    """Node types of the bot's planned path from the current map position (or through
+    the node `start` = (col, row)) up to the boss (exclusive), using the map DP's choices."""
     import policy
-    m = sim.send({"cmd": "get_map"})
+    m = m or sim.send({"cmd": "get_map"})
     nodes = {(n["col"], n["row"]): n for row in m.get("rows", []) for n in row}
     cur = m.get("current_coord") or {}
     here = nodes.get((cur.get("col"), cur.get("row")))
-    if here is None:   # not on the map yet (e.g. act start): every first-row node is a start
+    if start is not None:
+        kids = [{"col": start[0], "row": start[1]}]
+    elif here is None:   # not on the map yet (e.g. act start): every first-row node is a start
         kids = [{"col": n["col"], "row": n["row"]} for n in (m.get("rows") or [[]])[0]]
     else:
         kids = here.get("children") or []
@@ -209,7 +235,7 @@ def route_to_boss(sim, st):
                     v -= 20.0
                 best = max([value((k["col"], k["row"]), hp2) for k in n.get("children") or []] or [(0.0, [])],
                            key=lambda t: t[0])
-                memo[key] = (v + best[0], [n["type"]] + best[1])
+                memo[key] = (v + best[0], [(n["type"], n["row"])] + best[1])
         return memo[key]
 
     hp = policy.hp_ratio(st)
@@ -217,7 +243,7 @@ def route_to_boss(sim, st):
     if not opts:
         return []
     route = max(opts, key=lambda t: t[0])[1]
-    return [t for t in route if t != "Boss"]
+    return [t for t in route if t[0] != "Boss"]
 
 
 # HP lost by the planner per fight relative to the pilot, on the same decks and pools at
@@ -226,7 +252,7 @@ def route_to_boss(sim, st):
 PATH_HANDICAP = {"quick": {"Monster": 0.76, "Elite": 0.67}, "net": {"Monster": 0.8, "Elite": 0.87}}
 
 
-def path_value(sim, s_map, route, seed_tag, pilot=None, reps=PATH_REPS):
+def path_value(sim, s_map, route, seed_tag, pilot=None, reps=PATH_REPS, losses=None):
     """From a map state: walk `route` with sampled fight losses (this deck's simulated
     losses in the act's pools, scaled to the planner), heal at rest sites, then fight the
     boss at the HP left. Each rep samples its own losses, so low HP risks dying on the way
@@ -238,19 +264,28 @@ def path_value(sim, s_map, route, seed_tag, pilot=None, reps=PATH_REPS):
         return None, None
     p = s_map.get("player") or {}
     hp0, mhp = p.get("hp") or 0, max(1, p.get("max_hp") or 1)
-    need = {k for k in route if k in ("Monster", "Elite")} | ({"Monster"} if "Unknown" in route else set())
-    losses = _costs(sim, s_map, need, seed_tag) if need else {}
+    kinds = [k for k, _ in route]
+    near = set()
+    for k in kinds:
+        if k in ("Monster", "Elite", "Unknown") and len(near) < NEAR_FIGHTS:
+            near.add("Monster" if k == "Unknown" else k)
+    if losses is None:
+        losses = _costs(sim, s_map, near, seed_tag) if near else {}
+    act = ctx.get("act") or 1
     heal = end_of_combat_heal(s_map)
     snap = sim.send({"cmd": "snapshot"})["id"]
     vals, hps = [], []
     try:
         for rep in range(reps):
             rng = random.Random(f"route/{seed_tag}/{rep}")
-            hp, rests_left, dead = hp0, route.count("RestSite"), False
-            for kind in route:
+            hp, rests_left, dead, fought = hp0, kinds.count("RestSite"), False, 0
+            for kind, row in route:
                 fight = kind in ("Monster", "Elite") or (kind == "Unknown" and rng.random() < UNKNOWN_FIGHT)
                 if fight:
-                    pool = losses.get("Elite" if kind == "Elite" else "Monster") or [0.0]
+                    k2 = "Elite" if kind == "Elite" else "Monster"
+                    pool = losses.get(k2) if fought < NEAR_FIGHTS else None
+                    pool = pool or empirical_losses(act, k2, row) or losses.get(k2) or [0.0]
+                    fought += 1
                     hp -= rng.choice(pool) * mhp
                     if hp <= 0:
                         dead = True
@@ -306,6 +341,52 @@ def _costs(sim, s_map, kinds, seed_tag):
     return out
 
 
+# Rewards of map nodes the path test does not simulate (graded points): an elite's relic,
+# card and gold (A10 data: each elite before the act-1 boss ~ +0.37 logit of winning it at
+# equal HP, ~6-8 points), a chest's relic, a hallway's card and gold, an event's average.
+NODE_POINTS = {"Elite": 7.0, "Treasure": 4.0, "Monster": 1.0, "Unknown": 1.5, "RestSite": 0.0}
+MAP_PATH = os.environ.get("STS2_MAP_PATH", "0") == "1"
+
+
+def shop_points(gold):
+    return 4.0 if gold >= 200 else 2.0 if gold >= 100 else 0.5
+
+
+def evaluate_map(sim, st):
+    """Map choice by the path test: each next node with the DP's best continuation from it,
+    walked to the boss with this deck's sampled fight losses, plus NODE_POINTS for what
+    the walk does not simulate. Returns {(col, row): score}; restores st."""
+    global LAST_PATH
+    choices = st.get("choices") or []
+    m = sim.send({"cmd": "get_map"})
+    nodes = {(n["col"], n["row"]): n for row in m.get("rows", []) for n in row}
+    routes = {}
+    for ch in choices:
+        c = (ch["col"], ch["row"])
+        n = nodes.get(c)
+        if n is None:
+            continue
+        if n["type"] == "Boss":
+            return {}
+        routes[c] = route_to_boss(sim, st, start=c, m=m)
+    if len({tuple(k for k, _ in r) for r in routes.values()}) < 2:
+        return {}   # every choice leads the same way: nothing to decide
+    ctx = st.get("context") or {}
+    seed_tag = f"map/{ctx.get('act')}/{ctx.get('floor')}"
+    losses = _costs(sim, st, {"Monster", "Elite"}, seed_tag)
+    gold = (st.get("player") or {}).get("gold") or 0
+    out, info = {}, {}
+    for c, route in routes.items():
+        v, hp = path_value(sim, st, route, seed_tag, losses=losses)
+        if v is None:
+            continue
+        pts = sum(shop_points(gold) if k == "Shop" else NODE_POINTS.get(k, 0.0) for k, _ in route)
+        out[c] = v + pts
+        info[str(c)] = (round(v, 2), round(pts, 1), hp, [k for k, _ in route])
+    LAST_PATH = {"map": info}
+    return out
+
+
 LAST_PATH = None   # debug / records: {key: (score, projected HP)} of the last path test
 
 
@@ -339,7 +420,7 @@ def evaluate_arms_path(sim, st, arms, tag="", pilot=None, reps=PATH_REPS):
     finally:
         sim.send({"cmd": "restore", "id": snap})
         sim.send({"cmd": "drop_snapshots", "from": snap})
-    LAST_PATH = {"route": route, "arms": {str(k): v for k, v in info.items()}}
+    LAST_PATH = {"route": [k for k, _ in route or []], "arms": {str(k): v for k, v in info.items()}}
     return out
 
 
