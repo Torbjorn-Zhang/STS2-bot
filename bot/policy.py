@@ -67,6 +67,8 @@ ELITE_HP = {1: 0.55, 2: 0.7, 3: 0.7}   # take elites (relics) only from this HP 
 ELITE_VALUE = {1: 3.5, 2: 2.0, 3: 2.0}
 ELITE_ASC_HP = 0.01        # extra HP fraction required per ascension level
 ELITE_ASC_DISCOUNT = 0.0   # (0.15 per level made A10 worse: v17)
+LATE_ELITE_ROW = 10        # elites from this map row on (the boss is row ~15) cost a share of the HP for the boss
+LATE_ELITE_PENALTY = 0.0   # (2.5 in v25: no gain)
 
 
 MAP_COSTS = False  # map DP uses simulated fight costs for this deck when available
@@ -85,6 +87,8 @@ def node_value(kind, hp, row, act=1, gold=0, costs=None):
         # at high ascension HP on reaching the boss decides more than relics do (A10 bench:
         # boss wins vs HP r=+0.66, vs relic count r=0.00), so elites need more HP and pay less
         value = ELITE_VALUE[a] - ELITE_ASC_DISCOUNT * ASCENSION
+        if row >= LATE_ELITE_ROW:   # guides: fight elites early while HP is full, skip the late ones
+            value -= LATE_ELITE_PENALTY
         return value if hp >= ELITE_HP[a] + ELITE_ASC_HP * ASCENSION and row >= 4 else -3.0
     if kind == "RestSite":
         return 3.0 if hp < 0.5 else 2.0 if hp < 0.7 else 0.8
@@ -168,6 +172,35 @@ def stat_value(c):
     return 0.12 * dmg / energy + 0.06 * (st.get("block") or 0) / energy
 
 
+# Ironclad archetypes (PCGamesN Slay the Spire 2 guide, same v0.11x card pool): enablers
+# and payoffs. A payoff is worth more for every enabler already in the deck and vice versa;
+# per-card tiers and the quick-pilot deck test do not see these combinations.
+ARCHETYPES = {
+    "vulnerable": ({"BASH", "UPPERCUT", "THUNDERCLAP", "TREMBLE", "TAUNT", "BREAK", "DOMINATE", "MOLTEN_FIST"},
+                   {"DISMANTLE", "MOLTEN_FIST", "BULLY", "CRUELTY", "DOMINATE", "COLOSSUS", "VICIOUS"}),
+    "block": (BLOCK, {"BODY_SLAM", "UNMOVABLE", "BARRICADE", "JUGGERNAUT", "CRIMSON_MANTLE", "IMPERVIOUS"}),
+    "exhaust": ({"TRUE_GRIT", "BURNING_PACT", "SECOND_WIND", "FIEND_FIRE", "BRAND", "STOKE", "CINDER", "THRASH",
+                 "HAVOC", "CORRUPTION", "FORGOTTEN_RITUAL"},
+                {"FEEL_NO_PAIN", "DARK_EMBRACE", "ASHEN_STRIKE", "PACTS_END", "EVIL_EYE", "CORRUPTION", "MIDNIGHT",
+                 "DRUM_OF_BATTLE"}),
+}
+SYNERGY = False   # archetype bonus (v25: 22 vs 24 act-1 clears of 60, off)
+
+
+def synergy_bonus(cid, keys):
+    """Tier points from archetype fit: payoffs scale with the deck's enablers, enablers
+    with its payoffs (capped, so one combo does not dominate the pick)."""
+    bonus = 0.0
+    for enablers, payoffs in ARCHETYPES.values():
+        n_en = sum(1 for k in keys if k in enablers)
+        n_pay = sum(1 for k in keys if k in payoffs)
+        if cid in payoffs:
+            bonus += 0.35 * min(4, n_en) - (0.5 if n_en == 0 else 0.0)
+        if cid in enablers:
+            bonus += 0.25 * min(3, n_pay)
+    return bonus
+
+
 def base_key(c):
     return card_key(c).rstrip("+").split("+")[0]
 
@@ -195,6 +228,8 @@ def card_value(c, deck_size, deck=None, act=1):
             v += 0.4 if n(SCALING) < 2 else -0.3 * (n(SCALING) - 1)
         if cid in FRONT and act == 1 and n(FRONT) < 3:
             v += 0.4
+        if SYNERGY:
+            v += synergy_bonus(cid, keys)
         powers_n = sum(1 for x in deck if x.get("type") == "Power")
         if c.get("type") == "Power" and powers_n >= 3:
             v -= 0.4 * (powers_n - 2)
@@ -260,8 +295,19 @@ def choose_card_reward(st, sim=None):
                 fine = decktest.evaluate_arms(sim, st, arms, reps=REFINE_REPS, tag="fine/", pilot="planner")
                 if len(fine) == 2:
                     best = max(fine, key=lambda k: fine[k] + total(k) - scores[k])
+            _LAST_SCORES.v = {"test": {str(k): round(v, 2) for k, v in scores.items()},
+                              "total": {str(k): round(total(k), 2) for k in scores}}
             return ("skip_card_reward", {}) if best is None else ("select_card_reward", {"card_index": best})
     return choose_card_reward_tier(st)
+
+
+_LAST_SCORES = threading.local()   # per worker thread: deck-test scores of the last card reward
+
+
+def pop_last_scores():
+    v = getattr(_LAST_SCORES, "v", None)
+    _LAST_SCORES.v = None
+    return v
 
 
 def choose_card_reward_tier(st):

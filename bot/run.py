@@ -13,8 +13,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import policy
-from combat import TurnPlanner
-from engine import fresh_sim, maybe_recycle
+from combat import TurnPlanner, potion_actions
+from engine import fresh_sim, legal_actions, maybe_recycle
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -23,7 +23,13 @@ def _key(st):
     return json.dumps(st, sort_keys=True)
 
 
-def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0, rollouts=None):
+def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0, rollouts=None,
+             rec=None, explore=0.0):
+    """rec: optional record.GameRecorder (self-play data for the policy and value nets).
+    explore: chance to take a uniformly random card reward option instead (value-net data
+    needs decks the policy would not build; such decisions are flagged in the record)."""
+    import random
+    rng = random.Random(f"explore/{seed}")
     policy.ASCENSION = ascension
     planner = TurnPlanner(sim, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
     st = sim.send({"cmd": "start_run", "character": character, "seed": seed, "ascension": ascension})
@@ -50,7 +56,14 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                     last_enemies["hp"] = [e.get("hp") for e in s["enemies"]]
                     last_enemies["round"] = s.get("round")
                     last_enemies["potions"] = len([x for x in (s.get("player") or {}).get("potions") or [] if x])
-            st = planner.play_combat(st, on_state=watch)
+            on_step = None
+            if rec:
+                rec.fight_start(st)
+                on_step = lambda s, a: rec.combat_step(
+                    s, legal_actions(s) + potion_actions(s) if s.get("decision") == "combat_play" else legal_actions(s), a)
+            st = planner.play_combat(st, on_state=watch, on_step=on_step)
+            if rec:
+                rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"))
             fights += 1
             hp_log.append({"floor": floor0, "room": room, "enemies": names, "hp_before": hp0,
                            "hp_after": (st.get("player") or {}).get("hp"), "won": st.get("decision") != "game_over",
@@ -62,6 +75,12 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 break
             continue
         a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
+        extra = policy.pop_last_scores()
+        if explore and d == "card_reward" and rng.random() < explore:
+            a = rng.choice(legal_actions(st))
+            extra = {**(extra or {}), "explore": True}
+        if rec:
+            rec.decision(st, legal_actions(st), a, extra)
         nxt = sim.act(a[0], **a[1])
         steps += 1
         if nxt.get("type") != "error" and _key(nxt) == _key(st):
@@ -75,7 +94,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         st = nxt
     ctx = st.get("context") or {}
     p = st.get("player") or {}
-    return {
+    res = {
         "seed": seed, "character": character, "ascension": ascension,
         "cleared_acts": 3 if st.get("victory") else (ctx.get("act") or 1) - 1,
         "victory": bool(st.get("victory")),
@@ -85,6 +104,9 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         "fights": fights, "seconds": round(time.perf_counter() - t0, 1),
         "planner": dict(planner.stats), "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
     }
+    if rec:
+        rec.finish(res)
+    return res
 
 
 def main():
@@ -100,6 +122,8 @@ def main():
     ap.add_argument("--model", default=None, help="value model (models/value.pkl); default: hand-written evaluation")
     ap.add_argument("--rollouts", default=None, help='JSON rollout config, e.g. {"k":4,"m":3,"turns":2}')
     ap.add_argument("--no-deck-test", action="store_true", help="pick card rewards by the tier list only")
+    ap.add_argument("--record", default=None, help="append self-play records to this .jsonl (record.py)")
+    ap.add_argument("--explore", type=float, default=0.0, help="chance of a random card reward pick (data collection)")
     ap.add_argument("--value-weight", type=float, default=None,
                     help="with --model: score = hand-written + w * model (default: model only)")
     args = ap.parse_args()
@@ -123,6 +147,7 @@ def main():
     todo = [s for s in seeds if s not in done]
     chunks = [todo[i::args.workers] for i in range(args.workers)]
     lock = threading.Lock()
+    rec_lock = threading.Lock()
 
     def worker(chunk):
         sim = fresh_sim()
@@ -131,8 +156,13 @@ def main():
             for s in chunk:
                 sim = maybe_recycle(sim)
                 try:
+                    rec = None
+                    if args.record:
+                        from record import GameRecorder
+                        rec = GameRecorder(args.record, rec_lock, s, {"tag": args.tag, "asc": args.ascension})
                     r = play_run(sim, s, args.character, args.acts, args.nodes, model, args.value_weight, args.ascension,
-                                 json.loads(args.rollouts) if args.rollouts else None)
+                                 json.loads(args.rollouts) if args.rollouts else None, rec=rec,
+                                 explore=args.explore)
                 except Exception as e:  # engine hang/crash: record it, restart the engine, go on
                     r = {"seed": s, "character": args.character, "ascension": args.ascension, "cleared_acts": 0,
                          "victory": False, "died": False, "act": None, "floor": None, "room": None, "hp": None,

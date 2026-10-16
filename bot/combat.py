@@ -31,6 +31,7 @@ W = {
     "wake": 4.0,            # per Slumber count knocked off a sleeping enemy this turn
     "late_hallway_big": 0,  # 1: act-2+ hallway fights use dmg_big too
     "potion_late_hp": 0.65, # act-2+ hallway fights: potions allowed below this HP fraction
+    "potions_any_fight_asc": 99,  # from this ascension potions are considered in every fight
 }
 PLAYER_DEBUFFS = ("Vulnerable", "Weak", "Frail")
 COUNTED = ("Strength", "Dexterity") + PLAYER_DEBUFFS
@@ -207,7 +208,10 @@ def potion_actions(st):
     p = st.get("player") or {}
     late = ((st.get("context") or {}).get("act") or 1) >= 2
     low = (p.get("hp") or 0) < (W["potion_late_hp"] if late else 0.5) * max(1, p.get("max_hp") or 1)
-    if st.get("decision") != "combat_play" or not (room in ("Elite", "Boss") or low):
+    # from A4 on (one potion slot fewer) guides say: drink to prevent HP loss now rather than
+    # hoard for a boss you may not reach; the planner still charges W["potion"] per potion
+    early = ((st.get("context") or {}).get("ascension") or 0) >= W["potions_any_fight_asc"]
+    if st.get("decision") != "combat_play" or not (room in ("Elite", "Boss") or low or early):
         return []
     acts = []
     targets = [e["index"] for e in alive(st)]
@@ -532,8 +536,9 @@ class TurnPlanner:
             self.stats["explored"] += 1
         return leaves[pick][1], scores[pick]
 
-    def play_combat(self, state, max_actions=600, on_state=None):
-        """Play until the combat ends. Returns the first non-combat state."""
+    def play_combat(self, state, max_actions=600, on_state=None, on_step=None):
+        """Play until the combat ends. Returns the first non-combat state.
+        on_step(state, action): called before each executed action (self-play records)."""
         n = 0
         if on_state:
             on_state(state)
@@ -543,6 +548,8 @@ class TurnPlanner:
             for a in path:
                 if a[0] == "end_turn" and self.recorder is not None:
                     self.recorder(state)
+                if on_step:
+                    on_step(state, a)
                 nxt = self.sim.act(a[0], **a[1])
                 n += 1
                 if nxt.get("type") == "error":
