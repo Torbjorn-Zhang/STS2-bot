@@ -410,11 +410,37 @@ REST_PRIORITY = {"COOK": 5.0, "DIG": 4.0, "LIFT": 3.5, "HATCH": 3.0, "SMITH": 2.
 _LAST_REST = threading.local()   # per worker thread: the option that opened the next card prompt
 
 
+REST_VALUE = False   # heal vs smith by the run value network (needs RUN_VALUE)
+
+
+def rest_by_value(st):
+    """HEAL or SMITH by the run value network: predicted further floors after healing 30%
+    of max HP vs after upgrading the card the smith would pick."""
+    from record import card_tok, run_state
+    rs = run_state(st)
+    p = st.get("player") or {}
+    deck = p.get("deck") or []
+    cand = [c for c in deck if not c.get("upgraded") and c.get("type") not in ("Curse", "Status")]
+    if not cand:
+        return "HEAL"
+    best = max(cand, key=upgrade_priority)
+    i = deck.index(best)
+    smith_deck = [card_tok(c) + ("+" if j == i else "") for j, c in enumerate(deck)]
+    healed = dict(rs, hp=min(rs["mhp"], rs["hp"] + int(0.3 * rs["mhp"])))
+    rem, _ = RUN_VALUE.predict([healed, rs], [rs["deck"], smith_deck])
+    return "HEAL" if rem[0] > rem[1] else "SMITH"
+
+
 def choose_rest(st, sim=None):
     opts = [o for o in st.get("options") or [] if o.get("is_enabled", True)]
     if not opts:
         return ("leave_room", {})
     by = {o.get("option_id"): o for o in opts}
+    if REST_VALUE and RUN_VALUE is not None and "HEAL" in by and "SMITH" in by \
+            and max(opts, key=lambda o: REST_PRIORITY.get(o.get("option_id"), 0.5)).get("option_id") in ("HEAL", "SMITH"):
+        pick = by[rest_by_value(st)]
+        _LAST_REST.option = pick.get("option_id")
+        return ("choose_option", {"option_index": pick["index"]})
     # arrive at the boss healthy: the last rest site before it heals unless nearly full
     if "HEAL" in by and hp_ratio(st) < (0.9 if boss_is_next(sim, st) else HEAL_BELOW):
         pick = by["HEAL"]

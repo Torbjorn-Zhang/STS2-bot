@@ -134,6 +134,7 @@ def main():
     ap.add_argument("--net-decktest", default=None, help="policy network as the deck test's pilot")
     ap.add_argument("--run-value", default=None, help="run value network (nets.py value) for card rewards")
     ap.add_argument("--value-weight-run", type=float, default=None, help="graded points per predicted floor")
+    ap.add_argument("--rest-value", action="store_true", help="heal vs smith by the run value network")
     ap.add_argument("--value-weight", type=float, default=None,
                     help="with --model: score = hand-written + w * model (default: model only)")
     args = ap.parse_args()
@@ -153,6 +154,7 @@ def main():
             policy.RUN_VALUE = nets.RunValue(args.run_value)
         if args.value_weight_run is not None:
             policy.VALUE_WEIGHT = args.value_weight_run
+        policy.REST_VALUE = args.rest_value
     model = None
     if args.model:
         from value import ValueModel
