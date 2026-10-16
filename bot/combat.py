@@ -32,6 +32,7 @@ W = {
     "late_hallway_big": 0,  # 1: act-2+ hallway fights use dmg_big too
     "potion_late_hp": 0.65, # act-2+ hallway fights: potions allowed below this HP fraction
     "potions_any_fight_asc": 99,  # from this ascension potions are considered in every fight
+    "eot_hand": 1,      # count end-of-turn damage / HP loss of cards left in hand (Beckon, Burn)
     "lethal": 150.0,    # announced attacks kill us at the end of this turn (unblocked >= HP)
     "rollout_tiebreak": 0.01,   # weight of the leaf evaluation added to rollout means (breaks ties)
     "steam_lethal": 0.0,    # Waterfall Giant: penalty when its death blast (Steam Eruption) would kill us (80: 9 vs 7 of 44 WG fights)
@@ -82,6 +83,22 @@ def incoming_damage(st):
             if i.get("type") in HITS and i.get("damage") is not None:
                 total += i["damage"] * (i.get("hits") or i.get("repeat") or 1)
     return total
+
+
+def end_of_turn_hand(st):
+    """(blockable damage, HP loss) from cards still in hand at the end of the turn:
+    statuses / curses like Beckon ("if this is in your Hand, lose 6 HP") or Burn."""
+    dmg, loss = 0, 0
+    for c in st.get("hand") or []:
+        desc = (c.get("description") or "").lower()
+        if "end of your turn" not in desc or "in your hand" not in desc:
+            continue
+        stt = c.get("stats") or {}
+        if "lose" in desc and "hp" in desc:
+            loss += stt.get("hploss") or stt.get("hp") or 0
+        elif "damage" in desc:
+            dmg += stt.get("damage") or 0
+    return dmg, loss
 
 
 def damage_rate(st):
@@ -185,8 +202,10 @@ def evaluate(root, st):
         return W["win"] + W["hp"] * ((st.get("player") or {}).get("hp") or 0)
     p = st.get("player") or {}
     hp, block = p.get("hp") or 0, p.get("block") or 0
-    score = W["hp"] * (hp - max(0, incoming_damage(st) - block))
-    if d == "combat_play" and hp > 0 and max(0, incoming_damage(st) - block) >= hp:
+    eot_dmg, eot_loss = end_of_turn_hand(st) if W["eot_hand"] else (0, 0)
+    taken = max(0, incoming_damage(st) + eot_dmg - block) + eot_loss
+    score = W["hp"] * (hp - taken)
+    if d == "combat_play" and hp > 0 and taken >= hp:
         # the linear HP term let a big power (Demon Form) outscore surviving the turn
         score -= W["lethal"]
     root_alive, now_alive = alive(root), alive(st)
