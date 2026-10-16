@@ -109,7 +109,7 @@ HARD_HALLWAY = {
     2: ["HUNTER_KILLER_NORMAL", "SLUMBERING_BEETLE_NORMAL", "SPINY_TOAD_NORMAL", "MYTES_NORMAL", "THE_OBSCURA_NORMAL"],
     3: ["FABRICATOR_NORMAL", "FROG_KNIGHT_NORMAL", "SLIMED_BERSERKER_NORMAL", "GLOBE_HEAD_NORMAL"],
 }
-HALLWAY_FROM_FLOOR = 8   # in act 1, before this floor only the boss matters
+HALLWAY_FROM_FLOOR = 8   # in act 1, before this floor only the boss matters (boss-only all act: neutral, v24)
 
 
 # act-1 variants have their own hallway pools (the run's act 1 is Overgrowth or Underdocks)
