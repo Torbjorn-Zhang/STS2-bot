@@ -64,8 +64,8 @@ def text_score(opt, hp):
 
 ELITE_HP = {1: 0.55, 2: 0.7, 3: 0.7}   # take elites (relics) only from this HP fraction up
 ELITE_VALUE = {1: 3.5, 2: 2.0, 3: 2.0}
-ELITE_ASC_HP = 0.02        # extra HP fraction required per ascension level
-ELITE_ASC_DISCOUNT = 0.15  # less path value per ascension level
+ELITE_ASC_HP = 0.01        # extra HP fraction required per ascension level
+ELITE_ASC_DISCOUNT = 0.0   # (0.15 per level made A10 worse: v17)
 
 
 MAP_COSTS = False  # map DP uses simulated fight costs for this deck when available
@@ -86,7 +86,7 @@ def node_value(kind, hp, row, act=1, gold=0, costs=None):
         value = ELITE_VALUE[a] - ELITE_ASC_DISCOUNT * ASCENSION
         return value if hp >= ELITE_HP[a] + ELITE_ASC_HP * ASCENSION and row >= 4 else -3.0
     if kind == "RestSite":
-        return (3.0 if hp < 0.5 else 2.0 if hp < 0.7 else 0.8) + 0.05 * ASCENSION
+        return 3.0 if hp < 0.5 else 2.0 if hp < 0.7 else 0.8
     if kind == "Treasure":
         return 2.0
     if kind == "Unknown":
@@ -208,6 +208,7 @@ SKIP_BELOW = 1.7   # a weaker card only dilutes the deck
 DECK_TEST = True        # judge card rewards by imagined boss fights (decktest.py)
 TIER_WEIGHT = 4.0       # graded-score points per tier point, on top of the boss test
 LAB_WEIGHT = 0.5        # weight of the card lab's average effect (card_prior_a10.json)
+REFINE_REPS = 3         # card rewards: planner-piloted fights for the top two options (0 = off)
 def _load_prior(name):
     try:
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name)) as fh:
@@ -249,6 +250,14 @@ def choose_card_reward(st, sim=None):
                         + LAB_WEIGHT * lab_value(base_key(c), act, (st.get("context") or {}).get("floor") or 0))
 
             best = max(scores, key=total)
+            if REFINE_REPS and len(scores) > 1:
+                # second stage: the two best by the quick test, fought by the real planner
+                top = sorted(scores, key=total, reverse=True)[:2]
+                arms = {k: ([("skip_card_reward", {})] if k is None else [("select_card_reward", {"card_index": k})])
+                        for k in top}
+                fine = decktest.evaluate_arms(sim, st, arms, reps=REFINE_REPS, tag="fine/", pilot="planner")
+                if len(fine) == 2:
+                    best = max(fine, key=lambda k: fine[k] + total(k) - scores[k])
             return ("skip_card_reward", {}) if best is None else ("select_card_reward", {"card_index": best})
     return choose_card_reward_tier(st)
 

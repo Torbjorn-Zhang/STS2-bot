@@ -17,6 +17,7 @@ UPGRADE_REPS = 5   # the engine's smith step sleeps 200 ms, so fewer seeds here
 PILOT = "quick"   # "quick": quick_policy (fast) or "planner": TurnPlanner(NODES)
 DEBUG = None   # set to a list to record how imagined fights ended
 NODES = 80
+REFINE_NODES = 40   # planner pilot for the refinement stage
 
 
 def graded(won, hp, enemy_left, enemy_max):
@@ -61,7 +62,7 @@ def _to_map(sim, st):
     return st if st.get("decision") == "map_select" else None
 
 
-def boss_fight(sim, map_state, boss_id, seed):
+def boss_fight(sim, map_state, boss_id, seed, pilot=None):
     """From a map state: heal to full, enter the boss encounter, fight; return the graded score."""
     sim.send({"cmd": "set_player", "hp": (map_state.get("player") or {}).get("max_hp") or 80})
     st = sim.send({"cmd": "enter_room", "type": "combat", "encounter": boss_id})
@@ -70,14 +71,14 @@ def boss_fight(sim, map_state, boss_id, seed):
     sim.send({"cmd": "determinize", "seed": seed})
     enemy_max = sum((e.get("max_hp") or 0) for e in alive(st))
     last = st
-    if PILOT == "planner":
+    if (pilot or PILOT) == "planner":
         holder = {}
 
         def watch(s):
             if s.get("enemies") is not None:
                 holder["s"] = s
 
-        end = TurnPlanner(sim, max_nodes=NODES).play_combat(st, on_state=watch, max_actions=300)
+        end = TurnPlanner(sim, max_nodes=REFINE_NODES if pilot else NODES).play_combat(st, on_state=watch, max_actions=300)
         last = holder.get("s", st)
     else:
         end = st
@@ -124,7 +125,7 @@ def tests_for(st):
     return tests
 
 
-def evaluate_arms(sim, st, arms, reps=REPS, tag=""):
+def evaluate_arms(sim, st, arms, reps=REPS, tag="", pilot=None):
     """arms: {key: [(action, kwargs), ...]}, the moves that make each alternative from st.
     Each arm is applied in the sandbox, then the bot walks to the map and fights the test
     encounters (same seeds for every arm). Returns {key: mean graded score}; restores st."""
@@ -148,7 +149,7 @@ def evaluate_arms(sim, st, arms, reps=REPS, tag=""):
                 if s is None:
                     continue
                 enc = tests[rep % len(tests)]
-                v = boss_fight(sim, s, enc, zlib.crc32(f"{tag}{ctx.get('act')}/{ctx.get('floor')}/{rep}".encode()))
+                v = boss_fight(sim, s, enc, zlib.crc32(f"{tag}{ctx.get('act')}/{ctx.get('floor')}/{rep}".encode()), pilot)
                 if v is not None:
                     vals.append(v)
             if vals:
