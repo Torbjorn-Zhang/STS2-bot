@@ -145,6 +145,7 @@ def main():
     ap.add_argument("--event-net-neow", action="store_true", help="the event net also decides Neow")
     ap.add_argument("--card-net-decides", action="store_true", help="card rewards by the --card-prior net alone")
     ap.add_argument("--shop-net", default=None, help="shopnet.py model decides shop purchases")
+    ap.add_argument("--deck-nets", default=None, help="JSON file for policy.load_deck_nets (e.g. models/frozen/v34.json)")
     ap.add_argument("--deck-sample", type=float, default=None,
                     help="RL in the expert bot: card/rest/event/map nets (the --*-net / --card-prior files) sample at this temperature")
     ap.add_argument("--card-prior", default=None, help="card network log-probs added to card reward scores")
@@ -192,6 +193,9 @@ def main():
         if args.value_weight_run is not None:
             policy.VALUE_WEIGHT = args.value_weight_run
         policy.REST_VALUE = args.rest_value
+    if args.deck_nets:
+        with open(args.deck_nets) as fh:
+            policy.load_deck_nets(json.load(fh))
     model = None
     if args.model:
         from value import ValueModel

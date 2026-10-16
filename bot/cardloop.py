@@ -59,6 +59,7 @@ def main():
     ap.add_argument("--shop-init", default=None, help="shopnet.py model: shops learned too")
     ap.add_argument("--tag", default="cardloop")
     ap.add_argument("--calibrate", action="store_true", help="self-play in the calibrated fast world")
+    ap.add_argument("--value-baseline", action="store_true", help="advantages against a cross-fitted value net")
     args = ap.parse_args()
     if args.calibrate:
         CAL.append("--calibrate")
@@ -83,6 +84,8 @@ def main():
                              + (["--map-policy", mapp, "--map-temperature", str(args.temperature)] if mapp else [])
                              + (["--shop-policy", shop, "--shop-temperature", str(args.temperature)] if shop else [])
                              + CAL, log)[-1])
+        if args.value_baseline:
+            sh(["nice", "-n", "19", PY, "nets.py", "baseline", data], log)
         new = os.path.join("models", f"{args.tag}_card{it}.pt")
         sh(["nice", "-n", "19", PY, "nets.py", "cardrl", data, "--init", cur, "--out", new, "--temperature",
             str(args.temperature)], log)

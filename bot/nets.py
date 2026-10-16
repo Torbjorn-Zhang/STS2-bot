@@ -902,6 +902,9 @@ def train_card(paths, out, epochs=40, hidden=128, lr=1e-3):
     print("saved", out, "val_acc", round(best[0], 3))
 
 
+SKIP_BIAS = float(os.environ.get("CARD_SKIP_BIAS", "0"))
+
+
 class CardPolicy:
     """Card reward choice by the imitation network (fast stand-in for the deck test)."""
 
@@ -922,6 +925,10 @@ class CardPolicy:
         with torch.no_grad():
             z = self.model(torch.from_numpy(self.enc.encode(run_state(st))[None]), torch.from_numpy(np.stack(opts)),
                            torch.zeros(len(acts), dtype=torch.long)).numpy()
+        if SKIP_BIAS:   # experiments: shift the skip option's logit
+            for i, a in enumerate(acts):
+                if a[0] == "skip_card_reward":
+                    z[i] += SKIP_BIAS
         return acts, z
 
     def __call__(self, st):
@@ -947,13 +954,14 @@ def train_card_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, batch=25
                 items.append((r, fin, key))
                 by_bucket[key].append(fin)
     base = {k: float(np.mean(v)) for k, v in by_bucket.items()}
+    use_v = all(r.get("V") is not None for r, _, _ in items) and items
     S, A, start, chosen, lp_old, adv = [], [], [], [], [], []
     for r, fin, key in items:
         S.append(enc.encode(r["s"]))
         start.append(len(A))
         chosen.append(r["a"])
         lp_old.append(r["x"]["lp"])
-        adv.append(fin - base[key])
+        adv.append(fin - (r["V"] if use_v else base[key]))
         cards = r.get("cards") or []
         for a in r["A"]:
             i = (a[1] or {}).get("card_index")
@@ -1106,9 +1114,74 @@ class ExpertValue:
         return float(torch.sigmoid(w)[0]), float(d[0]) * RETURN_SCALE
 
 
+# ---------------------------------------------------------------- value baseline for deck RL
+
+def add_value_baseline(path, epochs=4, hidden=64):
+    """Value baseline for deck RL with 2-fold cross-fitting: V = mean final progress at the
+    same (act, floor) in the other fold + a small network's prediction of the residual from
+    the run state (deck, relics, HP...), strongly regularized (raw networks overfit the
+    sparse deck features and lost to the plain floor mean). Writes "V" into decision rows."""
+    runs = load_runs([path])
+    keys = sorted(runs)
+    states = [r["s"] for rows in runs.values() for r in rows if r["k"] == "d" and r.get("s")]
+    enc = RunEncoder.build(states)
+    fold = {k: (zlib.crc32(str(k).encode()) & 1) for k in keys}
+    rows_of = {0: [], 1: []}
+    for k in keys:
+        fin = final_progress(runs[k][-1])
+        for r in runs[k]:
+            if r["k"] == "d" and r.get("s") and r["s"].get("act") is not None:
+                rows_of[fold[k]].append((r["s"], fin))
+    buckets, models = {}, {}
+    for f in (0, 1):
+        by = defaultdict(list)
+        for s_, fin in rows_of[f]:
+            by[(s_["act"], s_["floor"])].append(fin)
+        buckets[f] = ({k: float(np.mean(v)) for k, v in by.items()}, float(np.mean([y for _, y in rows_of[f]])))
+        bmean, gmean = buckets[f]
+        X = torch.from_numpy(np.stack([enc.encode(s_) for s_, _ in rows_of[f]]))
+        Y = torch.from_numpy(np.asarray([fin - bmean.get((s_["act"], s_["floor"]), gmean) for s_, fin in rows_of[f]],
+                                        dtype=np.float32)) / FLOORS_PER_ACT
+        torch.manual_seed(f)
+        m = nn.Sequential(nn.Dropout(0.2), nn.Linear(enc.dim, hidden), nn.ReLU(), nn.Linear(hidden, 1))
+        opt = torch.optim.Adam(m.parameters(), lr=5e-4, weight_decay=1e-3)
+        for ep in range(epochs):
+            m.train()
+            perm = torch.randperm(len(X), generator=torch.Generator().manual_seed(ep))
+            for i in range(0, len(perm), 512):
+                b = perm[i:i + 512]
+                loss = F.mse_loss(m(X[b]).squeeze(-1), Y[b])
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+        m.eval()
+        models[f] = m
+    se, se_b, n = 0.0, 0.0, 0
+    with open(path) as fh:
+        lines = fh.readlines()
+    with open(path + ".tmp", "w") as fh:
+        for line in lines:
+            r = json.loads(line)
+            k = (path, r.get("seed"))
+            if r.get("k") == "d" and r.get("s") and r["s"].get("act") is not None and k in fold:
+                g = 1 - fold[k]
+                bmean, gmean = buckets[g]
+                b = bmean.get((r["s"]["act"], r["s"]["floor"]), gmean)
+                with torch.no_grad():
+                    v = b + float(models[g](torch.from_numpy(enc.encode(r["s"])[None]))[0, 0]) * FLOORS_PER_ACT
+                r["V"] = round(v, 3)
+                fin = final_progress(runs[k][-1])
+                se += (fin - v) ** 2
+                se_b += (fin - b) ** 2
+                n += 1
+            fh.write(json.dumps(r, separators=(",", ":")) + "\n")
+    os.replace(path + ".tmp", path)
+    print(json.dumps({"value_baseline_rows": n, "rmse": round((se / max(1, n)) ** 0.5, 3),
+                      "rmse_floor_mean": round((se_b / max(1, n)) ** 0.5, 3)}), flush=True)
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["policy", "value", "rl", "card", "cardrl", "xvalue"])
+    ap.add_argument("mode", choices=["policy", "value", "rl", "card", "cardrl", "xvalue", "baseline"])
     ap.add_argument("--init", default=None, help="rl: policy to improve")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("data", nargs="+")
@@ -1121,6 +1194,8 @@ def main():
     if args.mode == "policy":
         train_policy(args.data, args.out or os.path.join(HERE, "models", "policy.pt"), epochs=args.epochs or 8,
                      hidden=args.hidden, max_runs=args.max_runs)
+    elif args.mode == "baseline":
+        add_value_baseline(args.data[0])
     elif args.mode == "xvalue":
         global EV_PHASE
         EV_PHASE = os.environ.get("EV_PHASE", "all")

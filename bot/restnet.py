@@ -213,7 +213,7 @@ def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, clip=0.2, ent
     start.append(len(A))
     A, start, chosen = np.stack(A), np.asarray(start), np.asarray(chosen)
     lp_old = np.asarray([r["x"]["rlp"] for r, _, _ in items], dtype=np.float32)
-    adv = np.asarray([fin - basel[k] for _, fin, k in items], dtype=np.float32)
+    adv = np.asarray([fin - (r["V"] if r.get("V") is not None else basel[k]) for r, fin, k in items], dtype=np.float32)
     print("rest rl decisions", len(items), "adv std", round(float(adv.std()), 3), flush=True)
     adv = (adv - adv.mean()) / (adv.std() + 1e-6)
     opt = torch.optim.Adam(model.parameters(), lr=lr)

@@ -184,7 +184,8 @@ def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, clip=0.2, ent
     basel = {k: float(np.mean(v)) for k, v in by.items()}
     S, A, start, chosen = tensors(enc, items)
     lp_old = np.asarray([r["x"]["elp"] for r, _ in items], dtype=np.float32)
-    adv = np.asarray([fin - basel[(r["s"]["act"], r["s"]["floor"])] for r, fin in items], dtype=np.float32)
+    adv = np.asarray([fin - (r["V"] if r.get("V") is not None else basel[(r["s"]["act"], r["s"]["floor"])])
+                      for r, fin in items], dtype=np.float32)
     print("event rl decisions", len(items), "adv std", round(float(adv.std()), 3), flush=True)
     adv = (adv - adv.mean()) / (adv.std() + 1e-6)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
