@@ -328,10 +328,32 @@ def _dense(csr, sel):
     return torch.from_numpy(out)
 
 
+SOFT_TAU = 4.0    # temperature (score units) of the search-score target distribution
+SOFT_BETA = 0.5   # weight of the soft (search scores) loss next to the chosen-move loss
+
+
+def soft_target(r):
+    """AlphaGo Zero-style target from the planner's best leaf score per first action
+    (only on a plan's first step): softmax(q / tau) over the scored actions, 0 elsewhere."""
+    q = (r.get("x") or {}).get("q")
+    if not q or len(q) < 2:
+        return None
+    keys = [json.dumps([a[0], a[1]], sort_keys=True) for a in r["A"]]
+    z = np.full(len(keys), -np.inf)
+    for i, k in enumerate(keys):
+        if k in q:
+            z[i] = q[k] / SOFT_TAU
+    if not np.isfinite(z).any():
+        return None
+    z = np.exp(z - z[np.isfinite(z)].max())
+    return (z / z.sum()).astype(np.float32)
+
+
 def policy_dataset(runs, enc):
     """Decisions with >1 legal action and a known choice. Returns state rows, action rows,
-    action->decision pointers, chosen offsets, run keys."""
-    S, A, start, chosen, keys = [], [], [], [], []
+    action->decision pointers, chosen offsets, run keys, soft targets (per action, NaN where
+    the decision has none)."""
+    S, A, start, chosen, keys, soft = [], [], [], [], [], []
     for key, rows in runs.items():
         header = None
         for r in rows:
@@ -342,10 +364,12 @@ def policy_dataset(runs, enc):
                 start.append(len(A))
                 chosen.append(r["a"])
                 keys.append(key)
+                t = soft_target(r)
+                soft.extend(t if t is not None else [np.nan] * len(r["A"]))
                 for a in r["A"]:
                     A.append(enc.action(r["s"], a))
     start.append(len(A))
-    return S, A, np.asarray(start), np.asarray(chosen), keys
+    return S, A, np.asarray(start), np.asarray(chosen), keys, np.asarray(soft, dtype=np.float32)
 
 
 def _batches(order, size):
@@ -363,7 +387,7 @@ def policy_logits(model, Scsr, Acsr, start, sel):
     return model(xs, xa, torch.as_tensor(owner)), np.asarray(owner)
 
 
-def policy_loss(model, Scsr, Acsr, start, chosen, sel):
+def policy_loss(model, Scsr, Acsr, start, chosen, sel, soft=None):
     logits, owner = policy_logits(model, Scsr, Acsr, start, sel)
     n = len(sel)
     sizes = np.asarray([start[d + 1] - start[d] for d in sel])
@@ -373,6 +397,14 @@ def policy_loss(model, Scsr, Acsr, start, chosen, sel):
     pad[torch.as_tensor(owner), torch.as_tensor(col)] = logits
     target = torch.as_tensor(chosen[sel])
     loss = F.cross_entropy(pad, target)
+    if soft is not None and SOFT_BETA:
+        a_idx = np.concatenate([np.arange(start[d], start[d + 1]) for d in sel])
+        t = np.zeros((n, m), dtype=np.float32)
+        t[owner, col] = soft[a_idx]
+        has = ~np.isnan(t).any(1)
+        if has.any():
+            logp = F.log_softmax(pad[torch.as_tensor(has)], dim=1)
+            loss = loss + SOFT_BETA * -(torch.from_numpy(t[has]) * logp.clamp(min=-30)).sum(1).mean()
     acc = (pad.argmax(1) == target).float().mean().item()
     return loss, acc
 
@@ -388,15 +420,16 @@ def train_policy(paths, out, epochs=8, hidden=256, lr=2e-3, batch=256, max_runs=
     tr, va = split_runs(runs)
     data = {}
     for name, part in (("train", tr), ("val", va)):
-        S, A, start, chosen, _ = policy_dataset(part, enc)
-        data[name] = (_csr(S, enc.state_dim), _csr(A, enc.action_dim), start, chosen)
+        S, A, start, chosen, _, soft = policy_dataset(part, enc)
+        data[name] = (_csr(S, enc.state_dim), _csr(A, enc.action_dim), start, chosen, soft)
+        print(name, "soft targets", int(sum(1 for d in range(len(chosen)) if not np.isnan(soft[start[d]]))), flush=True)
         print(name, "decisions", len(S), "actions", len(A), "runs", len(part), flush=True)
     print("encoded in", round(time.time() - t0), "s; dims", enc.state_dim, enc.action_dim, flush=True)
     torch.manual_seed(0)
     model = PolicyNet(enc.state_dim, enc.action_dim, hidden)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    Str, Atr, st_tr, ch_tr = data["train"]
-    Sva, Ava, st_va, ch_va = data["val"]
+    Str, Atr, st_tr, ch_tr, so_tr = data["train"]
+    Sva, Ava, st_va, ch_va, _ = data["val"]
     n_tr = len(ch_tr)
     best = (-1, None)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
@@ -405,7 +438,7 @@ def train_policy(paths, out, epochs=8, hidden=256, lr=2e-3, batch=256, max_runs=
         order = np.random.RandomState(ep).permutation(n_tr)
         tl, ta, nb = 0.0, 0.0, 0
         for sel in _batches(order, batch):
-            loss, acc = policy_loss(model, Str, Atr, st_tr, ch_tr, sel)
+            loss, acc = policy_loss(model, Str, Atr, st_tr, ch_tr, sel, so_tr)
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -565,6 +598,31 @@ def train_value(paths, out, epochs=30, hidden=256, lr=1e-3):
         if mse + bce < best[0]:
             best = (mse + bce, {k: v.clone() for k, v in model.state_dict().items()}, mse, bce)
     model.load_state_dict(best[1])
+    model.eval()
+    # agreement with the deck test on held-out card rewards: does the value network rank
+    # the options the way the imagined boss fights do?
+    xs, ys, agree, n = [], [], 0, 0
+    for rows in va.values():
+        for r in rows:
+            if r["k"] != "d" or r["dec"] != "card_reward" or not (r.get("x") or {}).get("test"):
+                continue
+            test = r["x"]["test"]
+            arms = [None if k == "None" else int(k) for k in test]
+            cards = r.get("cards") or []
+            decks = [r["s"]["deck"] if a is None else r["s"]["deck"] + [cards[a]] for a in arms if a is None or a < len(cards)]
+            if len(decks) != len(arms):
+                continue
+            with torch.no_grad():
+                pr, _ = model(torch.from_numpy(np.stack([enc.encode(r["s"], d) for d in decks])))
+            pr = pr.numpy()
+            tv = np.asarray([test[k] for k in test])
+            xs.extend(pr - pr.mean())
+            ys.extend(tv - tv.mean())
+            agree += int(np.argmax(pr) == np.argmax(tv))
+            n += 1
+    if n:
+        print("value vs deck test on", n, "held-out card rewards: corr", round(float(np.corrcoef(xs, ys)[0, 1]), 3),
+              "argmax agreement", round(agree / n, 3), flush=True)
     torch.save({"kind": "value", "enc": enc.to_json(), "hidden": hidden, "state": model.state_dict(),
                 "val_rem_mse": best[2], "val_clear_bce": best[3], "sources": paths}, out)
     print("saved", out, "val", round(best[2], 4), round(best[3], 4))
