@@ -248,6 +248,7 @@ DECK_TEST = True        # judge card rewards by imagined boss fights (decktest.p
 TIER_WEIGHT = 4.0       # graded-score points per tier point, on top of the boss test
 LAB_WEIGHT = 0.5        # weight of the card lab's average effect (card_prior_a10.json)
 REFINE_REPS = 0         # card rewards: planner-piloted fights for the top two options (0 = off; 3 was 4-5x slower, no gain)
+CARD_NET = None         # optional nets.CardPolicy: card rewards without the deck test (fast self-play)
 RUN_VALUE = None        # optional nets.RunValue: the run value network (trained on self-play outcomes)
 VALUE_WEIGHT = 3.0      # graded-score points per floor of predicted further progress
 
@@ -289,6 +290,8 @@ def lab_value(cid, act, floor):
 
 
 def choose_card_reward(st, sim=None):
+    if CARD_NET is not None and not DECK_TEST and st.get("cards"):
+        return CARD_NET(st)
     if DECK_TEST and sim is not None and st.get("cards"):
         import decktest
         scores = decktest.evaluate_options(sim, st)

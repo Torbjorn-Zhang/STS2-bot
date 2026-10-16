@@ -107,12 +107,16 @@ def main():
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--seed-prefix", default="rl")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--card-policy", default=None, help="nets.py card model for card rewards (default: tier rules)")
     args = ap.parse_args()
     import random
     import torch
     torch.set_num_threads(1)
     from nets import NetPolicy
     policy.DECK_TEST = False
+    if args.card_policy:
+        from nets import CardPolicy
+        policy.CARD_NET = CardPolicy(args.card_policy)
     pilot = NetPolicy(args.policy)
     seeds = [f"{args.seed_prefix}_{i}" for i in range(args.n)]
     lock = threading.Lock()

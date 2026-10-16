@@ -60,8 +60,12 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
             on_step = None
             if rec:
                 rec.fight_start(st)
-                on_step = lambda s, a: rec.combat_step(
-                    s, legal_actions(s) + potion_actions(s) if s.get("decision") == "combat_play" else legal_actions(s), a)
+                def on_step(s, a):
+                    extra = None
+                    if s is getattr(planner, "last_root", None):   # first action of a fresh plan
+                        extra = {k: {kk: round(v, 2) for kk, v in d.items()} for k, d in planner.last_first.items()}
+                    rec.combat_step(s, legal_actions(s) + potion_actions(s) if s.get("decision") == "combat_play"
+                                    else legal_actions(s), a, extra)
             st = planner.play_combat(st, on_state=watch, on_step=on_step)
             if rec:
                 rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"),

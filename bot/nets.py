@@ -80,6 +80,26 @@ def incoming(es):
     return tot
 
 
+def card_stats(h):
+    return h[4] if len(h) > 4 and h[4] else {}
+
+
+def card_dmg(h, target=None):
+    if len(h) > 5 and h[5] and target is not None:
+        d = h[5].get(target, h[5].get(str(target)))
+        if d is not None:
+            return d
+    st = card_stats(h)
+    d = st.get("calculateddamage") if st.get("calculateddamage") is not None else st.get("damage")
+    return d or 0
+
+
+def card_blk(h):
+    st = card_stats(h)
+    b = st.get("calculatedblock") if st.get("calculatedblock") is not None else st.get("block")
+    return b or 0
+
+
 class CombatEncoder:
     """Sparse features of a combat state (record.combat_state + the fight header's run
     state) and of each legal action. Offsets are fixed by the vocabularies."""
@@ -88,7 +108,7 @@ class CombatEncoder:
         self.v = {"cards": cards, "powers": powers, "enemies": enemies, "relics": relics, "pots": pots,
                   "intents": intents}
         nc, npw, ne = len(cards), len(powers), len(enemies)
-        self.n_scalar = 24
+        self.n_scalar = 26
         o = self.n_scalar
         self.o_hand, o = o, o + 2 * nc
         self.o_deck, o = o, o + 2 * nc
@@ -103,7 +123,7 @@ class CombatEncoder:
         self.n_atype = 6
         a = self.n_atype
         self.a_card, a = a, a + nc
-        self.a_num, a = a, a + 4
+        self.a_num, a = a, a + 16
         self.a_slot, a = a, a + MAX_ENEMIES
         self.a_tgt, a = a, a + 6
         self.a_pot, a = a, a + len(pots)
@@ -161,7 +181,8 @@ class CombatEncoder:
               (s["dn"] or 0) / 30, (s["xn"] or 0) / 30, need / 40, inc / 40, len(es) / 5, len(s["hand"]) / 10,
               s["d"] == "card_select", run.get("act") == 1, run.get("act") == 2, run.get("act") == 3,
               ctx_room == "Monster", ctx_room == "Elite", ctx_room == "Boss", (run.get("asc") or 0) / 10,
-              need >= hp, (s.get("min") or 0) / 3, (s.get("max") or 0) / 3, len(run.get("deck") or []) / 30]
+              need >= hp, (s.get("min") or 0) / 3, (s.get("max") or 0) / 3, len(run.get("deck") or []) / 30,
+              sum(card_dmg(h) for h in s["hand"] if h[2]) / 50, sum(card_blk(h) for h in s["hand"] if h[2]) / 30]
         for i, x in enumerate(sc):
             put(i, x)
         nc = len(V["cards"])
@@ -231,6 +252,22 @@ class CombatEncoder:
                 put(self.a_num + 1, (cost if isinstance(cost, int) and cost >= 0 else (s["en"] or 0)) / 3)
                 put(self.a_num + 2, cost == 0)
                 put(self.a_num + 3, not isinstance(cost, int) or cost < 0)
+                st_ = card_stats(h)
+                t_ = args.get("target_index")
+                if t_ is None and len(es) == 1:
+                    t_ = es[0][6]
+                dmg = card_dmg(h, t_)
+                hits = st_.get("repeat") or 1
+                blk = card_blk(h)
+                need = max(0, incoming(es) - (s["blk"] or 0))
+                tgt = next((e for e in es if e[6] == t_), None)
+                eff = ((tgt[1] or 0) + (tgt[3] or 0)) if tgt else 0
+                kws = h[6] if len(h) > 6 else []
+                for i, x in enumerate([dmg / 30, dmg * hits / 40, tgt is not None and dmg * hits >= eff > 0,
+                                       blk / 20, min(blk, need) / 20, max(0, blk - need) / 20, "Exhaust" in kws,
+                                       "Ethereal" in kws, (st_.get("cards") or 0) / 3, (st_.get("energy") or 0) / 2,
+                                       (st_.get("vulnerablepower") or 0) / 3, (st_.get("weakpower") or 0) / 3]):
+                    put(self.a_num + 4 + i, x)
         if name == "use_potion":
             pots = s["pots"]
             pi = args.get("potion_index")
@@ -687,9 +724,116 @@ def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=3e-4, batch=512, cl
     print("saved", out)
 
 
+# ---------------------------------------------------------------- card reward policy (imitation of the deck test)
+
+def card_option(enc, tok):
+    """Option features for a card reward: card one-hot, upgraded flag; tok None = skip."""
+    x = np.zeros(len(enc.cards) + 2, dtype=np.float32)
+    if tok is None:
+        x[-1] = 1.0
+    else:
+        x[enc.cards[base(tok)]] = 1.0
+        x[-2] = float(tok.endswith("+"))
+    return x
+
+
+def card_dataset(runs, enc):
+    S, A, start, chosen = [], [], [], []
+    for rows in runs.values():
+        for r in rows:
+            if r["k"] != "d" or r["dec"] != "card_reward" or r["a"] < 0 or len(r["A"]) < 2:
+                continue
+            if (r.get("x") or {}).get("explore"):
+                continue
+            S.append(enc.encode(r["s"]))
+            start.append(len(A))
+            chosen.append(r["a"])
+            cards = r.get("cards") or []
+            for a in r["A"]:
+                i = (a[1] or {}).get("card_index")
+                A.append(card_option(enc, cards[i] if a[0] == "select_card_reward" and i is not None and i < len(cards) else None))
+    start.append(len(A))
+    return np.stack(S), np.stack(A), np.asarray(start), np.asarray(chosen)
+
+
+def train_card(paths, out, epochs=40, hidden=128, lr=1e-3):
+    runs = load_runs(paths)
+    states = [r["s"] if r["k"] == "d" else r["run"] for rows in runs.values() for r in rows if r["k"] in ("d", "f")]
+    enc = RunEncoder.build(states)
+    tr, va = split_runs(runs)
+    data = {k: card_dataset(v, enc) for k, v in (("train", tr), ("val", va))}
+    print("card rewards", len(data["train"][3]), len(data["val"][3]), flush=True)
+    torch.manual_seed(0)
+    model = PolicyNet(enc.dim, len(enc.cards) + 2, hidden)
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+
+    def run(part, train):
+        S, A, start, chosen = data[part]
+        order = np.random.permutation(len(chosen)) if train else np.arange(len(chosen))
+        tot, acc, n = 0.0, 0.0, 0
+        for sel in _batches(order, 128):
+            a_idx, owner = [], []
+            for k, d in enumerate(sel):
+                a_idx.extend(range(start[d], start[d + 1]))
+                owner.extend([k] * (start[d + 1] - start[d]))
+            logits = model(torch.from_numpy(S[sel]), torch.from_numpy(A[a_idx]), torch.as_tensor(owner))
+            sizes = np.asarray([start[d + 1] - start[d] for d in sel])
+            pad = grouped(logits, np.asarray(owner), sizes)
+            target = torch.as_tensor(chosen[sel])
+            loss = F.cross_entropy(pad, target)
+            if train:
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+            tot += loss.item() * len(sel)
+            acc += (pad.argmax(1) == target).float().sum().item()
+            n += len(sel)
+        return tot / max(1, n), acc / max(1, n)
+
+    best = (-1, None)
+    for ep in range(epochs):
+        model.train()
+        tl, ta = run("train", True)
+        model.eval()
+        with torch.no_grad():
+            vl, vacc = run("val", False)
+        if ep % 5 == 4 or ep == epochs - 1:
+            print(json.dumps({"epoch": ep, "train_acc": round(ta, 3), "val_loss": round(vl, 4), "val_acc": round(vacc, 3)}),
+                  flush=True)
+        if vacc > best[0]:
+            best = (vacc, {k: v.clone() for k, v in model.state_dict().items()})
+    model.load_state_dict(best[1])
+    torch.save({"kind": "card", "enc": enc.to_json(), "hidden": hidden, "state": model.state_dict(),
+                "val_acc": best[0], "sources": paths}, out)
+    print("saved", out, "val_acc", round(best[0], 3))
+
+
+class CardPolicy:
+    """Card reward choice by the imitation network (fast stand-in for the deck test)."""
+
+    def __init__(self, path=os.path.join(HERE, "models", "card.pt")):
+        blob = torch.load(path, weights_only=False)
+        self.enc = RunEncoder.from_json(blob["enc"])
+        self.model = PolicyNet(self.enc.dim, len(self.enc.cards) + 2, blob["hidden"])
+        self.model.load_state_dict(blob["state"])
+        self.model.eval()
+
+    def __call__(self, st):
+        from engine import legal_actions
+        from record import card_tok, run_state
+        acts = legal_actions(st)
+        by_index = {c["index"]: c for c in st.get("cards") or []}
+        opts = [card_option(self.enc, card_tok(by_index[a[1]["card_index"]]) if a[0] == "select_card_reward" else None)
+                for a in acts]
+        with torch.no_grad():
+            z = self.model(torch.from_numpy(self.enc.encode(run_state(st))[None]), torch.from_numpy(np.stack(opts)),
+                           torch.zeros(len(acts), dtype=torch.long)).numpy()
+        return acts[int(np.argmax(z))]
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["policy", "value", "rl"])
+    ap.add_argument("mode", choices=["policy", "value", "rl", "card"])
     ap.add_argument("--init", default=None, help="rl: policy to improve")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("data", nargs="+")
@@ -702,6 +846,8 @@ def main():
     if args.mode == "policy":
         train_policy(args.data, args.out or os.path.join(HERE, "models", "policy.pt"), epochs=args.epochs or 8,
                      hidden=args.hidden, max_runs=args.max_runs)
+    elif args.mode == "card":
+        train_card(args.data, args.out or os.path.join(HERE, "models", "card.pt"), epochs=args.epochs or 40)
     elif args.mode == "rl":
         train_rl(args.data, args.init, args.out, temperature=args.temperature, epochs=args.epochs or 3)
     else:

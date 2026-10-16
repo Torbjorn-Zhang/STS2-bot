@@ -44,11 +44,19 @@ def enemy(e):
             e.get("index"), e.get("id")]
 
 
+def hand_card(c):
+    """[token, cost, playable, hand index, stats (damage/block/... as shown, with modifiers),
+    {target index: damage}, keywords]"""
+    dbt = {d.get("target_index"): d.get("damage") for d in c.get("damage_by_target") or []}
+    return [card_tok(c), c.get("cost"), bool(c.get("can_play")), c.get("index"), c.get("stats") or {}, dbt,
+            c.get("keywords") or []]
+
+
 def combat_state(st):
     p = st.get("player") or {}
     s = {"d": st.get("decision"), "r": st.get("round"), "en": st.get("energy"), "men": st.get("max_energy"),
          "hp": p.get("hp"), "mhp": p.get("max_hp"), "blk": p.get("block"), "pw": powers_dict(st.get("player_powers")),
-         "hand": [[card_tok(c), c.get("cost"), bool(c.get("can_play")), c.get("index")] for c in st.get("hand") or []],
+         "hand": [hand_card(c) for c in st.get("hand") or []],
          "dn": st.get("draw_pile_count"), "xn": st.get("discard_pile_count"),
          "es": [enemy(e) for e in st.get("enemies") or [] if (e.get("hp") or 0) > 0],
          "pots": [pot_tok(x) for x in p.get("potions") or [] if x]}

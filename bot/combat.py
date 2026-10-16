@@ -533,8 +533,18 @@ class TurnPlanner:
             self.sim.send({"cmd": "drop_snapshots", "from": root_snap})
             return [("end_turn", {})], float("-inf")
         scores = self._score_leaves(root, [l[:3] for l in leaves])
+        heur = scores
         if self.rollouts and (root.get("round") or 0) <= STALL_ROUND:
             scores = self._rollout_rescore(root, leaves, scores, self._rollout_cfg(root))
+        # best leaf score per first action (search targets for the policy network)
+        firsts, hfirst = {}, {}
+        for leaf, sc, hs in zip(leaves, scores, heur):
+            if leaf[1]:
+                k = json.dumps([leaf[1][0][0], leaf[1][0][1]], sort_keys=True)
+                if sc != float("-inf"):
+                    firsts[k] = max(firsts.get(k, float("-inf")), sc)
+                hfirst[k] = max(hfirst.get(k, float("-inf")), hs)
+        self.last_root, self.last_first = root, {"q": firsts, "h": hfirst}
         self._restore(root_snap)
         self.sim.send({"cmd": "drop_snapshots", "from": root_snap})
         order = sorted(range(len(leaves)), key=lambda i: scores[i], reverse=True)
