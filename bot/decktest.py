@@ -112,6 +112,13 @@ HARD_HALLWAY = {
 HALLWAY_FROM_FLOOR = 8   # in act 1, before this floor only the boss matters
 
 
+# act-1 variants have their own hallway pools (the run's act 1 is Overgrowth or Underdocks)
+HARD_HALLWAY_ACT1 = {
+    "Overgrowth": HARD_HALLWAY[1],
+    "Underdocks": ["GREMLIN_MERC_NORMAL", "SEWER_CLAM_NORMAL", "TWO_TAILED_RATS_NORMAL", "FOSSIL_STALKER_NORMAL"],
+}
+
+
 def tests_for(st):
     ctx = st.get("context") or {}
     boss = (ctx.get("boss") or {}).get("id")
@@ -119,7 +126,8 @@ def tests_for(st):
     tests = [boss] if boss else []
     nxt = act + 1 if act == 1 and floor >= HALLWAY_FROM_FLOOR else act
     if nxt > 1 or floor >= HALLWAY_FROM_FLOOR:
-        pool = HARD_HALLWAY.get(min(nxt, 3), [])
+        pool = HARD_HALLWAY.get(min(nxt, 3), []) if nxt > 1 else \
+            HARD_HALLWAY_ACT1.get(ctx.get("act_name"), HARD_HALLWAY[1])
         if pool:
             tests.append(pool[floor % len(pool)])
     return tests

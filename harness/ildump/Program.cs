@@ -7,6 +7,12 @@ if (args[1] == "GENERIC_STATICS") {  // static fields declared in generic types
       Console.WriteLine($"{t.FullName}::{f.Name} : {f.FieldType.FullName}");
   return;
 }
+if (args[1] == "SIGS_MODE") {   // method signatures with parameter names: SIGS_MODE Type Method
+    foreach (var t in module.GetTypes().Where(t => t.Name == args[2]))
+        foreach (var m in t.Methods.Where(m => m.Name == args[3]))
+            Console.WriteLine($"{t.FullName}::{m.Name}(" + string.Join(", ", m.Parameters.Select(p => $"{p.ParameterType.Name} {p.Name}{(p.HasDefault ? " = default" : "")}")) + ")");
+    return;
+}
 if (args[1] == "FIELDS_OF_TYPE") {   // list fields and call sites whose type mentions args[2]
   foreach (var t in module.GetTypes()) {
     foreach (var f in t.Fields) if (f.FieldType.FullName.Contains(args[2])) Console.WriteLine($"FIELD {(f.IsStatic ? "static " : "")}{t.FullName}::{f.Name} : {f.FieldType.FullName}");
@@ -22,6 +28,6 @@ foreach (var t in types)
   {
     Console.WriteLine($"== {t.FullName}::{m.Name}");
     foreach (var ins in m.Body.Instructions)
-      if (ins.OpCode.FlowControl == FlowControl.Call || ins.OpCode.Code is Code.Ldfld or Code.Ldsfld or Code.Callvirt or Code.Newobj)
+      if (ins.OpCode.FlowControl == FlowControl.Call || ins.OpCode.Code is Code.Ldfld or Code.Ldsfld or Code.Callvirt or Code.Newobj or Code.Ldstr || Environment.GetEnvironmentVariable("ILDUMP_ALL") == "1")
         Console.WriteLine($"   IL_{ins.Offset:x4} {ins.OpCode} {ins.Operand}");
   }

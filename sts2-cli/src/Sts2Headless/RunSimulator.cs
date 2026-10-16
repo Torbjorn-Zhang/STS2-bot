@@ -267,9 +267,15 @@ public class RunSimulator
             var seedStr = seed ?? "headless_" + DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             Log($"Creating RunState with seed={seedStr}");
 
-            // Use CreateForTest which properly handles mutable copies internally
+            // Acts as the real game picks them (StartRunLobby.BeginRunLocally): the act-1 variant
+            // (Overgrowth or Underdocks) is drawn from the seed. CreateForTest on its own always
+            // takes the default list, so the sim never saw Underdocks.
+            var acts = ActModel.GetRandomList(
+                    new Rng(StringHelper.GetDeterministicHashCode(seedStr), "act_selection"), unlocks, false)
+                .ToList();   // canonical models: CreateForTest makes the mutable copies
             _runState = RunState.CreateForTest(
                 players: new[] { player },
+                acts: acts,
                 ascensionLevel: ascension,
                 seed: seedStr
             );
@@ -4394,7 +4400,14 @@ public class RunSimulator
         try
         {
             if (_pristineProgressJson != null || !SaveManager.Instance.IsProfileInitialized) return;
-            _pristineProgressJson = SaveManager.ToJson(SaveManager.Instance.Progress.ToSerializable());
+            var prog = SaveManager.Instance.Progress.ToSerializable();
+            // Play as an experienced profile, not a first-time one: ActModel.GetRandomList only
+            // offers non-default act variants the profile has discovered, so a fresh profile
+            // never gets Underdocks as act 1. Unlocks are already UnlockState.all, and the
+            // first-run tutorial rooms are off under TestMode.
+            prog.DiscoveredActs = ModelDb.ActsByIndex.SelectMany(slot => slot).Select(a => a.Id).Distinct().ToList();
+            _pristineProgressJson = SaveManager.ToJson(prog);
+            ResetProfileProgress();   // the first run of a process uses it too (reuse == fresh)
         }
         catch (Exception ex) { Log($"CapturePristineProgressOnce: {ex.Message}"); }
     }
