@@ -128,6 +128,11 @@ def choose_map(sim, st):
     path is judged at the HP the bot will likely have there, not the HP it has now).
     With the map path test on, the next node is chosen by walking each option's route to
     the boss with this deck's simulated fight losses (decktest.evaluate_map)."""
+    if MAP_NET is not None and sim is not None and len(st.get("choices") or []) > 1:
+        chs, _, z = MAP_NET.scores(sim, st)
+        if z is not None:
+            ch = chs[int(np.argmax(z))]
+            return ("select_map_node", {"col": ch["col"], "row": ch["row"]})
     if DECK_TEST and sim is not None and len(st.get("choices") or []) > 1:
         import decktest
         if decktest.MAP_PATH:
@@ -263,6 +268,7 @@ CARD_PRIOR = None       # optional nets.CardPolicy whose log-probabilities are a
 CARD_PRIOR_WEIGHT = 5.0 # graded points per unit of log-probability
 REST_NET = None         # optional restnet.RestPolicy: rest-site choice by the network (greedy)
 EVENT_NET = None        # optional eventnet.EventPolicy: event choice by the network (greedy)
+MAP_NET = None          # optional mapnet.MapPolicy: next map node by the network (greedy)
 RUN_VALUE = None        # optional nets.RunValue: the run value network (trained on self-play outcomes)
 VALUE_WEIGHT = 3.0      # graded-score points per floor of predicted further progress
 

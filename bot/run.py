@@ -139,6 +139,7 @@ def main():
     ap.add_argument("--rollout-xvalue", default=None, help="expert value net (nets.py xvalue) ends rollouts")
     ap.add_argument("--rest-net", default=None, help="restnet.py model decides rest sites")
     ap.add_argument("--event-net", default=None, help="eventnet.py model decides events")
+    ap.add_argument("--map-net", default=None, help="mapnet.py model decides map choices")
     ap.add_argument("--card-prior", default=None, help="card network log-probs added to card reward scores")
     ap.add_argument("--card-prior-weight", type=float, default=None)
     ap.add_argument("--value-weight", type=float, default=None,
@@ -147,7 +148,7 @@ def main():
     if args.no_deck_test:
         policy.DECK_TEST = False
     if args.net_rollouts or args.net_decktest or args.run_value or args.rollout_value or args.rollout_xvalue or args.rest_net \
-            or args.event_net or args.card_prior:
+            or args.event_net or args.card_prior or args.map_net:
         import torch
         torch.set_num_threads(1)
         import combat
@@ -171,6 +172,9 @@ def main():
             policy.EVENT_NET = EventPolicy(args.event_net)
         if args.card_prior:
             policy.CARD_PRIOR = nets.CardPolicy(args.card_prior)
+        if args.map_net:
+            from mapnet import MapPolicy
+            policy.MAP_NET = MapPolicy(args.map_net)
         if args.card_prior_weight is not None:
             policy.CARD_PRIOR_WEIGHT = args.card_prior_weight
         if args.value_weight_run is not None:

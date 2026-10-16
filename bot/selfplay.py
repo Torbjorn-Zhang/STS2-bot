@@ -47,7 +47,8 @@ def sample(pilot, st, acts, temperature, rng):
 
 
 def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card_pol=None, card_temp=0.0,
-                  rest_pol=None, rest_temp=0.0, event_pol=None, event_temp=0.0):
+                  rest_pol=None, rest_temp=0.0, event_pol=None, event_temp=0.0, map_pol=None, map_temp=0.0,
+                  record_map=False):
     policy.ASCENSION = ascension
     st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
     memo, steps, in_fight, hp0, last = {}, 0, False, None, None
@@ -120,6 +121,14 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
                 extra = {"rlp": float(math.log(max(pr[i], 1e-12))), "rkeys": ks, "rk": ks[i], "route": route}
             else:
                 a = policy.decide(sim, st, avoid=(), memo=memo)
+        elif d == "map_select" and map_pol is not None and len(st.get("choices") or []) > 1:
+            chs, descs, z = map_pol.scores(sim, st)
+            zz = (z - z.max()) / max(map_temp, 1e-6)
+            pr = np.exp(zz)
+            pr /= pr.sum()
+            i = rng.choices(range(len(chs)), weights=pr.tolist())[0] if map_temp > 0 else int(np.argmax(z))
+            a = ("select_map_node", {"col": chs[i]["col"], "row": chs[i]["row"]})
+            extra = {"mopts": descs, "mk": i, "mlp": float(math.log(max(pr[i], 1e-12)))}
         elif d == "event_choice" and event_pol is not None:
             opts, descs, z, route = event_pol.scores(sim, st)
             if z is not None:
@@ -134,6 +143,14 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
                 a = policy.decide(sim, st, avoid=(), memo=memo)
         else:
             a = policy.decide(sim, st, avoid=(), memo=memo)
+            if d == "map_select" and record_map and len(st.get("choices") or []) > 1:   # DP choice: map imitation data
+                from mapnet import option_desc as map_desc
+                m = sim.send({"cmd": "get_map"})
+                chs = st.get("choices") or []
+                keys = [(c["col"], c["row"]) for c in chs]
+                k = (a[1].get("col"), a[1].get("row"))
+                if k in keys:
+                    extra = {"mopts": [map_desc(sim, st, m, c) for c in chs], "mk": keys.index(k)}
             if d == "event_choice":   # rule choice: imitation data for the event network
                 from eventnet import option_desc
                 opts = [o for o in st.get("options") or [] if not o.get("is_locked")]
@@ -179,6 +196,9 @@ def main():
     ap.add_argument("--event-policy", default=None, help="eventnet.py model for events (default: rules)")
     ap.add_argument("--event-temperature", type=float, default=0.0, help=">0: sample event choices (RL)")
     ap.add_argument("--calibrate", action="store_true", help="refund HP to the planner's losses, boss HP bonus")
+    ap.add_argument("--map-policy", default=None, help="mapnet.py model for map choices (default: the DP)")
+    ap.add_argument("--map-temperature", type=float, default=0.0)
+    ap.add_argument("--record-map", action="store_true", help="record the DP's map choices (imitation data)")
     args = ap.parse_args()
     import random
     import torch
@@ -199,6 +219,10 @@ def main():
     if args.event_policy:
         from eventnet import EventPolicy
         event_pol = EventPolicy(args.event_policy)
+    map_pol = None
+    if args.map_policy:
+        from mapnet import MapPolicy
+        map_pol = MapPolicy(args.map_policy)
     pilot = NetPolicy(args.policy)
     seeds = [f"{args.seed_prefix}_{i}" for i in range(args.n)]
     lock = threading.Lock()
@@ -215,7 +239,7 @@ def main():
             try:
                 r = play_fast_run(sim, s, pilot, args.ascension, args.acts, rec, args.temperature, rng,
                                   card_pol, args.card_temperature, rest_pol, args.rest_temperature,
-                                  event_pol, args.event_temperature)
+                                  event_pol, args.event_temperature, map_pol, args.map_temperature, args.record_map)
             except Exception as e:
                 r = {"seed": s, "error": repr(e)[:200]}
                 try:
