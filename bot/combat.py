@@ -32,6 +32,8 @@ W = {
     "late_hallway_big": 0,  # 1: act-2+ hallway fights use dmg_big too
     "potion_late_hp": 0.65, # act-2+ hallway fights: potions allowed below this HP fraction
     "potions_any_fight_asc": 99,  # from this ascension potions are considered in every fight
+    "lethal": 150.0,    # announced attacks kill us at the end of this turn (unblocked >= HP)
+    "rollout_tiebreak": 0.01,   # weight of the leaf evaluation added to rollout means (breaks ties)
     "steam_lethal": 0.0,    # Waterfall Giant: penalty when its death blast (Steam Eruption) would kill us (80: 9 vs 7 of 44 WG fights)
 }
 PLAYER_DEBUFFS = ("Vulnerable", "Weak", "Frail")
@@ -184,6 +186,9 @@ def evaluate(root, st):
     p = st.get("player") or {}
     hp, block = p.get("hp") or 0, p.get("block") or 0
     score = W["hp"] * (hp - max(0, incoming_damage(st) - block))
+    if d == "combat_play" and hp > 0 and max(0, incoming_damage(st) - block) >= hp:
+        # the linear HP term let a big power (Demon Form) outscore surviving the turn
+        score -= W["lethal"]
     root_alive, now_alive = alive(root), alive(st)
     room = (root.get("context") or {}).get("room_type")
     late = ((root.get("context") or {}).get("act") or 1) >= 2 and W["late_hallway_big"]
@@ -547,7 +552,10 @@ class TurnPlanner:
             # shrink toward the leaf's own evaluation: with few noisy rollouts, the max
             # over candidates otherwise picks whichever one got lucky
             beta = cfg.get("blend", 0.0)
-            out[i] = (1 - beta) * mean + beta * scores[i]
+            # tie-break by the leaf's own evaluation: when every rollout dies (hopeless-looking
+            # positions in hard fights) the means are all ROLLOUT_DEATH and the first leaf won,
+            # even one that does not survive this turn (Kaiser Crab: no block, back turned)
+            out[i] = (1 - beta) * mean + beta * scores[i] + W["rollout_tiebreak"] * scores[i]
         return out
 
     def plan(self, root):
