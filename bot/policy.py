@@ -94,6 +94,7 @@ def node_value(kind, hp, row, act=1, gold=0, costs=None):
         return 1.0
     if kind == "Shop":
         # removals and relics: gold left unspent at the end of an act is wasted strength
+        # a removal (~75 gold) is the cheapest deck upgrade there is
         return 4.0 if gold >= 350 else 3.0 if gold >= 200 else 1.5 if gold >= 90 else 0.3
     return 0.0
 
@@ -323,7 +324,7 @@ def boss_is_next(sim, st):
     return boss.get("row") is not None and cur.get("row") is not None and cur["row"] >= boss["row"] - 1
 
 
-HEAL_BELOW = 0.5   # away from the boss, smith unless HP is below this
+HEAL_BELOW = 0.5   # away from the boss, smith unless HP is below this (0.4 lost HP and elites at A10: v21)
 
 
 # Rest-site options besides Rest and Smith come from relics. Cook removes cards and adds

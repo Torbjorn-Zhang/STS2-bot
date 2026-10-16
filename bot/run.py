@@ -38,6 +38,10 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         if d == "combat_play" or (d == "card_select" and room in ("Monster", "Elite", "Boss")):
             hp0 = (st.get("player") or {}).get("hp")
             pots0 = len([x for x in (st.get("player") or {}).get("potions") or [] if x])
+            deck0 = (st.get("player") or {}).get("deck") or []
+            deck_stats = {"size": len(deck0), "upgraded": sum(1 for c in deck0 if c.get("upgraded")),
+                          "basics": sum(1 for c in deck0 if any(b in (c.get("id") or "") for b in ("STRIKE_", "DEFEND_"))),
+                          "relics": len((st.get("player") or {}).get("relics") or [])} if room == "Boss" else None
             names = [e.get("name") for e in st.get("enemies") or []]
             floor0 = (st.get("context") or {}).get("floor")
             last_enemies = {}
@@ -51,7 +55,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
             hp_log.append({"floor": floor0, "room": room, "enemies": names, "hp_before": hp0,
                            "hp_after": (st.get("player") or {}).get("hp"), "won": st.get("decision") != "game_over",
                            "enemy_hp_left": last_enemies.get("hp"), "rounds": last_enemies.get("round"),
-                           "potions_before": pots0, "potions_left": last_enemies.get("potions")})
+                           "potions_before": pots0, "potions_left": last_enemies.get("potions"),
+                           **({"deck": deck_stats} if deck_stats else {})})
             if st.get("decision") == "combat_play":
                 stuck = True   # play_combat hit its action cap: give up on the run
                 break

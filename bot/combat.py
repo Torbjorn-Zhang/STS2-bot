@@ -386,11 +386,19 @@ class TurnPlanner:
                 out[i] = ((st.get("player") or {}).get("hp") or 0) + 2.0 if won else DEATH_VALUE
         return out
 
-    def _rollout(self, root, snap, last, seed, turns):
+    def _rollout(self, root, snap, last, seed, turns, pilot_nodes=0):
         self._restore(snap)
         self.sim.send({"cmd": "determinize", "seed": seed})
         s = self.sim.act(last[0], **last[1])
         future = 1 if last[0] == "end_turn" else 0
+        if pilot_nodes:
+            s = self._planner_rollout(s, future, turns, pilot_nodes)
+            self.stats["rollouts"] += 1
+            if s.get("type") == "error":
+                return None
+            if s.get("decision") == "game_over" and not s.get("victory"):
+                return ROLLOUT_DEATH
+            return evaluate(root, s)
         for _ in range(80):
             if s.get("type") == "error" or s.get("decision") not in ("combat_play", "card_select"):
                 break
@@ -414,9 +422,34 @@ class TurnPlanner:
             return ROLLOUT_DEATH
         return evaluate(root, s)
 
+    def _planner_rollout(self, s, future, turns, nodes):
+        """Play the imagined future with a small planner (one-turn search, heuristic leaves)
+        instead of quick_policy; stop before the end of turn `turns`."""
+        inner = TurnPlanner(self.sim, max_nodes=nodes)
+        for _ in range(40):
+            if s.get("type") == "error" or s.get("decision") not in ("combat_play", "card_select"):
+                return s
+            path, _ = inner.plan(s)
+            for a in path:
+                if a[0] == "end_turn" and future >= turns:
+                    return s
+                s2 = self.sim.act(a[0], **a[1])
+                if s2.get("type") == "error":
+                    if s.get("decision") != "combat_play":
+                        return s
+                    a, s2 = ("end_turn", {}), self.sim.act("end_turn")
+                if a[0] == "end_turn":
+                    future += 1
+                s = s2
+                if s.get("type") == "error" or s.get("decision") not in ("combat_play", "card_select"):
+                    return s
+        return s
+
     def _rollout_cfg(self, root):
         """The "big" budget (if given) for elite/boss fights and every fight from act 2 on."""
         ctx = root.get("context") or {}
+        if ctx.get("room_type") == "Boss" and "boss" in self.rollouts:
+            return self.rollouts["boss"]
         big = ctx.get("room_type") in ("Elite", "Boss") or (ctx.get("act") or 1) >= 2
         return self.rollouts.get("big", self.rollouts) if big else self.rollouts
 
@@ -433,7 +466,8 @@ class TurnPlanner:
                 out[i] = scores[i] if (st.get("decision") != "game_over" or st.get("victory")) else ROLLOUT_DEATH
         for i in cand:
             _, _, st, snap, last = leaves[i]
-            vals = [self._rollout(root, snap, last, base * 1000 + j, cfg.get("turns", 2)) for j in range(cfg.get("m", 3))]
+            vals = [self._rollout(root, snap, last, base * 1000 + j, cfg.get("turns", 2), cfg.get("pilot_nodes", 0))
+                    for j in range(cfg.get("m", 3))]
             vals = [v for v in vals if v is not None]
             mean = sum(vals) / len(vals) if vals else scores[i]
             # shrink toward the leaf's own evaluation: with few noisy rollouts, the max
