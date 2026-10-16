@@ -70,8 +70,22 @@ def _to_map(sim, st):
     return st if st.get("decision") == "map_select" else None
 
 
+PATH_MARGIN = 0.5   # path test: points per HP lost in a won boss fight (HP left over is not banked)
+
+
+def graded_win(won, hp_start, hp_end, enemy_left, enemy_max):
+    """Path-test boss score: winning, then a small margin for HP not lost. Unlike graded(),
+    HP carried into the fight earns nothing by itself, only through more wins (the next
+    act starts with a heal anyway)."""
+    if won:
+        return 100.0 - PATH_MARGIN * max(0, hp_start - hp_end)
+    return 80.0 * (1 - enemy_left / max(1, enemy_max))
+
+
 def boss_fight(sim, map_state, boss_id, seed, pilot=None, hp=None):
-    """From a map state: heal to full (or set `hp`), enter the boss encounter, fight; return the graded score."""
+    """From a map state: heal to full (or set `hp`), enter the boss encounter, fight; return the graded score
+    (with `hp` given: graded_win, the path test's score)."""
+    hp_start = hp
     sim.send({"cmd": "set_player", "hp": hp if hp is not None else (map_state.get("player") or {}).get("max_hp") or 80})
     st = sim.send({"cmd": "enter_room", "type": "combat", "encounter": boss_id})
     if st.get("decision") != "combat_play":
@@ -107,6 +121,8 @@ def boss_fight(sim, map_state, boss_id, seed, pilot=None, hp=None):
     left = 0 if won else sum((e.get("hp") or 0) for e in alive(last))
     if DEBUG is not None:
         DEBUG.append((won, hp, left, last.get("round")))
+    if hp_start is not None:
+        return graded_win(won, hp_start, hp, left, enemy_max)
     return graded(won, hp, left, enemy_max)
 
 
