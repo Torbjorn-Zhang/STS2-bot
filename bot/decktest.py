@@ -185,3 +185,70 @@ def evaluate_event(sim, st):
     opts = [o for o in st.get("options") or [] if not o.get("is_locked")]
     arms = {o["index"]: [("choose_option", {"option_index": o["index"]})] for o in opts}
     return evaluate_arms(sim, st, arms, tag="event/")
+
+
+# Each act's elite and hallway pools (game knowledge, not the run's actual map).
+ELITES = {
+    "Overgrowth": ["BYGONE_EFFIGY_ELITE", "BYRDONIS_ELITE", "PHROG_PARASITE_ELITE"],
+    "Underdocks": ["PHANTASMAL_GARDENERS_ELITE", "SKULKING_COLONY_ELITE", "TERROR_EEL_ELITE"],
+    "Hive": ["DECIMILLIPEDE_ELITE", "ENTOMANCER_ELITE", "INFESTED_PRISMS_ELITE"],
+    "Glory": ["KNIGHTS_ELITE", "MECHA_KNIGHT_ELITE", "SOUL_NEXUS_ELITE"],
+}
+HALLWAYS = {
+    "Overgrowth": ["CUBEX_CONSTRUCT_NORMAL", "VINE_SHAMBLER_NORMAL", "SLIMES_NORMAL", "INKLETS_NORMAL"],
+    "Underdocks": ["CORPSE_SLUGS_NORMAL", "GREMLIN_MERC_NORMAL", "SEWER_CLAM_NORMAL", "TWO_TAILED_RATS_NORMAL"],
+    "Hive": HARD_HALLWAY[2][:4],
+    "Glory": HARD_HALLWAY[3],
+}
+# The planner loses far less HP than quick_policy: at A10, real act-1 costs were 0.05
+# (hallway) and 0.25 (elite) of max HP where quick_policy loses about 0.29 and 0.75.
+PILOT_HANDICAP = {"Monster": 0.2, "Elite": 0.35}
+
+
+def fight_cost(sim, map_state, encounter, seed):
+    """HP fraction lost fighting `encounter` from the current HP (1.0 = the full current HP, i.e. death)."""
+    p = map_state.get("player") or {}
+    hp, max_hp = p.get("hp") or 1, p.get("max_hp") or 1
+    st = sim.send({"cmd": "enter_room", "type": "combat", "encounter": encounter})
+    if st.get("decision") != "combat_play":
+        return None
+    sim.send({"cmd": "determinize", "seed": seed})
+    last, end = st, st
+    for _ in range(400):
+        if end.get("decision") not in ("combat_play", "card_select") or end.get("type") == "error":
+            break
+        last = end
+        a = quick_policy(end)
+        nxt = sim.act(a[0], **a[1])
+        end = sim.act("end_turn") if nxt.get("type") == "error" and end.get("decision") == "combat_play" else nxt
+    if end.get("type") == "error" or end.get("decision") in ("combat_play", "card_select"):
+        return None
+    if end.get("decision") == "game_over" and not end.get("victory"):
+        return hp / max_hp
+    return max(0, hp - ((last.get("player") or {}).get("hp") or 0)) / max_hp
+
+
+def expected_costs(sim, st, reps=2):
+    """From a map state: expected HP fraction lost in this act's elite and hallway fights."""
+    ctx = st.get("context") or {}
+    name = ctx.get("act_name")
+    pools = {"Elite": ELITES.get(name), "Monster": HALLWAYS.get(name)}
+    if not any(pools.values()):
+        return {}
+    snap = sim.send({"cmd": "snapshot"})["id"]
+    out = {}
+    try:
+        for kind, encs in pools.items():
+            vals = []
+            for i, enc in enumerate(encs or []):
+                for rep in range(reps):
+                    sim.send({"cmd": "restore", "id": snap})
+                    v = fight_cost(sim, st, enc, zlib.crc32(f"cost/{enc}/{ctx.get('floor')}/{rep}".encode()))
+                    if v is not None:
+                        vals.append(v)
+            if vals:
+                out[kind] = PILOT_HANDICAP[kind] * sum(vals) / len(vals)
+    finally:
+        sim.send({"cmd": "restore", "id": snap})
+        sim.send({"cmd": "drop_snapshots", "from": snap})
+    return out

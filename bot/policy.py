@@ -65,12 +65,19 @@ ELITE_HP = {1: 0.55, 2: 0.7, 3: 0.7}   # take elites (relics) only from this HP 
 ELITE_VALUE = {1: 3.5, 2: 2.0, 3: 2.0}
 
 
-def node_value(kind, hp, row, act=1, gold=0):
+MAP_COSTS = True   # map DP uses simulated fight costs for this deck when available
+
+
+def node_value(kind, hp, row, act=1, gold=0, costs=None):
     if kind == "Monster":
         return 1.0 if hp > 0.4 else -1.0
     if kind == "Elite":
         # the starter deck loses to elites on the first floors; later, healthy, they pay in relics
         a = min(max(act, 1), 3)
+        if costs and "Elite" in costs:
+            # worth it when the fight leaves enough HP to carry on (relic ~ ELITE_VALUE)
+            after = hp - costs["Elite"]
+            return ELITE_VALUE[a] if after >= 0.35 and row >= 3 else -3.0 - 10.0 * max(0.0, 0.2 - after)
         return ELITE_VALUE[a] if hp >= ELITE_HP[a] + 0.01 * ASCENSION and row >= 4 else -3.0
     if kind == "RestSite":
         return 3.0 if hp < 0.5 else 2.0 if hp < 0.7 else 0.8
@@ -91,8 +98,10 @@ HP_COST = {"Monster": (0.07, 0.12, 0.14), "Elite": (0.25, 0.30, 0.32), "Boss": (
 ASCENSION = 0   # set by the runner; tougher and deadlier enemies make every fight cost more
 
 
-def _hp_after(kind, hp, act):
+def _hp_after(kind, hp, act, costs=None):
     a = min(max(act, 1), 3) - 1
+    if costs and kind in costs:          # simulated for this deck (decktest.expected_costs)
+        return hp - costs[kind]
     if kind in HP_COST:
         return hp - HP_COST[kind][a] * (1 + 0.04 * ASCENSION)
     if kind == "RestSite" and hp < 0.7:
@@ -107,6 +116,10 @@ def choose_map(sim, st):
     nodes = {(n["col"], n["row"]): n for row in m.get("rows", []) for n in row}
     act = (st.get("context") or {}).get("act") or 1
     gold = (st.get("player") or {}).get("gold") or 0
+    costs = None
+    if DECK_TEST and MAP_COSTS:
+        import decktest
+        costs = decktest.expected_costs(sim, st) or None
     memo = {}
 
     def value(c, hp):
@@ -116,8 +129,8 @@ def choose_map(sim, st):
             if n is None:
                 memo[key] = 0.0
             else:
-                v = node_value(n["type"], hp, n["row"], act, gold)
-                hp2 = _hp_after(n["type"], hp, act)
+                v = node_value(n["type"], hp, n["row"], act, gold, costs)
+                hp2 = _hp_after(n["type"], hp, act, costs)
                 if hp2 <= 0.05:
                     v -= 20.0
                 memo[key] = v + max([value((k["col"], k["row"]), hp2) for k in n.get("children") or []] or [0.0])
