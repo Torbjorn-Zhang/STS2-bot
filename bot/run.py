@@ -37,6 +37,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         room = (st.get("context") or {}).get("room_type")
         if d == "combat_play" or (d == "card_select" and room in ("Monster", "Elite", "Boss")):
             hp0 = (st.get("player") or {}).get("hp")
+            pots0 = len([x for x in (st.get("player") or {}).get("potions") or [] if x])
             names = [e.get("name") for e in st.get("enemies") or []]
             floor0 = (st.get("context") or {}).get("floor")
             last_enemies = {}
@@ -44,11 +45,13 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 if s.get("enemies") is not None:
                     last_enemies["hp"] = [e.get("hp") for e in s["enemies"]]
                     last_enemies["round"] = s.get("round")
+                    last_enemies["potions"] = len([x for x in (s.get("player") or {}).get("potions") or [] if x])
             st = planner.play_combat(st, on_state=watch)
             fights += 1
             hp_log.append({"floor": floor0, "room": room, "enemies": names, "hp_before": hp0,
                            "hp_after": (st.get("player") or {}).get("hp"), "won": st.get("decision") != "game_over",
-                           "enemy_hp_left": last_enemies.get("hp"), "rounds": last_enemies.get("round")})
+                           "enemy_hp_left": last_enemies.get("hp"), "rounds": last_enemies.get("round"),
+                           "potions_before": pots0, "potions_left": last_enemies.get("potions")})
             if st.get("decision") == "combat_play":
                 stuck = True   # play_combat hit its action cap: give up on the run
                 break

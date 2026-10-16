@@ -65,7 +65,7 @@ ELITE_HP = {1: 0.55, 2: 0.7, 3: 0.7}   # take elites (relics) only from this HP 
 ELITE_VALUE = {1: 3.5, 2: 2.0, 3: 2.0}
 
 
-MAP_COSTS = True   # map DP uses simulated fight costs for this deck when available
+MAP_COSTS = False  # map DP uses simulated fight costs for this deck when available
 
 
 def node_value(kind, hp, row, act=1, gold=0, costs=None):

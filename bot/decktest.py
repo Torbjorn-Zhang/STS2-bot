@@ -12,7 +12,7 @@ import zlib
 
 from combat import TurnPlanner, alive, quick_policy
 
-REPS = 10
+REPS = 16
 UPGRADE_REPS = 5   # the engine's smith step sleeps 200 ms, so fewer seeds here
 PILOT = "quick"   # "quick": quick_policy (fast) or "planner": TurnPlanner(NODES)
 DEBUG = None   # set to a list to record how imagined fights ended
