@@ -263,7 +263,7 @@ def main():
         "runs": len(results), "acts_target": args.acts,
         "cleared": len(cleared), "clear_rate": round(len(cleared) / max(1, len(results)), 3),
         "median_floor_reached": statistics.median([r["floor"] or 0 for r in results]) if results else None,
-        "death_rooms": dict(sorted({k: sum(1 for r in results if r["died"] and r["room"] == k) for k in {r["room"] for r in results}}.items())),
+        "death_rooms": dict(sorted({str(k): sum(1 for r in results if r["died"] and r["room"] == k) for k in {r["room"] for r in results}}.items())),
         "wall_s": round(time.perf_counter() - t0, 1),
         "mean_run_s": round(statistics.mean([r["seconds"] for r in results]), 1) if results else None,
     }, indent=1))
