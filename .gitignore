@@ -23,3 +23,7 @@ harness/sts2dd_*/
 bot/runs/
 bot/data/
 bot/models/*.pkl
+
+# trained networks: only the frozen ones used by evaluated configs are kept in git
+bot/models/*.pt
+!bot/models/frozen/
