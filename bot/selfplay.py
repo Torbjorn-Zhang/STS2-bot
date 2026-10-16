@@ -39,7 +39,7 @@ def sample(pilot, st, acts, temperature, rng):
 
 
 def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card_pol=None, card_temp=0.0,
-                  rest_pol=None, rest_temp=0.0):
+                  rest_pol=None, rest_temp=0.0, event_pol=None, event_temp=0.0):
     policy.ASCENSION = ascension
     st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
     memo, steps, in_fight, hp0, last = {}, 0, False, None, None
@@ -97,8 +97,26 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
                 extra = {"rlp": float(math.log(max(pr[i], 1e-12))), "rkeys": ks, "rk": ks[i], "route": route}
             else:
                 a = policy.decide(sim, st, avoid=(), memo=memo)
+        elif d == "event_choice" and event_pol is not None:
+            opts, descs, z, route = event_pol.scores(sim, st)
+            if z is not None:
+                zz = (z - z.max()) / max(event_temp, 1e-6)
+                pr = np.exp(zz)
+                pr /= pr.sum()
+                i = rng.choices(range(len(opts)), weights=pr.tolist())[0] if event_temp > 0 else int(np.argmax(z))
+                policy._remember_event(opts[i])
+                a = ("choose_option", {"option_index": opts[i]["index"]})
+                extra = {"eopts": descs, "ek": i, "elp": float(math.log(max(pr[i], 1e-12))), "route": route}
+            else:
+                a = policy.decide(sim, st, avoid=(), memo=memo)
         else:
             a = policy.decide(sim, st, avoid=(), memo=memo)
+            if d == "event_choice":   # rule choice: imitation data for the event network
+                from eventnet import option_desc
+                opts = [o for o in st.get("options") or [] if not o.get("is_locked")]
+                idx = [o["index"] for o in opts]
+                if len(opts) > 1 and a[0] == "choose_option" and a[1].get("option_index") in idx:
+                    extra = {"eopts": [option_desc(o) for o in opts], "ek": idx.index(a[1]["option_index"])}
         rec.decision(st, legal_actions(st), a, extra)
         nxt = sim.act(a[0], **a[1])
         if nxt.get("type") == "error" or json.dumps(nxt, sort_keys=True) == json.dumps(st, sort_keys=True):
@@ -135,6 +153,8 @@ def main():
     ap.add_argument("--card-temperature", type=float, default=0.0, help=">0: sample card rewards (deck RL)")
     ap.add_argument("--rest-policy", default=None, help="restnet.py model for rest sites (default: rules)")
     ap.add_argument("--rest-temperature", type=float, default=0.0, help=">0: sample rest choices (RL)")
+    ap.add_argument("--event-policy", default=None, help="eventnet.py model for events (default: rules)")
+    ap.add_argument("--event-temperature", type=float, default=0.0, help=">0: sample event choices (RL)")
     args = ap.parse_args()
     import random
     import torch
@@ -149,6 +169,10 @@ def main():
     if args.rest_policy:
         from restnet import RestPolicy
         rest_pol = RestPolicy(args.rest_policy)
+    event_pol = None
+    if args.event_policy:
+        from eventnet import EventPolicy
+        event_pol = EventPolicy(args.event_policy)
     pilot = NetPolicy(args.policy)
     seeds = [f"{args.seed_prefix}_{i}" for i in range(args.n)]
     lock = threading.Lock()
@@ -164,7 +188,8 @@ def main():
                                                    "policy": os.path.basename(args.policy)})
             try:
                 r = play_fast_run(sim, s, pilot, args.ascension, args.acts, rec, args.temperature, rng,
-                                  card_pol, args.card_temperature, rest_pol, args.rest_temperature)
+                                  card_pol, args.card_temperature, rest_pol, args.rest_temperature,
+                                  event_pol, args.event_temperature)
             except Exception as e:
                 r = {"seed": s, "error": repr(e)[:200]}
                 try:

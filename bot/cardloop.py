@@ -27,13 +27,14 @@ def sh(args, log):
     return out.stdout.strip().splitlines()
 
 
-def evaluate(combat, card, runs, workers, log, rest=None, tag="card"):
+def evaluate(combat, card, runs, workers, log, rest=None, tag="card", event=None):
     out = os.path.join("data", "rl", f"{tag}_eval.jsonl")
     if os.path.exists(os.path.join(HERE, out)):
         os.remove(os.path.join(HERE, out))
     res = json.loads(sh(["nice", "-n", "19", PY, "selfplay.py", str(runs), "--policy", combat, "--temperature", "0",
                          "--card-policy", card, "--workers", str(workers), "--seed-prefix", "cardeval", "--out", out]
-                        + (["--rest-policy", rest] if rest else []), log)[-1])
+                        + (["--rest-policy", rest] if rest else []) + (["--event-policy", event] if event else []),
+                        log)[-1])
     os.remove(os.path.join(HERE, out))
     return res
 
@@ -49,13 +50,15 @@ def main():
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--rest-init", default=None, help="restnet.py model: rest sites learned too")
+    ap.add_argument("--event-init", default=None, help="eventnet.py model: events learned too")
     ap.add_argument("--tag", default="cardloop")
     args = ap.parse_args()
     os.makedirs(os.path.join(HERE, "data", "rl"), exist_ok=True)
     log = os.path.join(HERE, "runs", f"{args.tag}.log")
-    cur, rest = args.init, args.rest_init
+    cur, rest, event = args.init, args.rest_init, args.event_init
     if args.start == 1:
-        row = {"iter": 0, "card": cur, "rest": rest, "eval": evaluate(args.combat, cur, args.eval_runs, args.workers, log, rest, args.tag)}
+        row = {"iter": 0, "card": cur, "rest": rest, "event": event,
+               "eval": evaluate(args.combat, cur, args.eval_runs, args.workers, log, rest, args.tag, event)}
         with open(os.path.join(HERE, "runs", f"{args.tag}.jsonl"), "a") as fh:
             fh.write(json.dumps(row) + "\n")
         print(json.dumps(row), flush=True)
@@ -66,7 +69,8 @@ def main():
         play = json.loads(sh(["nice", "-n", "19", PY, "selfplay.py", str(args.runs), "--policy", args.combat,
                               "--temperature", "0", "--card-policy", cur, "--card-temperature", str(args.temperature),
                               "--workers", str(args.workers), "--seed-prefix", f"{args.tag}{it}", "--out", data]
-                             + (["--rest-policy", rest, "--rest-temperature", str(args.temperature)] if rest else []),
+                             + (["--rest-policy", rest, "--rest-temperature", str(args.temperature)] if rest else [])
+                             + (["--event-policy", event, "--event-temperature", str(args.temperature)] if event else []),
                              log)[-1])
         new = os.path.join("models", f"{args.tag}_card{it}.pt")
         sh(["nice", "-n", "19", PY, "nets.py", "cardrl", data, "--init", cur, "--out", new, "--temperature",
@@ -76,13 +80,18 @@ def main():
             new_rest = os.path.join("models", f"{args.tag}_rest{it}.pt")
             sh(["nice", "-n", "19", PY, "restnet.py", "rl", data, "--init", rest, "--out", new_rest, "--temperature",
                 str(args.temperature)], log)
-        ev = evaluate(args.combat, new, args.eval_runs, args.workers, log, new_rest or rest, args.tag)
-        row = {"iter": it, "card": new, "rest": new_rest, "selfplay": play, "eval": ev}
+        new_event = None
+        if event:
+            new_event = os.path.join("models", f"{args.tag}_event{it}.pt")
+            sh(["nice", "-n", "19", PY, "eventnet.py", "rl", data, "--init", event, "--out", new_event, "--temperature",
+                str(args.temperature)], log)
+        ev = evaluate(args.combat, new, args.eval_runs, args.workers, log, new_rest or rest, args.tag, new_event or event)
+        row = {"iter": it, "card": new, "rest": new_rest, "event": new_event, "selfplay": play, "eval": ev}
         with open(os.path.join(HERE, "runs", f"{args.tag}.jsonl"), "a") as fh:
             fh.write(json.dumps(row) + "\n")
         print(json.dumps(row), flush=True)
         os.remove(os.path.join(HERE, data))   # self-play data is large; the outcome is in the row
-        cur, rest = new, new_rest or rest
+        cur, rest, event = new, new_rest or rest, new_event or event
 
 
 if __name__ == "__main__":
