@@ -64,6 +64,8 @@ def text_score(opt, hp):
 
 ELITE_HP = {1: 0.55, 2: 0.7, 3: 0.7}   # take elites (relics) only from this HP fraction up
 ELITE_VALUE = {1: 3.5, 2: 2.0, 3: 2.0}
+ELITE_ASC_HP = 0.02        # extra HP fraction required per ascension level
+ELITE_ASC_DISCOUNT = 0.15  # less path value per ascension level
 
 
 MAP_COSTS = False  # map DP uses simulated fight costs for this deck when available
@@ -79,9 +81,12 @@ def node_value(kind, hp, row, act=1, gold=0, costs=None):
             # worth it when the fight leaves enough HP to carry on (relic ~ ELITE_VALUE)
             after = hp - costs["Elite"]
             return ELITE_VALUE[a] if after >= 0.35 and row >= 3 else -3.0 - 10.0 * max(0.0, 0.2 - after)
-        return ELITE_VALUE[a] if hp >= ELITE_HP[a] + 0.01 * ASCENSION and row >= 4 else -3.0
+        # at high ascension HP on reaching the boss decides more than relics do (A10 bench:
+        # boss wins vs HP r=+0.66, vs relic count r=0.00), so elites need more HP and pay less
+        value = ELITE_VALUE[a] - ELITE_ASC_DISCOUNT * ASCENSION
+        return value if hp >= ELITE_HP[a] + ELITE_ASC_HP * ASCENSION and row >= 4 else -3.0
     if kind == "RestSite":
-        return 3.0 if hp < 0.5 else 2.0 if hp < 0.7 else 0.8
+        return (3.0 if hp < 0.5 else 2.0 if hp < 0.7 else 0.8) + 0.05 * ASCENSION
     if kind == "Treasure":
         return 2.0
     if kind == "Unknown":
