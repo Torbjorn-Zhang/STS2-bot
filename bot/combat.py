@@ -234,6 +234,10 @@ def evaluate(root, st):
     if d == "combat_play" and hp > 0 and taken >= hp:
         # the linear HP term let a big power (Demon Form) outscore surviving the turn
         score -= W["lethal"]
+    elif d == "combat_play" and any(0 < powers(e.get("powers")).get("Sandpit", 99) <= 1 for e in alive(st)):
+        # The Insatiable: Sandpit drops by 1 each round and eats the player at 0 (Frantic
+        # Escape adds 1)
+        score -= W["lethal"]
     if W["danger"] and d == "combat_play":
         # HP is worth more when little is left: below what the enemies hit for in about a
         # turn and a half, each HP counts extra (boss races: attack instead of Defend at 42
