@@ -34,6 +34,7 @@ W = {
     "potions_any_fight_asc": 99,  # from this ascension potions are considered in every fight
     "eot_hand": 1,      # count end-of-turn damage / HP loss of cards left in hand (Beckon, Burn)
     "lethal": 150.0,
+    "draw_card": 4.0,     # HP-equivalent of one card drawn per turn (Mind Rot-style debuffs)
     "danger": 0.0,        # extra weight per HP below the danger line (0 = off)
     "danger_turns": 1.5,  # danger line = this many turns of incoming damage ...
     "danger_floor": 15,   # ... counting at least this much per turn    # announced attacks kill us at the end of this turn (unblocked >= HP)
@@ -144,12 +145,33 @@ def future_loss(st):
     return turns * 0.65 * threat
 
 
+def self_damage_powers(st):
+    """HP the player's own debuffs take at the end of this turn (Knowledge Demon's
+    Disintegration: "At the end of your turn, take X damage")."""
+    total = 0
+    for p in st.get("player_powers") or []:
+        d = (p.get("description") or "").lower()
+        if p.get("type") == "Debuff" and "end of your turn" in d and "take" in d and "damage" in d:
+            total += p.get("amount") or 0
+    return total
+
+
 def power_value(st, f, t):
     v = 0.0
+    kinds = {p.get("name"): (p.get("type"), (p.get("description") or "").lower()) for p in st.get("player_powers") or []}
     for name, amt in powers(st.get("player_powers")).items():
         amt = amt or 1
+        ptype, desc = kinds.get(name, (None, ""))
         if name in PLAYER_DEBUFFS:
             v -= W["player_debuff"] * amt
+        elif ptype == "Debuff":
+            # unknown debuffs used to count as buffs (+f): Disintegration 6 looked good
+            if "end of your turn" in desc and "take" in desc and "damage" in desc:
+                v -= amt * f                      # that much HP every remaining turn
+            elif "fewer" in desc and "card" in desc:
+                v -= W["draw_card"] * amt * f      # Mind Rot: cards not drawn every turn
+            else:
+                v -= W["player_debuff"] * amt * min(f, 3.0)
         elif name in POWER_THIS_TURN:
             if name == "Flame Barrier":
                 hits = sum((i.get("hits") or i.get("repeat") or 1) for e in alive(st) for i in e.get("intents") or []
@@ -206,6 +228,7 @@ def evaluate(root, st):
     p = st.get("player") or {}
     hp, block = p.get("hp") or 0, p.get("block") or 0
     eot_dmg, eot_loss = end_of_turn_hand(st) if W["eot_hand"] else (0, 0)
+    eot_dmg += self_damage_powers(st)
     taken = max(0, incoming_damage(st) + eot_dmg - block) + eot_loss
     score = W["hp"] * (hp - taken)
     if d == "combat_play" and hp > 0 and taken >= hp:
