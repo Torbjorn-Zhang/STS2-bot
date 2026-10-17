@@ -267,7 +267,7 @@ class DeckRL:
             st["phase"] = "finished"
 
     def finished(self):
-        return self.st["phase"] in ("finished", "failed")
+        return self.st["phase"] in ("finished", "failed", "cancelled")
 
 
 class Expert:
@@ -388,7 +388,145 @@ class Bench:
         return self.st["phase"] == "finished"
 
 
-PIPES = {"deckrl": DeckRL, "expert": Expert, "bench": Bench}
+def summarize_runs(rows):
+    n = len(rows)
+    return {"runs": n, "act1": sum(1 for r in rows if (r.get("cleared_acts") or 0) >= 1),
+            "act2": sum(1 for r in rows if (r.get("cleared_acts") or 0) >= 2),
+            "wins": sum(1 for r in rows if r.get("victory")),
+            "mean_floor": round(sum(((r.get("act") or 1) - 1) * 17 + (r.get("floor") or 0) for r in rows) / max(1, n), 2),
+            "boss_dmg": round(sum(r.get("boss_dmg") or 0 for r in rows) / max(1, n), 3)}
+
+
+def read_rows(paths, remove=True):
+    rows = []
+    for rel in paths:
+        p = os.path.join(HERE, rel)
+        if os.path.exists(p):
+            with open(p) as fh:
+                rows += [json.loads(l) for l in fh if l.strip()]
+            if remove:
+                os.remove(p)
+    return rows
+
+
+class XDeckRL:
+    """Deck RL in the expert world: self-play is the real bot (planner combat, run.py) with its
+    deck networks sampled at a temperature (--deck-sample), so learning sees the game it is
+    scored on instead of the calibrated fast world. Iteration i: self-play chunks -> one update
+    of the sampled networks (card, rest, event, map; the shop network stays) -> the A10
+    benchmark (240 paired seeds, greedy) with the new networks, queued ahead of the next
+    iteration's self-play so every iteration gets its real score."""
+
+    KINDS = ("card", "rest", "event", "map")
+
+    def __init__(self, spec, st=None):
+        self.spec = spec
+        self.name = spec["tag"]
+        self.st = st or {"it": spec["start"], "cur": spec["init"], "phase": "start", "evals": {}, "sp": {}}
+
+    def nets_json(self, it, models):
+        rel = f"models/{self.name}_nets{it}.json"
+        with open(os.path.join(HERE, rel), "w") as fh:
+            json.dump({**models, "card_decides": True, "neow": True}, fh)
+        return rel
+
+    def run_args(self, end, start, prefix, cfg, tag, extra=()):
+        return ["run.py", end, "--seed-start", start, "--acts", 3, "--ascension", 10, "--seed-prefix", prefix,
+                "--workers", "%W%", "--rollouts", self.spec["rollouts"], "--deck-nets", cfg, "--tag", tag] + list(extra)
+
+    def inputs(self, models, cfg):
+        return [cfg] + [m for m in models.values() if m]
+
+    def start_selfplay(self, fl, it):
+        sp = self.spec
+        cfg = self.nets_json(it - 1, self.st["cur"])
+        jobs = []
+        for k, s0 in enumerate(range(0, sp["runs"], sp["chunk"])):
+            rec, rows = f"fleetdata/{self.name}_it{it}_c{k}.jsonl", f"runs/{self.name}{it}_sp{k}.jsonl"
+            argv = self.run_args(min(sp["runs"], s0 + sp["chunk"]), s0, f"{self.name}{it}", cfg, f"{self.name}{it}_sp{k}",
+                                 ["--deck-sample", sp["temperature"], "--record", rec, "--no-combat-records"])
+            jobs.append(fl.add_job(self.name, f"{self.name}{it}_sp{k}", "xselfplay", 1, argv,
+                                   self.inputs(self.st["cur"], cfg), [rec, rows]))
+        self.st["sp"][str(it)] = {"jobs": jobs, "t0": time.time()}
+        self.st["phase"] = "selfplay"
+        log(f"{self.name}: iteration {it} expert self-play, {len(jobs)} chunks")
+
+    def start_eval(self, fl, it, models, sp_summary):
+        sp = self.spec
+        cfg = self.nets_json(it, models)
+        jobs = []
+        for k, s0 in enumerate(range(0, sp["eval_runs"], sp["eval_chunk"])):
+            out = f"runs/{self.name}_ev{it}_c{k}.jsonl"
+            argv = self.run_args(min(sp["eval_runs"], s0 + sp["eval_chunk"]), s0, "full", cfg, f"{self.name}_ev{it}_c{k}")
+            jobs.append(fl.add_job(self.name, f"{self.name}{it}_ev{k}", "xeval", sp.get("eval_prio", 0.95), argv,
+                                   self.inputs(models, cfg), [out]))
+        self.st["evals"][str(it)] = {"jobs": jobs, "models": models, "selfplay": sp_summary, "t0": time.time()}
+
+    def step(self, fl):
+        st, sp = self.st, self.spec
+        if st["phase"] == "start":
+            if sp.get("eval_init"):
+                self.start_eval(fl, sp["start"] - 1, st["cur"], None)
+            self.start_selfplay(fl, st["it"])
+        elif st["phase"] == "selfplay":
+            it = st["it"]
+            ids = st["sp"][str(it)]["jobs"]
+            if all(fl.jobs[j]["state"] in ("done", "failed") for j in ids):
+                done = [fl.jobs[j] for j in ids if fl.jobs[j]["state"] == "done"]
+                summary = summarize_runs(read_rows([j["outputs"][1] for j in done]))
+                summary["wall_s"] = round(time.time() - st["sp"][str(it)]["t0"], 1)
+                st["sp"][str(it)]["summary"] = summary
+                data = [j["outputs"][0] for j in done]
+                argv = ["fleetjob.py", "train"] + data + ["--tag", self.name, "--it", it, "--temperature", sp["temperature"]]
+                for k in self.KINDS:
+                    if st["cur"].get(k):
+                        argv += [f"--{k}", st["cur"][k]]
+                outs = [f"models/{self.name}_{k}{it}.pt" for k in self.KINDS if st["cur"].get(k)]
+                st["train"] = fl.add_job(self.name, f"{self.name}{it}_train", "train", 0, argv,
+                                         [m for m in st["cur"].values() if m] + data, outs, gpu=True)
+                st["phase"] = "train"
+                log(f"{self.name}: iteration {it} expert self-play done {json.dumps(summary)}; training")
+        elif st["phase"] == "train":
+            j = fl.jobs[st["train"]]
+            it = st["it"]
+            if j["state"] == "failed":
+                log(f"{self.name}: training {it} failed; pipeline stopped")
+                st["phase"] = "failed"
+            elif j["state"] == "done":
+                new = dict(st["cur"])
+                new.update({k: f"models/{self.name}_{k}{it}.pt" for k in j["result"]["models"]})
+                log(f"{self.name}: iteration {it} trained on {j['host']} ({j['result'].get('device')}, "
+                    f"{j['result']['timing'].get('total')} s)")
+                self.start_eval(fl, it, new, st["sp"][str(it)].get("summary"))
+                fl.cleanup(f"fleetdata/{self.name}_it{it}_c*.jsonl")
+                st["cur"] = new
+                if it + 1 < sp["start"] + sp["iters"]:
+                    st["it"] = it + 1
+                    self.start_selfplay(fl, it + 1)
+                else:
+                    st["phase"] = "finishing"
+        for it, ev in list(st["evals"].items()):
+            if all(fl.jobs[j]["state"] in ("done", "failed") for j in ev["jobs"]):
+                rows = read_rows([fl.jobs[j]["outputs"][0] for j in ev["jobs"] if fl.jobs[j]["state"] == "done"])
+                with open(os.path.join(HERE, "runs", f"{self.name}_ev{it}.jsonl"), "w") as fh:
+                    for r in rows:
+                        fh.write(json.dumps(r) + "\n")
+                res = summarize_runs(rows)
+                res["wall_s"] = round(time.time() - ev["t0"], 1)
+                row = {"iter": int(it), **{k: ev["models"].get(k) for k in ev["models"]}, "selfplay": ev["selfplay"],
+                       "a10": res, "fleet": True, "world": "expert"}
+                with open(os.path.join(HERE, "runs", f"{self.name}.jsonl"), "a") as fh:
+                    fh.write(json.dumps(row) + "\n")
+                log(f"{self.name}: iteration {it} A10 {json.dumps(res)}")
+                del st["evals"][it]
+        if st["phase"] == "finishing" and not st["evals"]:
+            st["phase"] = "finished"
+
+    def finished(self):
+        return self.st["phase"] in ("finished", "failed", "cancelled")
+
+
+PIPES = {"deckrl": DeckRL, "expert": Expert, "bench": Bench, "xdeckrl": XDeckRL}
 
 
 # ---------------------------------------------------------------- coordinator
@@ -656,6 +794,19 @@ class Fleet:
         for p in sorted(glob.glob(os.path.join(FLEET, "inbox", "*.json"))):
             with open(p) as fh:
                 spec = json.load(fh)
+            if spec["type"] == "cancel":
+                tag = spec["spec"]["tag"]
+                for x in self.pipes:
+                    if x.name == tag and not x.finished():
+                        x.st["phase"] = "cancelled"
+                n = 0
+                for j in self.jobs.values():
+                    if j["pipe"] == tag and j["state"] == "queued":
+                        j["state"] = "failed"
+                        n += 1
+                log(f"pipeline {tag} cancelled ({n} queued jobs dropped; running ones finish)")
+                os.remove(p)
+                continue
             if any(x.name == spec["spec"]["tag"] for x in self.pipes):
                 log(f"pipeline {spec['spec']['tag']} exists; ignored")
             else:
@@ -724,7 +875,8 @@ def main():
         os.makedirs(os.path.join(FLEET, d), exist_ok=True)
     os.makedirs(os.path.join(HERE, "fleetdata"), exist_ok=True)
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["run", "status", "drain", "undrain", "stop", "deckrl", "expert", "bench"])
+    ap.add_argument("cmd", choices=["run", "status", "drain", "undrain", "stop", "deckrl", "xdeckrl", "expert", "bench",
+                                    "cancel"])
     ap.add_argument("host", nargs="?")
     ap.add_argument("--until-done", action="store_true", help="run: exit once every pipeline has finished")
     ap.add_argument("--tag")
@@ -802,6 +954,16 @@ def main():
         submit("expert", {"tag": args.tag, "deck_nets": args.deck_nets, "n": args.n, "start": 0, "chunk": args.expert_chunk,
                           "prefix": args.prefix, "rollouts": args.rollouts, "seeds": seeds,
                           "prio": 1.5 if args.prio is None else args.prio})
+    elif args.cmd == "xdeckrl":
+        with open(os.path.join(HERE, args.deck_nets)) as fh:
+            cfg = json.load(fh)
+        init = {k: cfg[k] for k in ("card", "rest", "event", "map", "shop") if cfg.get(k)}
+        submit("xdeckrl", {"tag": args.tag, "start": args.start, "iters": args.iters, "runs": args.runs,
+                           "chunk": args.expert_chunk, "eval_runs": args.n, "eval_chunk": args.expert_chunk,
+                           "temperature": args.temperature, "rollouts": args.rollouts, "init": init,
+                           "eval_init": args.eval_init})
+    elif args.cmd == "cancel":
+        submit("cancel", {"tag": args.tag})
     elif args.cmd == "bench":
         submit("bench", {"tag": args.tag, "bench": args.bench, "configs": json.loads(args.configs), "room": args.room,
                          "reps": args.reps, "shards": args.shards, "prio": 0.8 if args.prio is None else args.prio})

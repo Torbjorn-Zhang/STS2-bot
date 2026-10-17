@@ -24,7 +24,7 @@ def _key(st):
 
 
 def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0, rollouts=None,
-             rec=None, explore=0.0, decknets=None):
+             rec=None, explore=0.0, decknets=None, combat_records=True):
     """rec: optional record.GameRecorder (self-play data for the policy and value nets).
     explore: chance to take a uniformly random card reward option instead (value-net data
     needs decks the policy would not build; such decisions are flagged in the record)."""
@@ -35,6 +35,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
     st = sim.send({"cmd": "start_run", "character": character, "seed": seed, "ascension": ascension})
     t0, steps, fights, hp_log = time.perf_counter(), 0, 0, []
     dead_ends, loops, memo, stuck = {}, 0, {}, False
+    boss_dmg = 0.0   # sum over boss fights of the share of boss HP removed (a win = 1), as selfplay.py
     while steps < 5000:
         d = st.get("decision")
         act = (st.get("context") or {}).get("act") or 1
@@ -49,6 +50,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                           "basics": sum(1 for c in deck0 if any(b in (c.get("id") or "") for b in ("STRIKE_", "DEFEND_"))),
                           "relics": len((st.get("player") or {}).get("relics") or [])} if room == "Boss" else None
             names = [e.get("name") for e in st.get("enemies") or []]
+            enemy_max = sum((e.get("max_hp") or 0) for e in st.get("enemies") or [])
             floor0 = (st.get("context") or {}).get("floor")
             last_enemies = {}
             def watch(s):  # remember the last enemy HP we saw (for deaths)
@@ -60,6 +62,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
             on_step = None
             if rec:
                 rec.fight_start(st)
+            if rec and combat_records:
                 def on_step(s, a):
                     extra = None
                     if s is getattr(planner, "last_root", None):   # first action of a fresh plan
@@ -71,6 +74,10 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"),
                               last_enemies.get("php"))
             fights += 1
+            if room == "Boss":
+                won = st.get("decision") != "game_over" or bool(st.get("victory"))
+                left = sum(h or 0 for h in last_enemies.get("hp") or [])
+                boss_dmg += 1.0 if won else max(0.0, 1 - left / max(1, enemy_max))
             hp_log.append({"floor": floor0, "room": room, "enemies": names, "hp_before": hp0,
                            "hp_after": (st.get("player") or {}).get("hp"), "won": st.get("decision") != "game_over",
                            "enemy_hp_left": last_enemies.get("hp"), "rounds": last_enemies.get("round"),
@@ -110,7 +117,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         "act": ctx.get("act"), "floor": ctx.get("floor"), "room": ctx.get("room_type"),
         "hp": p.get("hp"), "max_hp": p.get("max_hp"), "deck_size": p.get("deck_size"),
         "fights": fights, "seconds": round(time.perf_counter() - t0, 1),
-        "planner": dict(planner.stats), "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
+        "boss_dmg": round(boss_dmg, 3), "planner": dict(planner.stats), "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
     }
     if rec:
         rec.finish(res)
@@ -132,6 +139,7 @@ def main():
     ap.add_argument("--rollouts", default=None, help='JSON rollout config, e.g. {"k":4,"m":3,"turns":2}')
     ap.add_argument("--no-deck-test", action="store_true", help="pick card rewards by the tier list only")
     ap.add_argument("--record", default=None, help="append self-play records to this .jsonl (record.py)")
+    ap.add_argument("--no-combat-records", action="store_true", help="--record without combat steps (deck RL)")
     ap.add_argument("--explore", type=float, default=0.0, help="chance of a random card reward pick (data collection)")
     ap.add_argument("--net-rollouts", default=None, help="policy network (nets.py) as the planner's rollout policy")
     ap.add_argument("--net-decktest", default=None, help="policy network as the deck test's pilot")
@@ -232,14 +240,19 @@ def main():
                     dn = None
                     if args.deck_sample is not None:
                         from decknets import DeckNets
-                        dn = DeckNets(args.card_prior, args.rest_net, args.event_net, args.map_net, args.deck_sample, seed=s)
+                        paths = (args.card_prior, args.rest_net, args.event_net, args.map_net)
+                        if args.deck_nets and not any(paths):   # sample the deck networks the bot plays with
+                            with open(args.deck_nets) as fh:
+                                cfg = json.load(fh)
+                            paths = (cfg.get("card"), cfg.get("rest"), cfg.get("event"), cfg.get("map"))
+                        dn = DeckNets(*paths, args.deck_sample, seed=s)
                     rec = None
                     if args.record:
                         from record import GameRecorder
                         rec = GameRecorder(args.record, rec_lock, s, {"tag": args.tag, "asc": args.ascension})
                     r = play_run(sim, s, args.character, args.acts, args.nodes, model, args.value_weight, args.ascension,
                                  json.loads(args.rollouts) if args.rollouts else None, rec=rec,
-                                 explore=args.explore, decknets=dn)
+                                 explore=args.explore, decknets=dn, combat_records=not args.no_combat_records)
                 except Exception as e:  # engine hang/crash: record it, restart the engine, go on
                     r = {"seed": s, "character": args.character, "ascension": args.ascension, "cleared_acts": 0,
                          "victory": False, "died": False, "act": None, "floor": None, "room": None, "hp": None,
