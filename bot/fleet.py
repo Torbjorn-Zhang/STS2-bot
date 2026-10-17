@@ -417,11 +417,10 @@ class XDeckRL:
     benchmark (240 paired seeds, greedy) with the new networks, queued ahead of the next
     iteration's self-play so every iteration gets its real score."""
 
-    KINDS = ("card", "rest", "event", "map")
-
     def __init__(self, spec, st=None):
         self.spec = spec
         self.name = spec["tag"]
+        self.KINDS = tuple(spec.get("kinds") or ("card", "rest", "event", "map"))   # the networks sampled and trained
         self.st = st or {"it": spec["start"], "cur": spec["init"], "phase": "start", "evals": {}, "sp": {}}
 
     def nets_json(self, it, models):
@@ -961,7 +960,7 @@ def main():
         submit("xdeckrl", {"tag": args.tag, "start": args.start, "iters": args.iters, "runs": args.runs,
                            "chunk": args.expert_chunk, "eval_runs": args.n, "eval_chunk": args.expert_chunk,
                            "temperature": args.temperature, "rollouts": args.rollouts, "init": init,
-                           "eval_init": args.eval_init})
+                           "eval_init": args.eval_init, "kinds": ["card", "rest", "event", "map", "shop"]})
     elif args.cmd == "cancel":
         submit("cancel", {"tag": args.tag})
     elif args.cmd == "bench":

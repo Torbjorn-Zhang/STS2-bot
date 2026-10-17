@@ -1,10 +1,11 @@
 """Deck-decision networks inside the expert bot, sampled for RL (the self-play stage run
 with the full planner bot instead of the fast world).
 
-DeckNets(card, rest, event, map paths, temperature) decides card rewards, rest sites,
-events and map choices by sampling softmax(logits / T) and returns the record extras
-the RL trainers read (card x.lp, rest x.rlp/rkeys/rk/route, event x.elp/eopts/ek/route,
-map x.mlp/mopts/mk), the same format as selfplay.py.
+DeckNets(card, rest, event, map paths, temperature, shop=path) decides card rewards, rest
+sites, events, map choices and shop purchases by sampling softmax(logits / T) and returns
+the record extras the RL trainers read (card x.lp, rest x.rlp/rkeys/rk/route, event
+x.elp/eopts/ek/route, map x.mlp/mopts/mk, shop x.slp/sopts/sk/route/smemo), the same format
+as selfplay.py.
 """
 
 import math
@@ -14,8 +15,9 @@ import numpy as np
 
 
 class DeckNets:
-    def __init__(self, card=None, rest=None, event=None, mapp=None, temperature=1.0, seed=0):
-        self.card = self.rest = self.event = self.map = None
+    def __init__(self, card=None, rest=None, event=None, mapp=None, temperature=1.0, seed=0, shop=None):
+        self.card = self.rest = self.event = self.map = self.shop = None
+        self.visits = {}   # shop visit -> {"removed", "bought"} (the shop network's own state input)
         if card:
             from nets import CardPolicy
             self.card = CardPolicy(card)
@@ -28,6 +30,9 @@ class DeckNets:
         if mapp:
             from mapnet import MapPolicy
             self.map = MapPolicy(mapp)
+        if shop:
+            from shopnet import ShopPolicy
+            self.shop = ShopPolicy(shop)
         self.temperature = temperature
         self.rng = random.Random(seed)
 
@@ -65,6 +70,19 @@ class DeckNets:
                 policy._remember_event(opts[i])
                 return ("choose_option", {"option_index": opts[i]["index"]}), \
                     {"eopts": descs, "ek": i, "elp": lp, "route": route}
+        if d == "shop" and self.shop is not None and sim is not None:
+            ctx = st.get("context") or {}
+            visit = self.visits.setdefault((ctx.get("act"), ctx.get("floor")), {"removed": False, "bought": 0})
+            before = [bool(visit["removed"]), visit["bought"]]
+            opts, route, z = self.shop.scores(sim, st, visit)
+            if len(opts) >= 2:
+                i, lp = self._sample(z)
+                a = opts[i][1]
+                if a[0] == "remove_card":
+                    visit["removed"] = True
+                elif a[0].startswith("buy_"):
+                    visit["bought"] += 1
+                return a, {"sopts": [o for o, _ in opts], "sk": i, "slp": lp, "route": route, "smemo": before}
         if d == "map_select" and self.map is not None and len(st.get("choices") or []) > 1:
             chs, descs, z = self.map.scores(sim, st)
             if z is not None:
