@@ -44,6 +44,7 @@ DOWN_AFTER = 3       # failed polls before a host counts as gone
 GPU_BUSY = 40        # % GPU utilisation by other programs that makes a yield_gpu host yield
 YIELD_QUIET = 600    # seconds of a quiet GPU before such a host gets work again
 MAX_TRIES = 4
+BACKUP_AFTER = 120   # a job running this long while the queue is empty gets a backup copy on an idle host
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10"]
 
 
@@ -102,6 +103,13 @@ for ($round = 0; $round -lt 3; $round++) {
   Start-Sleep -Milliseconds 500
 }
 "killed, left $(@(Ours).Count)"
+"""
+
+KILL_JOB_PS = r"""
+$root = '%ROOT%'; $id = '%ID%'
+Get-CimInstance Win32_Process -Filter "Name='cmd.exe'" | Where-Object { $_.CommandLine -like "*$root\bot\fleet\jobs\$id.cmd*" } |
+  ForEach-Object { taskkill /PID $_.ProcessId /T /F 2>&1 | Out-Null }
+'killed'
 """
 
 POLL_PS = r"""
@@ -584,14 +592,37 @@ class Fleet:
     # ---- host state
 
     def running_on(self, h):
-        return [j for j in self.jobs.values() if j["state"] == "running" and j["host"] == h["name"]]
+        """Jobs running on h, primary copies and backup copies."""
+        return [j for j in self.jobs.values() if j["state"] == "running"
+                and (j["host"] == h["name"] or j.get("backup") == h["name"])]
+
+    def drop_copy(self, j, host):
+        """Forget the copy of j on host; True if another copy keeps running (then no requeue)."""
+        if j.get("backup") == host:
+            j["backup"] = None
+            return True
+        if j.get("backup"):
+            j["host"], j["backup"] = j["backup"], None   # the backup becomes the job
+            return True
+        return False
 
     def requeue(self, h, why, count_try=False):
         for j in self.running_on(h):
+            if self.drop_copy(j, h["name"]):
+                log(f"  {j['id']}: copy on {h['name']} dropped, the other copy goes on ({why})")
+                continue
             j["state"], j["host"] = "queued", None
             if count_try:
                 j["tries"] += 1
             log(f"  requeued {j['id']} ({why})")
+
+    def kill_job(self, host, jid):
+        h = self.hosts.get(host)
+        if h and h["state"] == "up":
+            try:
+                ps(h, KILL_JOB_PS.replace("%ROOT%", wroot(h)).replace("%ID%", jid), timeout=60)
+            except Exception as e:
+                log(f"{host}: kill of {jid} failed: {e}")
 
     def kill(self, h):
         try:
@@ -676,24 +707,31 @@ class Fleet:
         fetch = []
         for jid, jr in (r.get("jobs") or {}).items():
             j = self.jobs.get(jid)
-            if not j or j["state"] != "running" or j["host"] != h["name"]:
+            if not j or j["state"] != "running" or h["name"] not in (j["host"], j.get("backup")):
                 continue
-            if jr["state"] == "done":
-                if str(jr["rc"]) == "0":
-                    try:
-                        j["result"] = json.loads(jr["out"]) if jr["out"].strip().startswith("{") else None
-                    except ValueError:
-                        j["result"] = None
-                    j["state"], j["t_end"] = "fetch", time.time()
-                    fetch.append(j)
-                else:
-                    j["tries"] += 1
-                    log(f"{h['name']}: {jid} failed rc {jr['rc']} (try {j['tries']}): {jr.get('err', '')[-300:]}")
-                    j["state"], j["host"] = ("failed" if j["tries"] >= MAX_TRIES else "queued"), None
-            elif jr["state"] == "lost":
-                j["tries"] += 1
-                log(f"{h['name']}: {jid} vanished (try {j['tries']})")
-                j["state"], j["host"] = ("failed" if j["tries"] >= MAX_TRIES else "queued"), None
+            if jr["state"] == "done" and str(jr["rc"]) == "0":
+                try:
+                    j["result"] = json.loads(jr["out"]) if jr["out"].strip().startswith("{") else None
+                except ValueError:
+                    j["result"] = None
+                other = j.get("backup") if j["host"] == h["name"] else j["host"]
+                if j.get("backup"):      # first copy to finish wins; stop the other one
+                    if other:
+                        self.kill_job(other, jid)
+                    log(f"{h['name']}: {jid} finished first ({'backup' if j.get('backup') == h['name'] else 'primary'} copy)")
+                j["host"], j["backup"] = h["name"], None
+                j["state"], j["t_end"] = "fetch", time.time()
+                fetch.append(j)
+                continue
+            what = f"failed rc {jr['rc']}" if jr["state"] == "done" else "vanished" if jr["state"] == "lost" else None
+            if what is None:
+                continue
+            if self.drop_copy(j, h["name"]):
+                log(f"{h['name']}: {jid} {what} here; the other copy goes on")
+                continue
+            j["tries"] += 1
+            log(f"{h['name']}: {jid} {what} (try {j['tries']}): {jr.get('err', '')[-300:]}")
+            j["state"], j["host"] = ("failed" if j["tries"] >= MAX_TRIES else "queued"), None
         if fetch:
             lines = []
             for j in fetch:
@@ -752,8 +790,24 @@ class Fleet:
             plan.setdefault(h["name"], []).append(j)
         for name, js in plan.items():
             self.launch(self.hosts[name], js)
+        # backups: with nothing left in the queue, an idle slot runs a copy of the oldest
+        # job still running elsewhere (stragglers on the slower machine end an iteration late)
+        if any(j["state"] == "queued" for j in self.jobs.values()):
+            return
+        for h in sorted(hosts, key=lambda h: h.get("order", 9)):
+            free = self.free_slots(h)
+            if free <= 0:
+                continue
+            cand = sorted([j for j in self.jobs.values() if j["state"] == "running" and j["host"] != h["name"]
+                           and not j.get("backup") and j["kind"] != "train" and not j.get("gpu_now")
+                           and time.time() - j.get("t_start", time.time()) > BACKUP_AFTER],
+                          key=lambda j: j.get("t_start", 0))[:free]
+            if cand:
+                for j in cand:
+                    j["backup"] = h["name"]
+                self.launch(h, cand, backup=True)
 
-    def launch(self, h, js):
+    def launch(self, h, js, backup=False):
         lines, made = [], set()
         try:
             for j in js:
@@ -779,11 +833,16 @@ class Fleet:
             out = ps(h, LAUNCH_PS.replace("%ROOT%", wroot(h)).replace("%IDS%", ",".join(f"'{j['id']}'" for j in js)))
             json.loads(out.strip().splitlines()[-1])
             for j in js:
-                j["t_start"] = time.time()
-            log(f"{h['name']}: started {', '.join(j['id'] + (' (GPU)' if j.get('gpu_now') else '') for j in js)}")
+                if not backup:
+                    j["t_start"] = time.time()
+            log(f"{h['name']}: started {'backup copies of ' if backup else ''}"
+                f"{', '.join(j['id'] + (' (GPU)' if j.get('gpu_now') else '') for j in js)}")
         except Exception as e:
             log(f"{h['name']}: launch failed ({str(e)[:200]})")
             for j in js:
+                if backup:
+                    j["backup"] = None
+                    continue
                 j["state"], j["host"] = "queued", None
                 if isinstance(e, FileNotFoundError):    # a missing input will not appear by retrying
                     j["tries"] += 1
@@ -852,7 +911,8 @@ def status():
     with open(STATE) as fh:
         s = json.load(fh)
     for name, h in s["hosts"].items():
-        run = [j["id"] for j in s["jobs"].values() if j["state"] == "running" and j["host"] == name]
+        run = [j["id"] + ("*" if j.get("backup") == name else "") for j in s["jobs"].values()
+               if j["state"] == "running" and name in (j["host"], j.get("backup"))]
         print(f"{name:8s} {h['state']:5s} {('drained: ' + h['drain']) if h.get('drain') else 'active':24s} running {len(run)}: {' '.join(run)}")
     for p in s["pipes"]:
         st = p["st"]
