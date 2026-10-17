@@ -272,6 +272,7 @@ MAP_NET = None          # optional mapnet.MapPolicy: next map node by the networ
 EVENT_NET_NEOW = False  # the event network also picks Neow's opening option (it learns them in self-play)
 CARD_NET_DECIDES = False  # card rewards by the card network alone (CARD_PRIOR), no deck test
 SHOP_NET = None         # optional shopnet.ShopPolicy: shop purchases by the network (greedy)
+STRAT = None            # optional stratsearch.StratSearch: rest sites by rollouts of the rest of the act
 RUN_VALUE = None        # optional nets.RunValue: the run value network (trained on self-play outcomes)
 VALUE_WEIGHT = 3.0      # graded-score points per floor of predicted further progress
 
@@ -533,6 +534,19 @@ def choose_rest(st, sim=None):
         return ("leave_room", {})
     by = {o.get("option_id"): o for o in opts}
     _REST_PICK.token = None
+    if STRAT is not None and sim is not None and len(opts) > 1:
+        from restnet import option_keys
+        keys = option_keys(st)
+        arms = {k: [_set_rest(k.split(":")[0]), ("choose_option", {"option_index": idx})]
+                + ([_smith_card(tok)] if tok else []) for k, (idx, tok) in keys.items()}
+        scores = STRAT.evaluate(sim, st, arms, tag="rest")
+        if scores:
+            best = max(scores, key=scores.get)
+            idx, tok = keys[best]
+            _LAST_SCORES.v = {"strat": {k: round(v, 2) for k, v in scores.items()}}
+            _LAST_REST.option = best.split(":")[0]
+            _REST_PICK.token = tok
+            return ("choose_option", {"option_index": idx})
     if REST_NET is not None and sim is not None and len(opts) > 1:
         keys, ks, z, _ = REST_NET.scores(sim, st)
         if ks:

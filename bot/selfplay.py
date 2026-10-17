@@ -52,11 +52,21 @@ def sample(pilot, st, acts, temperature, rng):
     return acts[i], float(math.log(max(p[i], 1e-12)))
 
 
+class NullRecorder:
+    """Recorder that keeps nothing (strategic rollouts)."""
+    def __getattr__(self, name):
+        return lambda *a, **k: None
+
+
 def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card_pol=None, card_temp=0.0,
                   rest_pol=None, rest_temp=0.0, event_pol=None, event_temp=0.0, map_pol=None, map_temp=0.0,
-                  record_map=False, shop_pol=None, shop_temp=0.0, record_shop=False):
+                  record_map=False, shop_pol=None, shop_temp=0.0, record_shop=False, st0=None):
+    """st0: start from this state instead of a new run (rollouts from a real decision);
+    then the run stops when it leaves act `acts`."""
     policy.ASCENSION = ascension
-    st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
+    st = st0 if st0 is not None else sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed,
+                                                "ascension": ascension})
+    rec = rec or NullRecorder()
     memo, steps, in_fight, hp0, last = {}, 0, False, None, None
     fights, fight_steps = 0, 0
     boss_dmg, boss_max = 0.0, 0   # sum over boss fights of the share of boss HP removed (a win = 1)

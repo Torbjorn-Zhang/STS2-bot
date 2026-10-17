@@ -146,6 +146,7 @@ def main():
     ap.add_argument("--card-net-decides", action="store_true", help="card rewards by the --card-prior net alone")
     ap.add_argument("--shop-net", default=None, help="shopnet.py model decides shop purchases")
     ap.add_argument("--deck-nets", default=None, help="JSON file for policy.load_deck_nets (e.g. models/frozen/v34.json)")
+    ap.add_argument("--strat", type=int, default=0, help="rest sites by K strategic rollouts per option (stratsearch.py)")
     ap.add_argument("--deck-sample", type=float, default=None,
                     help="RL in the expert bot: card/rest/event/map nets (the --*-net / --card-prior files) sample at this temperature")
     ap.add_argument("--card-prior", default=None, help="card network log-probs added to card reward scores")
@@ -196,6 +197,10 @@ def main():
     if args.deck_nets:
         with open(args.deck_nets) as fh:
             policy.load_deck_nets(json.load(fh))
+    if args.strat:
+        from stratsearch import StratSearch
+        with open(args.deck_nets) as fh:
+            policy.STRAT = StratSearch(json.load(fh), k=args.strat)
     model = None
     if args.model:
         from value import ValueModel
