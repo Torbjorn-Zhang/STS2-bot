@@ -467,9 +467,11 @@ class XDeckRL:
         jobs = []
         for k, s0 in enumerate(range(0, sp["eval_runs"], sp["eval_chunk"])):
             out = f"runs/{self.name}_ev{it}_c{k}.jsonl"
-            argv = self.run_args(min(sp["eval_runs"], s0 + sp["eval_chunk"]), s0, "full", cfg, f"{self.name}_ev{it}_c{k}")
+            rec = f"fleetdata/{self.name}_ev{it}_c{k}_rec.jsonl"   # greedy-play records (value-network data)
+            argv = self.run_args(min(sp["eval_runs"], s0 + sp["eval_chunk"]), s0, "full", cfg, f"{self.name}_ev{it}_c{k}",
+                                 ["--record", rec, "--no-combat-records"])
             jobs.append(fl.add_job(self.name, f"{self.name}{it}_ev{k}", "xeval", sp.get("eval_prio", 0.95), argv,
-                                   self.inputs(models, cfg), [out]))
+                                   self.inputs(models, cfg), [out, rec]))
         self.st["evals"][str(it)] = {"jobs": jobs, "models": models, "selfplay": sp_summary, "t0": time.time()}
 
     def step(self, fl):
@@ -518,6 +520,7 @@ class XDeckRL:
         for it, ev in list(st["evals"].items()):
             if all(fl.jobs[j]["state"] in ("done", "failed") for j in ev["jobs"]):
                 rows = read_rows([fl.jobs[j]["outputs"][0] for j in ev["jobs"] if fl.jobs[j]["state"] == "done"])
+                fl.cleanup(f"fleetdata/{self.name}_ev{it}_c*_rec.jsonl", keep=f"data/xdarchive/{self.name}_ev{it}")
                 with open(os.path.join(HERE, "runs", f"{self.name}_ev{it}.jsonl"), "w") as fh:
                     for r in rows:
                         fh.write(json.dumps(r) + "\n")
