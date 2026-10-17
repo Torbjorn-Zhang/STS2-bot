@@ -127,6 +127,7 @@ def main():
     ap.add_argument("--nodes", type=int, default=400)
     ap.add_argument("--tag", default="act1")
     ap.add_argument("--seed-prefix", default="bot")
+    ap.add_argument("--seed-start", type=int, default=0, help="run seeds prefix_start .. prefix_(n-1) (split work across machines)")
     ap.add_argument("--model", default=None, help="value model (models/value.pkl); default: hand-written evaluation")
     ap.add_argument("--rollouts", default=None, help='JSON rollout config, e.g. {"k":4,"m":3,"turns":2}')
     ap.add_argument("--no-deck-test", action="store_true", help="pick card rewards by the tier list only")
@@ -208,7 +209,7 @@ def main():
 
     os.makedirs(os.path.join(HERE, "runs"), exist_ok=True)
     out_path = os.path.join(HERE, "runs", f"{args.tag}.jsonl")
-    seeds = [f"{args.seed_prefix}_{i}" for i in range(args.n)]
+    seeds = [f"{args.seed_prefix}_{i}" for i in range(args.seed_start, args.n)]
 
     done = {}
     if os.path.exists(out_path):  # resume: keep finished runs
