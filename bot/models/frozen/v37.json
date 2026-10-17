@@ -1,0 +1,1 @@
+{"card": "models/frozen/deckg_card2.pt", "rest": "models/frozen/deckg_rest2.pt", "event": "models/frozen/deckg_event2.pt", "map": "models/frozen/deckg_map2.pt", "shop": "models/frozen/deckg_shop2.pt", "card_decides": true, "neow": true}
