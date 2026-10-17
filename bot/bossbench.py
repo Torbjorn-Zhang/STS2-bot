@@ -26,9 +26,10 @@ from run import _key
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def collect_fights(sim, seed, out_dir, ascension=0, act=2, rollouts=None):
-    """Play a run with the default bot; in `act`, save before every combat node the bot
-    picks (hallway, elite, boss). Returns the list of saved metas."""
+def collect_fights(sim, seed, out_dir, ascension=0, act=2, rollouts=None, min_act=None):
+    """Play a run with the default bot; in acts min_act..act (default: only `act`), save
+    before every combat node the bot picks (hallway, elite, boss). Returns the saved metas."""
+    min_act = act if min_act is None else min_act
     policy.ASCENSION = ascension
     planner = TurnPlanner(sim, rollouts=rollouts)
     st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
@@ -43,15 +44,15 @@ def collect_fights(sim, seed, out_dir, ascension=0, act=2, rollouts=None):
             st = planner.play_combat(st)
             continue
         a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
-        if d == "map_select" and (ctx.get("act") or 1) == act and a[0] == "select_map_node":
+        if d == "map_select" and min_act <= (ctx.get("act") or 1) <= act and a[0] == "select_map_node":
             node = next((c for c in st.get("choices") or [] if c["col"] == a[1]["col"] and c["row"] == a[1]["row"]), {})
             if node.get("type") in ("Monster", "Elite", "Boss"):
-                name = f"{seed}_f{ctx.get('floor')}"
+                name = f"{seed}_a{ctx.get('act')}f{ctx.get('floor')}"
                 path = os.path.join(out_dir, f"{name}.save")
                 if sim.send({"cmd": "write_continue_save", "path": path}).get("success"):
                     p = st.get("player") or {}
                     meta = {"seed": name, "path": path, "node": [node["col"], node["row"]], "room": node["type"],
-                            "act": act, "floor": ctx.get("floor"), "hp": p.get("hp"), "max_hp": p.get("max_hp"),
+                            "act": ctx.get("act"), "floor": ctx.get("floor"), "hp": p.get("hp"), "max_hp": p.get("max_hp"),
                             "deck": p.get("deck_size"), "boss": node["type"]}
                     with open(path + ".json", "w") as fh:
                         json.dump(meta, fh)
@@ -171,6 +172,7 @@ def main():
     ap.add_argument("--leaf-mu", type=float, default=1.0)
     ap.add_argument("--ascension", type=int, default=0)
     ap.add_argument("--act", type=int, default=1, help="collect: which act's boss")
+    ap.add_argument("--min-act", type=int, default=None, help="collect-fights: also save fights from this act on")
     ap.add_argument("--subset", default=None, help="'even' or 'odd' seeds only (train/validation split)")
     ap.add_argument("--boss", default=None, help="only fights against this boss (name)")
     ap.add_argument("--deck-nets", default=None, help='collect: JSON for policy.load_deck_nets (decks built like v33)')
@@ -185,7 +187,8 @@ def main():
         os.makedirs(bench_dir, exist_ok=True)
         seeds = [f"fb_{args.tag}_{i}" for i in range(args.n)]
         roll = json.loads(args.rollouts) if args.rollouts else None
-        metas = [m for part in parallel(seeds, lambda sim, s: collect_fights(sim, s, bench_dir, args.ascension, args.act, roll),
+        metas = [m for part in parallel(seeds, lambda sim, s: collect_fights(sim, s, bench_dir, args.ascension, args.act, roll,
+                                                                             args.min_act),
                                         args.workers) for m in part]
         print(json.dumps({"saved": len(metas), "of_runs": len(seeds), "dir": bench_dir,
                           "rooms": {k: sum(1 for m in metas if m["room"] == k) for k in ("Monster", "Elite", "Boss")}}))
