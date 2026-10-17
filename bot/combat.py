@@ -39,6 +39,11 @@ W = {
     "danger_turns": 1.5,  # danger line = this many turns of incoming damage ...
     "danger_floor": 15,   # ... counting at least this much per turn    # announced attacks kill us at the end of this turn (unblocked >= HP)
     "rollout_tiebreak": 0.01,   # weight of the leaf evaluation added to rollout means (breaks ties)
+    # graded rollout deaths: a rollout that dies scores ROLLOUT_DEATH plus these per turn it
+    # survived and per share of the root's enemy HP it removed, so in fights where every line
+    # dies within the horizon the search still prefers dying later with the enemy lower
+    "death_turn": 0.0,
+    "death_dmg": 0.0,
     "steam_lethal": 0.0,    # Waterfall Giant: penalty when its death blast (Steam Eruption) would kill us (80: 9 vs 7 of 44 WG fights)
 }
 PLAYER_DEBUFFS = ("Vulnerable", "Weak", "Frail")
@@ -509,11 +514,17 @@ class TurnPlanner:
                 out[i] = ((st.get("player") or {}).get("hp") or 0) + 2.0 if won else DEATH_VALUE
         return out
 
+    def _death_value(self, root, seen, future):
+        e0 = sum(e.get("hp") or 0 for e in alive(root))
+        e1 = sum(e.get("hp") or 0 for e in alive(seen)) if seen is not None else e0
+        return ROLLOUT_DEATH + W["death_turn"] * future + W["death_dmg"] * max(0.0, (e0 - e1) / max(1, e0))
+
     def _rollout(self, root, snap, last, seed, turns, pilot_nodes=0, lam=0.0):
         self._restore(snap)
         self.sim.send({"cmd": "determinize", "seed": seed})
         s = self.sim.act(last[0], **last[1])
         future = 1 if last[0] == "end_turn" else 0
+        seen = s if s.get("enemies") is not None else None   # last state that shows the enemies
         if pilot_nodes:
             s = self._planner_rollout(s, future, turns, pilot_nodes)
             self.stats["rollouts"] += 1
@@ -538,11 +549,13 @@ class TurnPlanner:
             if a[0] == "end_turn":
                 future += 1
             s = s2
+            if s.get("enemies") is not None:
+                seen = s
         self.stats["rollouts"] += 1
         if s.get("type") == "error":
             return None
         if s.get("decision") == "game_over" and not s.get("victory"):
-            return ROLLOUT_DEATH
+            return self._death_value(root, seen, future)
         sc = evaluate(root, s)
         if lam and ROLLOUT_VALUE is not None and s.get("decision") in ("combat_play", "card_select"):
             hp = (s.get("player") or {}).get("hp") or 0

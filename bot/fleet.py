@@ -351,10 +351,12 @@ class Bench:
             for c, cfg in sp["configs"].items():
                 for k, files in sorted(shards.items()):
                     out = f"runs/{self.name}_{c}_s{k}.jsonl"
-                    roll = {a: v for a, v in cfg.items() if a != "nodes"}   # "nodes": the planner's search size
+                    # "nodes": the planner's search size, "weights": combat.W overrides
+                    roll = {a: v for a, v in cfg.items() if a not in ("nodes", "weights")}
                     argv = ["bossbench.py", "eval", "--tag", sp["bench"], "--rollouts", json.dumps(roll, separators=(",", ":")),
                             "--reps", sp.get("reps", 1), "--shard", f"{k}/{sp['shards']}", "--workers", "%W%", "--out", out]
                     argv += ["--nodes", cfg["nodes"]] if "nodes" in cfg else []
+                    argv += ["--weights", json.dumps(cfg["weights"], separators=(",", ":"))] if "weights" in cfg else []
                     argv += (["--room", sp["room"]] if sp.get("room") else []) + sp.get("extra", [])
                     jobs.append(fl.add_job(self.name, f"{self.name}_{c}_s{k}", "bench", sp.get("prio", 0.8), argv, files, [out]))
             st.update(phase="running", jobs=jobs, t0=time.time())

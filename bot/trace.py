@@ -1,6 +1,7 @@
 """Turn-by-turn trace of the bot's costly fights, for diagnosing combat play.
 
 usage: trace.py SEED [--acts 2] [--min-loss 15] [--ascension 0]
+       trace.py - --save data/bossbench_act2a10/X.save   (one bench fight from its save)
 Plays one run with the default bot and prints, for every fight that cost at least
 --min-loss HP (or killed the bot), each turn: HP/block/energy, hand, enemies with
 intents, and the actions the planner executed.
@@ -36,13 +37,23 @@ def main():
     ap.add_argument("--nodes", type=int, default=400)
     ap.add_argument("--rollouts", default=None, help='JSON, e.g. {"k":4,"m":3,"turns":2}')
     ap.add_argument("--only", default=None, help="only print fights in this room type (Boss, Elite, ...)")
+    ap.add_argument("--save", default=None, help="trace the fight of this bench save (bossbench.py) instead of a run")
     args = ap.parse_args()
     sim = engine.fresh_sim()
     planner = TurnPlanner(sim, max_nodes=args.nodes, rollouts=json.loads(args.rollouts) if args.rollouts else None)
     log = []
     real_act = sim.act
 
-    st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": args.seed, "ascension": args.ascension})
+    if args.save:
+        import os
+        with open(args.save + ".json") as fh:
+            meta = json.load(fh)
+        sim.send({"cmd": "load_save", "path": os.path.abspath(args.save)})
+        col, row = meta.get("node") or meta["boss_node"]
+        st = sim.act("select_map_node", col=col, row=row)
+        args.min_loss, args.acts = -999, 99
+    else:
+        st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": args.seed, "ascension": args.ascension})
     dead, memo = {}, {}
     for _ in range(4000):
         ctx = st.get("context") or {}
@@ -76,6 +87,8 @@ def main():
             hp1 = (st.get("player") or {}).get("hp") or 0
             if (args.only is None or room == args.only) and (st.get("decision") == "game_over" or (hp0 or 0) - hp1 >= args.min_loss):
                 print("\n".join(lines) + f"\n   => hp {hp0} -> {hp1 if st.get('decision') != 'game_over' else 'DEAD'}\n")
+            if args.save:
+                break
             continue
         a = policy.decide(sim, st, avoid=dead.get(_key(st), ()), memo=memo)
         nxt = sim.act(a[0], **a[1])
