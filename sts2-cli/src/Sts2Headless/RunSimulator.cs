@@ -2475,6 +2475,7 @@ public class RunSimulator
                     ["name"] = _loc.Power(pw.Id.Entry),
                     ["description"] = _loc.Bilingual("powers", pw.Id.Entry + ".description"),
                     ["amount"] = pw.Amount,
+                    ["type"] = pw.TypeForCurrentAmount.ToString(),
                 }).ToList();
 
                 return new Dictionary<string, object?>
@@ -2497,6 +2498,7 @@ public class RunSimulator
             ["name"] = _loc.Power(pw.Id.Entry),
             ["description"] = _loc.Bilingual("powers", pw.Id.Entry + ".description"),
             ["amount"] = pw.Amount,
+                    ["type"] = pw.TypeForCurrentAmount.ToString(),
         }).ToList();
 
         var result = new Dictionary<string, object?>
