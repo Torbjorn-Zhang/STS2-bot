@@ -59,6 +59,19 @@ cd sts2-cli && ../.venv/bin/python -m pytest -q      # engine tests
 cd ../harness && ../.venv/bin/python reuse_check.py 4 Release
 ```
 
+## Training on several machines
+
+`bot/fleet.py` spreads self-play, evaluation and network updates over Windows machines listed in `deploy/fleet.json`. A Mac or Linux coordinator only schedules jobs and copies files.
+
+- **What a machine needs:** OpenSSH, a key login, and the game DLLs in `D:\sts2\sts2-cli\lib`. Copy code there with `deploy/winsync.sh HOST`.
+- **How jobs run:** each job is started over SSH at below-normal priority, in several processes per machine. One Python process stops scaling at about 5 worker threads, because of the GIL.
+- **Machines can leave at any time:**
+  - A machine that stops answering has its jobs requeued elsewhere, and rejoins when it answers again.
+  - `fleet.py drain HOST`, or `STS2-pause.cmd` on that machine, stops its jobs at once.
+  - A machine whose GPU another program keeps busy steps aside by itself.
+- **Usage:** `fleet.py run` starts the coordinator. Submit work with `fleet.py deckrl|xdeckrl|expert|bench ...` and check it with `fleet.py status`.
+- **CPU vs GPU:** `bot/benchcompute.py` measures whether a machine is worth it. The game engine takes about 80% of a worker's time and network forward passes about 5%, so CPU cores set the speed. A GPU only shortens the per-iteration network update (about 15 s).
+
 ## Credits
 
 - [wuhao21/sts2-cli](https://github.com/wuhao21/sts2-cli) (MIT): the headless engine adapter this builds on.
