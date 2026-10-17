@@ -33,7 +33,10 @@ W = {
     "potion_late_hp": 0.65, # act-2+ hallway fights: potions allowed below this HP fraction
     "potions_any_fight_asc": 99,  # from this ascension potions are considered in every fight
     "eot_hand": 1,      # count end-of-turn damage / HP loss of cards left in hand (Beckon, Burn)
-    "lethal": 150.0,    # announced attacks kill us at the end of this turn (unblocked >= HP)
+    "lethal": 150.0,
+    "danger": 0.0,        # extra weight per HP below the danger line (0 = off)
+    "danger_turns": 1.5,  # danger line = this many turns of incoming damage ...
+    "danger_floor": 15,   # ... counting at least this much per turn    # announced attacks kill us at the end of this turn (unblocked >= HP)
     "rollout_tiebreak": 0.01,   # weight of the leaf evaluation added to rollout means (breaks ties)
     "steam_lethal": 0.0,    # Waterfall Giant: penalty when its death blast (Steam Eruption) would kill us (80: 9 vs 7 of 44 WG fights)
 }
@@ -208,6 +211,12 @@ def evaluate(root, st):
     if d == "combat_play" and hp > 0 and taken >= hp:
         # the linear HP term let a big power (Demon Form) outscore surviving the turn
         score -= W["lethal"]
+    if W["danger"] and d == "combat_play":
+        # HP is worth more when little is left: below what the enemies hit for in about a
+        # turn and a half, each HP counts extra (boss races: attack instead of Defend at 42
+        # HP into 24 damage, then dead two turns later)
+        danger = W["danger_turns"] * max(incoming_damage(st), W["danger_floor"])
+        score -= W["danger"] * max(0.0, danger - (hp - taken))
     root_alive, now_alive = alive(root), alive(st)
     room = (root.get("context") or {}).get("room_type")
     late = ((root.get("context") or {}).get("act") or 1) >= 2 and W["late_hallway_big"]
