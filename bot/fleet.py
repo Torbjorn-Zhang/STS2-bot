@@ -508,7 +508,7 @@ class XDeckRL:
                 log(f"{self.name}: iteration {it} trained on {j['host']} ({j['result'].get('device')}, "
                     f"{j['result']['timing'].get('total')} s)")
                 self.start_eval(fl, it, new, st["sp"][str(it)].get("summary"))
-                fl.cleanup(f"fleetdata/{self.name}_it{it}_c*.jsonl")
+                fl.cleanup(f"fleetdata/{self.name}_it{it}_c*.jsonl", keep=f"data/xdarchive/{self.name}_it{it}")
                 st["cur"] = new
                 if it + 1 < sp["start"] + sp["iters"]:
                     st["it"] = it + 1
@@ -580,11 +580,18 @@ class Fleet:
                           "host": None, "result": None}
         return jid
 
-    def cleanup(self, pattern):
+    def cleanup(self, pattern, keep=None):
+        """Delete files matching pattern on every host; on this Mac move them to `keep`
+        (a directory under bot/) instead when given."""
         for h in self.hosts.values():
             h["clean"].append(pattern)
+        if keep:
+            os.makedirs(os.path.join(HERE, keep), exist_ok=True)
         for p in glob.glob(os.path.join(HERE, pattern)):
-            os.remove(p)
+            if keep:
+                os.replace(p, os.path.join(HERE, keep, os.path.basename(p)))
+            else:
+                os.remove(p)
         for h in self.hosts.values():
             for rel in [r for r in h["files"] if fnmatch.fnmatch(r, pattern)]:
                 del h["files"][rel]
