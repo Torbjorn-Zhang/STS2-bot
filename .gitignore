@@ -27,3 +27,4 @@ bot/models/*.pkl
 # trained networks: only the frozen ones used by evaluated configs are kept in git
 bot/models/*.pt
 !bot/models/frozen/
+bot/fleetdata/

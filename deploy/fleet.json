@@ -1,0 +1,6 @@
+{
+  "hosts": {
+    "pc5070":  {"ssh": "pc5070",  "root": "D:/sts2", "slots": 8, "workers": 2, "gpu": true, "order": 1, "yield_gpu": true},
+    "lap3070": {"ssh": "lap3070", "root": "D:/sts2", "slots": 8, "workers": 2, "gpu": true, "order": 2, "yield_gpu": false}
+  }
+}

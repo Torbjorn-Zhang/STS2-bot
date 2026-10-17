@@ -746,9 +746,10 @@ def rl_dataset(runs, enc):
 
 def grouped(logits, owner, sizes):
     n, m = len(sizes), int(sizes.max())
-    pad = torch.full((n, m), -1e9)
+    dev = logits.device
+    pad = torch.full((n, m), -1e9, device=dev)
     col = np.concatenate([np.arange(s) for s in sizes])
-    pad = pad.index_put((torch.as_tensor(owner), torch.as_tensor(col)), logits)
+    pad = pad.index_put((torch.as_tensor(owner, device=dev), torch.as_tensor(col, device=dev)), logits)
     return pad
 
 
@@ -948,12 +949,16 @@ class CardPolicy:
 def train_card_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, batch=256, clip=0.2, ent=0.01):
     """PPO on card reward choices in self-play (the RL stage for deck building). Return: the
     run's final progress (floors), baseline: mean final progress of runs at the same
-    (act, floor) in this data."""
+    (act, floor) in this data. NETS_DEVICE=cuda trains on the GPU."""
+    t0 = time.time()
+    dev = torch.device(os.environ.get("NETS_DEVICE", "cpu"))
     blob = torch.load(init, weights_only=False)
     enc = RunEncoder.from_json(blob["enc"])
     model = PolicyNet(enc.dim, len(enc.cards) + 2, blob["hidden"])
     model.load_state_dict(blob["state"])
+    model.to(dev)
     runs = load_runs(paths)
+    t_load = time.time()
     items, by_bucket = [], defaultdict(list)
     for rows in runs.values():
         fin = final_progress(rows[-1])
@@ -980,6 +985,7 @@ def train_card_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, batch=25
     lp_old, adv = np.asarray(lp_old, dtype=np.float32), np.asarray(adv, dtype=np.float32)
     print("card rl decisions", len(chosen), "runs", len(runs), "adv std", round(float(adv.std()), 3), flush=True)
     adv = (adv - adv.mean()) / (adv.std() + 1e-6)
+    t_enc = time.time()
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     for ep in range(epochs):
         order = np.random.RandomState(ep).permutation(len(chosen))
@@ -989,12 +995,13 @@ def train_card_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, batch=25
             for k, d in enumerate(sel):
                 a_idx.extend(range(start[d], start[d + 1]))
                 owner.extend([k] * (start[d + 1] - start[d]))
-            logits = model(torch.from_numpy(S[sel]), torch.from_numpy(A[a_idx]), torch.as_tensor(owner))
+            logits = model(torch.from_numpy(S[sel]).to(dev), torch.from_numpy(A[a_idx]).to(dev),
+                           torch.as_tensor(owner, device=dev))
             sizes = np.asarray([start[d + 1] - start[d] for d in sel])
             logp = F.log_softmax(grouped(logits / temperature, np.asarray(owner), sizes), dim=1)
-            lp_new = logp.gather(1, torch.as_tensor(chosen[sel])[:, None]).squeeze(1)
-            ratio = torch.exp(lp_new - torch.from_numpy(lp_old[sel]))
-            ad = torch.from_numpy(adv[sel])
+            lp_new = logp.gather(1, torch.as_tensor(chosen[sel], device=dev)[:, None]).squeeze(1)
+            ratio = torch.exp(lp_new - torch.from_numpy(lp_old[sel]).to(dev))
+            ad = torch.from_numpy(adv[sel]).to(dev)
             pg = -torch.min(ratio * ad, ratio.clamp(1 - clip, 1 + clip) * ad).mean()
             entropy = -(logp.exp() * logp.clamp(min=-30)).sum(1).mean()
             loss = pg - ent * entropy
@@ -1007,7 +1014,11 @@ def train_card_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, batch=25
             stats["clipfrac"] += ((ratio - 1).abs() > clip).float().mean().item()
             nb += 1
         print(json.dumps({"epoch": ep, **{k: round(v / nb, 4) for k, v in stats.items()}}), flush=True)
+    t_train = time.time()
+    model.to("cpu")
     torch.save({**blob, "state": model.state_dict(), "rl_from": init, "rl_data": paths}, out)
+    print(json.dumps({"timing": {"device": str(dev), "load_s": round(t_load - t0, 2), "encode_s": round(t_enc - t_load, 2),
+                                 "train_s": round(t_train - t_enc, 2)}}), flush=True)
     print("saved", out)
 
 

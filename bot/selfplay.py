@@ -257,6 +257,9 @@ def main():
     ap.add_argument("--shop-policy", default=None, help="shopnet.py model for shops (default: rules)")
     ap.add_argument("--shop-temperature", type=float, default=0.0)
     ap.add_argument("--record-shop", action="store_true", help="record the rules' shop choices (imitation data)")
+    ap.add_argument("--seed-start", type=int, default=0, help="first seed index (runs split across machines)")
+    ap.add_argument("--no-combat-records", action="store_true", help="skip combat-step records (deck RL needs none)")
+    ap.add_argument("--no-record", action="store_true", help="record nothing (evaluation)")
     args = ap.parse_args()
     import random
     import torch
@@ -286,18 +289,24 @@ def main():
         from mapnet import MapPolicy
         map_pol = MapPolicy(args.map_policy)
     pilot = NetPolicy(args.policy)
-    seeds = [f"{args.seed_prefix}_{i}" for i in range(args.n)]
+    seeds = [f"{args.seed_prefix}_{i}" for i in range(args.seed_start, args.seed_start + args.n)]
     lock = threading.Lock()
     results = []
     t0 = time.time()
 
     def worker(chunk):
         sim = fresh_sim()
-        rng = random.Random(chunk[0] if chunk else 0)
         for s in chunk:
             sim = maybe_recycle(sim)
-            rec = GameRecorder(args.out, lock, s, {"tag": "selfplay", "asc": args.ascension, "T": args.temperature,
-                                                   "policy": os.path.basename(args.policy)})
+            # one RNG per run: a run plays the same whatever the worker split or machine
+            rng = random.Random(s)
+            if args.no_record:
+                rec = NullRecorder()
+            else:
+                rec = GameRecorder(args.out, lock, s, {"tag": "selfplay", "asc": args.ascension, "T": args.temperature,
+                                                       "policy": os.path.basename(args.policy)})
+                if args.no_combat_records:
+                    rec.combat_step = lambda *a, **k: None
             try:
                 r = play_fast_run(sim, s, pilot, args.ascension, args.acts, rec, args.temperature, rng,
                                   card_pol, args.card_temperature, rest_pol, args.rest_temperature,
