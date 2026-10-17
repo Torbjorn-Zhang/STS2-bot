@@ -1,0 +1,1 @@
+{"card": "models/frozen/deckh_card4.pt", "rest": "models/frozen/deckh_rest4.pt", "event": "models/frozen/deckh_event4.pt", "map": "models/frozen/deckh_map4.pt", "shop": "models/frozen/deckh_shop4.pt", "card_decides": true, "neow": true}
