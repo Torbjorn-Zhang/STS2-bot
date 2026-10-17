@@ -10,11 +10,15 @@ Writes models/policy_rl<i>.pt, data/rl/it<i>.jsonl and runs/rlloop.jsonl (one li
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
+# low CPU priority: nice on Linux/macOS; on Windows the launcher starts us at low priority
+# and child processes inherit it
+NICE = ["nice", "-n", "19"] if shutil.which("nice") else []
 
 
 def sh(args, log):
@@ -47,15 +51,15 @@ def main():
         data = os.path.join("data", "rl", f"it{it}.jsonl")
         if os.path.exists(os.path.join(HERE, data)):
             os.remove(os.path.join(HERE, data))
-        sp = ["nice", "-n", "19", PY, "selfplay.py", str(args.runs), "--policy", cur, "--temperature",
+        sp = NICE + [PY, "selfplay.py", str(args.runs), "--policy", cur, "--temperature",
               str(args.temperature), "--workers", str(args.workers), "--seed-prefix", f"rl{it}", "--out", data]
         if args.card_policy:
             sp += ["--card-policy", args.card_policy]
         play = json.loads(sh(sp, log)[-1])
         new = os.path.join("models", f"policy_rl{it}.pt")
-        sh(["nice", "-n", "19", PY, "nets.py", "rl", data, "--init", cur, "--out", new, "--temperature",
+        sh(NICE + [PY, "nets.py", "rl", data, "--init", cur, "--out", new, "--temperature",
             str(args.temperature), "--epochs", str(args.epochs)], log)
-        bench = json.loads(sh(["nice", "-n", "19", PY, "pilotbench.py", "--tag", args.bench, "--reps", str(args.bench_reps),
+        bench = json.loads(sh(NICE + [PY, "pilotbench.py", "--tag", args.bench, "--reps", str(args.bench_reps),
                                "--pilots", f"quick,net:{cur},net:{new}"], log)[-1])
         row = {"iter": it, "from": cur, "to": new, "selfplay": play, "bench": bench}
         with open(os.path.join(HERE, "runs", "rlloop.jsonl"), "a") as fh:

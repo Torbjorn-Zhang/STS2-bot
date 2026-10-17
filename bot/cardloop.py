@@ -10,11 +10,15 @@ runs' final progress, then a greedy evaluation on fixed seeds (paired across ite
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
+# low CPU priority: nice on Linux/macOS; on Windows the launcher starts us at low priority
+# and child processes inherit it
+NICE = ["nice", "-n", "19"] if shutil.which("nice") else []
 
 
 def sh(args, log):
@@ -34,7 +38,7 @@ def evaluate(combat, card, runs, workers, log, rest=None, tag="card", event=None
     out = os.path.join("data", "rl", f"{tag}_eval.jsonl")
     if os.path.exists(os.path.join(HERE, out)):
         os.remove(os.path.join(HERE, out))
-    res = json.loads(sh(["nice", "-n", "19", PY, "selfplay.py", str(runs), "--policy", combat, "--temperature", "0",
+    res = json.loads(sh(NICE + [PY, "selfplay.py", str(runs), "--policy", combat, "--temperature", "0",
                          "--card-policy", card, "--workers", str(workers), "--seed-prefix", "cardeval", "--out", out]
                         + (["--rest-policy", rest] if rest else []) + (["--event-policy", event] if event else [])
                         + (["--map-policy", mapp] if mapp else []) + (["--shop-policy", shop] if shop else []) + CAL,
@@ -76,7 +80,7 @@ def main():
         data = os.path.join("data", "rl", f"{args.tag}_it{it}.jsonl")
         if os.path.exists(os.path.join(HERE, data)):
             os.remove(os.path.join(HERE, data))
-        play = json.loads(sh(["nice", "-n", "19", PY, "selfplay.py", str(args.runs), "--policy", args.combat,
+        play = json.loads(sh(NICE + [PY, "selfplay.py", str(args.runs), "--policy", args.combat,
                               "--temperature", "0", "--card-policy", cur, "--card-temperature", str(args.temperature),
                               "--workers", str(args.workers), "--seed-prefix", f"{args.tag}{it}", "--out", data]
                              + (["--rest-policy", rest, "--rest-temperature", str(args.temperature)] if rest else [])
@@ -85,29 +89,29 @@ def main():
                              + (["--shop-policy", shop, "--shop-temperature", str(args.temperature)] if shop else [])
                              + CAL, log)[-1])
         if args.value_baseline:
-            sh(["nice", "-n", "19", PY, "nets.py", "baseline", data], log)
+            sh(NICE + [PY, "nets.py", "baseline", data], log)
         new = os.path.join("models", f"{args.tag}_card{it}.pt")
-        sh(["nice", "-n", "19", PY, "nets.py", "cardrl", data, "--init", cur, "--out", new, "--temperature",
+        sh(NICE + [PY, "nets.py", "cardrl", data, "--init", cur, "--out", new, "--temperature",
             str(args.temperature)], log)
         new_rest = None
         if rest:
             new_rest = os.path.join("models", f"{args.tag}_rest{it}.pt")
-            sh(["nice", "-n", "19", PY, "restnet.py", "rl", data, "--init", rest, "--out", new_rest, "--temperature",
+            sh(NICE + [PY, "restnet.py", "rl", data, "--init", rest, "--out", new_rest, "--temperature",
                 str(args.temperature)], log)
         new_event = None
         if event:
             new_event = os.path.join("models", f"{args.tag}_event{it}.pt")
-            sh(["nice", "-n", "19", PY, "eventnet.py", "rl", data, "--init", event, "--out", new_event, "--temperature",
+            sh(NICE + [PY, "eventnet.py", "rl", data, "--init", event, "--out", new_event, "--temperature",
                 str(args.temperature)], log)
         new_map = None
         if mapp:
             new_map = os.path.join("models", f"{args.tag}_map{it}.pt")
-            sh(["nice", "-n", "19", PY, "mapnet.py", "rl", data, "--init", mapp, "--out", new_map, "--temperature",
+            sh(NICE + [PY, "mapnet.py", "rl", data, "--init", mapp, "--out", new_map, "--temperature",
                 str(args.temperature)], log)
         new_shop = None
         if shop:
             new_shop = os.path.join("models", f"{args.tag}_shop{it}.pt")
-            sh(["nice", "-n", "19", PY, "shopnet.py", "rl", data, "--init", shop, "--out", new_shop, "--temperature",
+            sh(NICE + [PY, "shopnet.py", "rl", data, "--init", shop, "--out", new_shop, "--temperature",
                 str(args.temperature)], log)
         ev = evaluate(args.combat, new, args.eval_runs, args.workers, log, new_rest or rest, args.tag, new_event or event,
                       new_map or mapp, new_shop or shop)
