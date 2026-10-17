@@ -141,6 +141,7 @@ def main():
     ap.add_argument("--no-deck-test", action="store_true", help="pick card rewards by the tier list only")
     ap.add_argument("--record", default=None, help="append self-play records to this .jsonl (record.py)")
     ap.add_argument("--no-combat-records", action="store_true", help="--record without combat steps (deck RL)")
+    ap.add_argument("--weights", default=None, help="JSON overrides for combat.W (e.g. graded rollout deaths)")
     ap.add_argument("--explore", type=float, default=0.0, help="chance of a random card reward pick (data collection)")
     ap.add_argument("--net-rollouts", default=None, help="policy network (nets.py) as the planner's rollout policy")
     ap.add_argument("--net-decktest", default=None, help="policy network as the deck test's pilot")
@@ -166,6 +167,9 @@ def main():
     args = ap.parse_args()
     if args.no_deck_test:
         policy.DECK_TEST = False
+    if args.weights:
+        import combat
+        combat.W.update(json.loads(args.weights))
     if args.net_rollouts or args.net_decktest or args.run_value or args.rollout_value or args.rollout_xvalue or args.rest_net \
             or args.event_net or args.card_prior or args.map_net or args.shop_net:
         import torch

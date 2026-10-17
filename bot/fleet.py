@@ -433,7 +433,8 @@ class XDeckRL:
 
     def run_args(self, end, start, prefix, cfg, tag, extra=()):
         return ["run.py", end, "--seed-start", start, "--acts", 3, "--ascension", 10, "--seed-prefix", prefix,
-                "--workers", "%W%", "--rollouts", self.spec["rollouts"], "--deck-nets", cfg, "--tag", tag] + list(extra)
+                "--workers", "%W%", "--rollouts", self.spec["rollouts"], "--deck-nets", cfg, "--tag", tag] + \
+            list(self.spec.get("extra", [])) + list(extra)
 
     def inputs(self, models, cfg):
         return [cfg] + [m for m in models.values() if m]
@@ -903,6 +904,7 @@ def main():
     ap.add_argument("--room", default=None)
     ap.add_argument("--reps", type=int, default=1)
     ap.add_argument("--shards", type=int, default=8)
+    ap.add_argument("--extra", default=None, help='expert/xdeckrl: JSON list of extra run.py arguments')
     args = ap.parse_args()
     if args.cmd == "run":
         lock = os.path.join(FLEET, "coordinator.pid")
@@ -954,7 +956,7 @@ def main():
             print(f"{len(seeds)} seeds missing")
         submit("expert", {"tag": args.tag, "deck_nets": args.deck_nets, "n": args.n, "start": 0, "chunk": args.expert_chunk,
                           "prefix": args.prefix, "rollouts": args.rollouts, "seeds": seeds,
-                          "prio": 1.5 if args.prio is None else args.prio})
+                          "prio": 1.5 if args.prio is None else args.prio, "extra": json.loads(args.extra or "[]")})
     elif args.cmd == "xdeckrl":
         with open(os.path.join(HERE, args.deck_nets)) as fh:
             cfg = json.load(fh)
@@ -962,7 +964,8 @@ def main():
         submit("xdeckrl", {"tag": args.tag, "start": args.start, "iters": args.iters, "runs": args.runs,
                            "chunk": args.expert_chunk, "eval_runs": args.n, "eval_chunk": args.expert_chunk,
                            "temperature": args.temperature, "rollouts": args.rollouts, "init": init,
-                           "eval_init": args.eval_init, "kinds": ["card", "rest", "event", "map", "shop"]})
+                           "eval_init": args.eval_init, "kinds": ["card", "rest", "event", "map", "shop"],
+                           "extra": json.loads(args.extra or "[]")})
     elif args.cmd == "cancel":
         submit("cancel", {"tag": args.tag})
     elif args.cmd == "bench":
