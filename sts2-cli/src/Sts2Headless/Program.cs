@@ -87,7 +87,7 @@ class Program
             {
                 var cmd = JsonSerializer.Deserialize<JsonElement>(line);
                 // Commands that change game state are logged for snapshot/restore replay.
-                if (cmd.TryGetProperty("cmd", out var c) && c.GetString() is "action" or "set_player" or "enter_room" or "set_draw_order" or "determinize")
+                if (cmd.TryGetProperty("cmd", out var c) && c.GetString() is "action" or "set_player" or "enter_room" or "set_draw_order" or "determinize" or "determinize_run")
                     sim.RecordCommand(line);
                 result = HandleCommand(sim, cmd);
             }
@@ -209,6 +209,9 @@ class Program
 
             case "determinize":
                 return sim.Determinize(cmd.TryGetProperty("seed", out var ds) ? ds.GetUInt64() : 0UL);
+
+            case "determinize_run":
+                return sim.DeterminizeRun(cmd.TryGetProperty("seed", out var drs) ? drs.GetUInt64() : 0UL);
 
             case "write_continue_save":
             {

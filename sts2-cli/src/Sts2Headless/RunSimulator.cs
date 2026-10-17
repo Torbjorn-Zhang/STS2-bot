@@ -577,6 +577,113 @@ public class RunSimulator
         catch (Exception ex) { return ErrorWithTrace("Determinize failed", ex); }
     }
 
+    /// <summary>
+    /// Make the hidden future of the whole run random but reproducible, for strategic
+    /// rollouts (play the rest of an act from this state) that must not peek: reseed every
+    /// run and player RNG (rewards, shops, transforms, "?" rooms, chests, combat), shuffle
+    /// the not-yet-visited encounter / elite / event queues of this and later acts, and the
+    /// relic grab bags. Recorded in the command log like determinize, so snapshots stay exact.
+    /// </summary>
+    public Dictionary<string, object?> DeterminizeRun(ulong seed)
+    {
+        try
+        {
+            if (_runState == null) return Error("No run in progress");
+            var rnd = new System.Random(unchecked((int)(seed ^ (seed >> 32))));
+            int rngs = 0, lists = 0;
+            foreach (RunRngType t in Enum.GetValues(typeof(RunRngType)))
+            {
+                if (t == RunRngType.UpFront) continue;
+                var fresh = new Rng(unchecked(seed * 0x9E3779B97F4A7C15UL + (ulong)t + 101));
+                try { _runState.Rng.GetRng(t).LoadFromSerializable(fresh.ToSerializable()); rngs++; } catch { }
+            }
+            foreach (var player in _runState.Players)
+            {
+                foreach (PlayerRngType t in Enum.GetValues(typeof(PlayerRngType)))
+                {
+                    var fresh = new Rng(unchecked(seed * 0xC2B2AE3D27D4EB4FUL + (ulong)t + 7));
+                    try { player.PlayerRng.GetRng(t).LoadFromSerializable(fresh.ToSerializable()); rngs++; } catch { }
+                }
+                lists += ShuffleGrabBags(player, rnd);
+            }
+            lists += ShuffleGrabBags(_runState, rnd);
+            int cur = _runState.CurrentActIndex;
+            var dbg = new List<string>();
+            for (int a = cur; a < _runState.Acts.Count; a++)
+            {
+                var act = a == cur ? (object)_runState.Act : _runState.Acts[a];
+                var rf = FindField(act.GetType(), "_rooms");
+                var rooms = rf?.GetValue(act);
+                dbg.Add($"{a}:{act.GetType().Name}:{(rf == null ? "nofield" : rooms == null ? "null" : "ok")}");
+                if (rooms == null) continue;
+                foreach (var (listName, visitedName) in new[] {
+                    ("normalEncounters", "normalEncountersVisited"), ("eliteEncounters", "eliteEncountersVisited"),
+                    ("events", "eventsVisited") })
+                {
+                    var list = FindField(rooms.GetType(), listName)?.GetValue(rooms) as System.Collections.IList;
+                    var visitedField = FindField(rooms.GetType(), visitedName);
+                    int visited = visitedField?.GetValue(rooms) is int v ? v : 0;
+                    if (list == null || list.Count < 2) continue;
+                    int start = (a == cur && visited < list.Count) ? visited : 0;
+                    // keep the weak / strong structure (the first hallways of an act are weak
+                    // encounters): shuffle within each group of positions
+                    foreach (var weak in new[] { true, false })
+                    {
+                        var idx = new List<int>();
+                        for (int i = start; i < list.Count; i++)
+                            if (!(list[i] is EncounterModel em) || em.IsWeak == weak)
+                                if (list[i] is EncounterModel || weak) idx.Add(i);
+                        for (int k = idx.Count - 1; k > 0; k--)
+                        {
+                            int m = rnd.Next(k + 1);
+                            (list[idx[k]], list[idx[m]]) = (list[idx[m]], list[idx[k]]);
+                        }
+                    }
+                    lists++;
+                }
+            }
+            return new Dictionary<string, object?> { ["type"] = "ok", ["rngs"] = rngs, ["lists"] = lists, ["acts"] = dbg };
+        }
+        catch (Exception ex) { return ErrorWithTrace("DeterminizeRun failed", ex); }
+    }
+
+    /// <summary>A private instance field declared on t or any of its base types.</summary>
+    private static System.Reflection.FieldInfo? FindField(Type? t, string name)
+    {
+        for (; t != null; t = t.BaseType)
+        {
+            var f = t.GetField(name, NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.DeclaredOnly);
+            if (f != null) return f;
+        }
+        return null;
+    }
+
+    /// <summary>Shuffle every RelicGrabBag held by obj (fields or properties): each rarity deque.</summary>
+    private static int ShuffleGrabBags(object obj, System.Random rnd)
+    {
+        int n = 0;
+        var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+        var bags = new List<object>();
+        for (var t = obj.GetType(); t != null; t = t.BaseType)
+            foreach (var f in t.GetFields(flags | System.Reflection.BindingFlags.DeclaredOnly))
+                if (f.FieldType.Name == "RelicGrabBag" && f.GetValue(obj) is object b) bags.Add(b);
+        foreach (var bag in bags.Distinct())
+        {
+            if (FindField(bag.GetType(), "_deques")?.GetValue(bag) is System.Collections.IDictionary deques)
+                foreach (var key in deques.Keys)
+                    if (deques[key] is System.Collections.IList list)
+                    {
+                        for (int i = list.Count - 1; i > 0; i--)
+                        {
+                            int j = rnd.Next(i + 1);
+                            (list[i], list[j]) = (list[j], list[i]);
+                        }
+                        n++;
+                    }
+        }
+        return n;
+    }
+
     // ─── Game actions ───
     private void RestoreMapPointFlags(string saveJson, int actIndex)
     {
