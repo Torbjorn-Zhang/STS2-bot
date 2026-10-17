@@ -59,6 +59,7 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
     st = sim.send({"cmd": "start_run", "character": "Ironclad", "seed": seed, "ascension": ascension})
     memo, steps, in_fight, hp0, last = {}, 0, False, None, None
     fights, fight_steps = 0, 0
+    boss_dmg, boss_max = 0.0, 0   # sum over boss fights of the share of boss HP removed (a win = 1)
     while steps < 6000:
         d = st.get("decision")
         ctx = st.get("context") or {}
@@ -69,6 +70,8 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
         if d == "combat_play" and not in_fight:
             in_fight, hp0, fight_steps = True, (st.get("player") or {}).get("hp"), 0
             fight_room, fight_act, buffer = room, (ctx.get("act") or 1), 0
+            if room == "Boss":
+                boss_max = sum((e.get("max_hp") or 0) for e in st.get("enemies") or [] if (e.get("hp") or 0) < 10 ** 8)
             if CALIBRATE:
                 buffer = BOSS_BONUS if room == "Boss" else FIGHT_BUFFER.get(room, 0) if fight_act >= 2 else 0
                 if buffer:
@@ -77,6 +80,8 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
             rec.fight_start(st)
             fights += 1
         if in_fight and not combat:
+            if fight_room == "Boss":
+                boss_dmg += 1.0   # won (the run goes on)
             hp_last = (last or st).get("player", {}).get("hp")
             rec.fight_end(st, hp0, True, (last or {}).get("round"), hp_last)
             in_fight = False
@@ -205,10 +210,13 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
         st = nxt
     if in_fight:
         won = st.get("decision") != "game_over"
+        if fight_room == "Boss" and boss_max:
+            left = sum((e.get("hp") or 0) for e in (last or {}).get("enemies") or [] if 0 < (e.get("hp") or 0) < 10 ** 8)
+            boss_dmg += 1.0 if (won or st.get("victory")) else max(0.0, 1 - left / boss_max)
         rec.fight_end(st, hp0, won, (last or {}).get("round"), (last or st).get("player", {}).get("hp"))
     ctx = st.get("context") or {}
     p = st.get("player") or {}
-    res = {"seed": seed, "victory": bool(st.get("victory")), "died": st.get("decision") == "game_over" and not st.get("victory"),
+    res = {"seed": seed, "boss_dmg": round(boss_dmg, 3), "victory": bool(st.get("victory")), "died": st.get("decision") == "game_over" and not st.get("victory"),
            "cleared_acts": 3 if st.get("victory") else (ctx.get("act") or 1) - 1, "act": ctx.get("act"),
            "floor": ctx.get("floor"), "room": ctx.get("room_type"), "hp": p.get("hp"), "max_hp": p.get("max_hp"),
            "fights": fights, "error": st.get("message") if st.get("type") == "error" else None, "stuck": steps >= 6000}

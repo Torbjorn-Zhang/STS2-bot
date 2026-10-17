@@ -6,7 +6,7 @@ import math
 import statistics as S
 import sys
 
-tag = "act2a10"
+tag = next((a.split("=")[1] for a in sys.argv if a.startswith("--tag=")), "act2a10")
 files = [a for a in sys.argv[1:] if not a.startswith("--")]
 metas = {}
 for p in glob.glob(f"data/bossbench_{tag}/*.save.json"):

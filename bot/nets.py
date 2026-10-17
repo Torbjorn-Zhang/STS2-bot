@@ -64,6 +64,7 @@ def split_runs(runs):
 
 
 ACT_CLEAR_BONUS = float(os.environ.get("STS2_ACT_CLEAR_BONUS", "10"))   # RL reward per act boss beaten
+BOSS_DMG_BONUS = float(os.environ.get("STS2_BOSS_DMG_BONUS", "5"))      # ... per share of boss HP removed
 
 
 def final_progress(o):
@@ -72,7 +73,9 @@ def final_progress(o):
     it = 34+), so deck learning aimed at surviving hallways, not at winning boss fights."""
     acts = 3 if o.get("victory") else max(0, (o.get("act") or 1) - 1)
     base = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
-    return base + ACT_CLEAR_BONUS * acts
+    # boss damage: a denser signal than boss wins (a lost boss fight still shows how close
+    # the deck came); recorded by selfplay.py as the sum of removed HP shares (a win = 1)
+    return base + ACT_CLEAR_BONUS * acts + BOSS_DMG_BONUS * (o.get("boss_dmg") or 0)
 
 
 # ---------------------------------------------------------------- combat encoding
