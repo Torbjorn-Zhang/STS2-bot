@@ -10,7 +10,7 @@ import sys
 tag = sys.argv[1]
 base = sys.argv[2] if len(sys.argv) > 2 else "c0"
 res = collections.defaultdict(dict)
-for f in glob.glob(f"runs/{tag}_c*.jsonl"):
+for f in glob.glob(f"runs/{tag}_*.jsonl"):
     c = f[len(f"runs/{tag}_"):].split("_")[0].split(".")[0]
     for line in open(f):
         r = json.loads(line)
