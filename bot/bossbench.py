@@ -10,6 +10,7 @@ Same states for every config, so the comparison is paired and far less noisy tha
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import time
@@ -137,6 +138,15 @@ def fight_one(sim, meta, model, value_weight, nodes, rollouts=None, rep=None):
             "seconds": round(time.perf_counter() - t0, 1)}
 
 
+def shard_of(seed, n):
+    """md5, not crc32: crc32 is linear, so near-identical seed names crowd a few low-bit buckets."""
+    return int(hashlib.md5(seed.encode()).hexdigest(), 16) % n
+
+
+def in_shard(seed, k, n):
+    return shard_of(seed, n) == k
+
+
 def parallel(items, fn, workers):
     chunks = [items[i::workers] for i in range(workers)]
 
@@ -175,6 +185,8 @@ def main():
     ap.add_argument("--min-act", type=int, default=None, help="collect-fights: also save fights from this act on")
     ap.add_argument("--subset", default=None, help="'even' or 'odd' seeds only (train/validation split)")
     ap.add_argument("--boss", default=None, help="only fights against this boss (name)")
+    ap.add_argument("--room", default=None, help="only fights in this room type (Monster, Elite, Boss)")
+    ap.add_argument("--shard", default=None, help="K/N: only saves in shard K of N (split across machines)")
     ap.add_argument("--deck-nets", default=None, help='collect: JSON for policy.load_deck_nets (decks built like v33)')
     ap.add_argument("--out", default=None)
     ap.add_argument("--reps", type=int, default=1, help=">1: fight each save this many times, determinized")
@@ -230,6 +242,14 @@ def main():
         metas = [m for m in metas if (int(m["seed"].rsplit("_", 1)[1]) % 2 == 0) == (args.subset == "even")]
     if args.boss:
         metas = [m for m in metas if m.get("boss") == args.boss]
+    if args.room:
+        metas = [m for m in metas if m.get("room", "Boss") == args.room]
+    if args.shard:
+        k, n = (int(x) for x in args.shard.split("/"))
+        metas = [m for m in metas if in_shard(m["seed"], k, n)]
+    for m in metas:   # saves copied to another machine: the path recorded at collection is elsewhere
+        if not os.path.exists(m["path"]):
+            m["path"] = os.path.join(bench_dir, os.path.basename(m["path"]))
     t0 = time.perf_counter()
     roll = json.loads(args.rollouts) if args.rollouts else None
     items = [(m, None) for m in metas] if args.reps <= 1 else [(m, r) for m in metas for r in range(args.reps)]

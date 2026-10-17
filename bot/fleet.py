@@ -24,6 +24,7 @@ import argparse
 import base64
 import fnmatch
 import glob
+import hashlib
 import json
 import os
 import shlex
@@ -324,7 +325,70 @@ class Expert:
         return self.st["phase"] == "finished"
 
 
-PIPES = {"deckrl": DeckRL, "expert": Expert}
+class Bench:
+    """Fight-bench evaluation (bossbench.py eval) of several planner configs; the saves are
+    split into shards, one job per (config, shard). Rows land in runs/<tag>_<config>.jsonl."""
+
+    def __init__(self, spec, st=None):
+        self.spec = spec
+        self.name = spec["tag"]
+        self.st = st or {"phase": "start"}
+
+    def step(self, fl):
+        sp, st = self.spec, self.st
+        if st["phase"] == "start":
+            bdir = f"data/bossbench_{sp['bench']}"
+            shards = {}
+            for p in sorted(glob.glob(os.path.join(HERE, bdir, "*.save.json"))):
+                with open(p) as fh:
+                    m = json.load(fh)
+                if sp.get("room") and m.get("room", "Boss") != sp["room"]:
+                    continue
+                k = int(hashlib.md5(m["seed"].encode()).hexdigest(), 16) % sp["shards"]   # = bossbench.shard_of
+                base = os.path.basename(m["path"])
+                shards.setdefault(k, []).extend([f"{bdir}/{base}", f"{bdir}/{base}.json"])
+            jobs = []
+            for c, cfg in sp["configs"].items():
+                for k, files in sorted(shards.items()):
+                    out = f"runs/{self.name}_{c}_s{k}.jsonl"
+                    roll = {a: v for a, v in cfg.items() if a != "nodes"}   # "nodes": the planner's search size
+                    argv = ["bossbench.py", "eval", "--tag", sp["bench"], "--rollouts", json.dumps(roll, separators=(",", ":")),
+                            "--reps", sp.get("reps", 1), "--shard", f"{k}/{sp['shards']}", "--workers", "%W%", "--out", out]
+                    argv += ["--nodes", cfg["nodes"]] if "nodes" in cfg else []
+                    argv += (["--room", sp["room"]] if sp.get("room") else []) + sp.get("extra", [])
+                    jobs.append(fl.add_job(self.name, f"{self.name}_{c}_s{k}", "bench", sp.get("prio", 0.8), argv, files, [out]))
+            st.update(phase="running", jobs=jobs, t0=time.time())
+            log(f"{self.name}: bench {sp['bench']}, {len(sp['configs'])} configs x {len(shards)} shards")
+        elif st["phase"] == "running" and all(fl.jobs[j]["state"] in ("done", "failed") for j in st["jobs"]):
+            summ = {}
+            for c in sp["configs"]:
+                rows = []
+                for j in st["jobs"]:
+                    job = fl.jobs[j]
+                    p = os.path.join(HERE, job["outputs"][0])
+                    if job["id"].startswith(f"{self.name}_{c}_s") and job["state"] == "done" and os.path.exists(p):
+                        with open(p) as fh:
+                            rows += [json.loads(l) for l in fh if l.strip()]
+                        os.remove(p)
+                with open(os.path.join(HERE, "runs", f"{self.name}_{c}.jsonl"), "w") as fh:
+                    for r in rows:
+                        fh.write(json.dumps(r) + "\n")
+                by = {}
+                for r in rows:
+                    b = by.setdefault(r["boss"], [0, 0])
+                    b[0] += 1
+                    b[1] += bool(r["won"])
+                summ[c] = {"fights": len(rows), "won": sum(bool(r["won"]) for r in rows),
+                           "mean_s": round(sum(r["seconds"] for r in rows) / max(1, len(rows)), 1),
+                           "by_boss": {k: f"{w}/{n}" for k, (n, w) in sorted(by.items())}}
+                log(f"{self.name}: {c} {json.dumps(summ[c])}")
+            st.update(phase="finished", summary=summ)
+
+    def finished(self):
+        return self.st["phase"] == "finished"
+
+
+PIPES = {"deckrl": DeckRL, "expert": Expert, "bench": Bench}
 
 
 # ---------------------------------------------------------------- coordinator
@@ -660,7 +724,7 @@ def main():
         os.makedirs(os.path.join(FLEET, d), exist_ok=True)
     os.makedirs(os.path.join(HERE, "fleetdata"), exist_ok=True)
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["run", "status", "drain", "undrain", "stop", "deckrl", "expert"])
+    ap.add_argument("cmd", choices=["run", "status", "drain", "undrain", "stop", "deckrl", "expert", "bench"])
     ap.add_argument("host", nargs="?")
     ap.add_argument("--until-done", action="store_true", help="run: exit once every pipeline has finished")
     ap.add_argument("--tag")
@@ -680,7 +744,12 @@ def main():
     ap.add_argument("--prefix", default="full")
     ap.add_argument("--rollouts", default='{"k":6,"m":4,"turns":3}')
     ap.add_argument("--missing", action="store_true", help="expert: only seeds without a row in runs/<tag>.jsonl yet")
-    ap.add_argument("--prio", type=float, default=1.5, help="expert: queue priority (self-play 1, evaluation 2)")
+    ap.add_argument("--prio", type=float, default=None, help="expert/bench: queue priority (self-play 1, evaluation 2)")
+    ap.add_argument("--bench", help="bench: fight bench tag (data/bossbench_<bench>)")
+    ap.add_argument("--configs", help='bench: JSON {name: rollout config}')
+    ap.add_argument("--room", default=None)
+    ap.add_argument("--reps", type=int, default=1)
+    ap.add_argument("--shards", type=int, default=8)
     args = ap.parse_args()
     if args.cmd == "run":
         lock = os.path.join(FLEET, "coordinator.pid")
@@ -731,7 +800,11 @@ def main():
             seeds = [i for i in range(args.n) if f"{args.prefix}_{i}" not in done]
             print(f"{len(seeds)} seeds missing")
         submit("expert", {"tag": args.tag, "deck_nets": args.deck_nets, "n": args.n, "start": 0, "chunk": args.expert_chunk,
-                          "prefix": args.prefix, "rollouts": args.rollouts, "seeds": seeds, "prio": args.prio})
+                          "prefix": args.prefix, "rollouts": args.rollouts, "seeds": seeds,
+                          "prio": 1.5 if args.prio is None else args.prio})
+    elif args.cmd == "bench":
+        submit("bench", {"tag": args.tag, "bench": args.bench, "configs": json.loads(args.configs), "room": args.room,
+                         "reps": args.reps, "shards": args.shards, "prio": 0.8 if args.prio is None else args.prio})
 
 
 if __name__ == "__main__":
