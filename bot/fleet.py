@@ -539,7 +539,32 @@ class XDeckRL:
         return self.st["phase"] in ("finished", "failed", "cancelled")
 
 
-PIPES = {"deckrl": DeckRL, "expert": Expert, "bench": Bench, "xdeckrl": XDeckRL}
+class Task:
+    """One ad-hoc job (training a network, an analysis): argv run with the bot's Python, input
+    files pushed first, output files fetched back to this Mac. The last stdout line (JSON or
+    text) is logged."""
+
+    def __init__(self, spec, st=None):
+        self.spec = spec
+        self.name = spec["tag"]
+        self.st = st or {"phase": "start"}
+
+    def step(self, fl):
+        sp, st = self.spec, self.st
+        if st["phase"] == "start":
+            st["job"] = fl.add_job(self.name, f"{self.name}_task", "task", sp.get("prio", 0.5), sp["argv"],
+                                   sp.get("inputs", []), sp.get("outputs", []), gpu=sp.get("gpu", False))
+            st["phase"] = "running"
+        elif st["phase"] == "running" and fl.jobs[st["job"]]["state"] in ("done", "failed"):
+            j = fl.jobs[st["job"]]
+            st.update(phase="finished", state=j["state"], result=j.get("result"))
+            log(f"{self.name}: task {j['state']} {json.dumps(j.get('result'))[:300]}")
+
+    def finished(self):
+        return self.st["phase"] == "finished"
+
+
+PIPES = {"deckrl": DeckRL, "expert": Expert, "bench": Bench, "xdeckrl": XDeckRL, "task": Task}
 
 
 # ---------------------------------------------------------------- coordinator
@@ -948,7 +973,7 @@ def main():
     os.makedirs(os.path.join(HERE, "fleetdata"), exist_ok=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["run", "status", "drain", "undrain", "stop", "deckrl", "xdeckrl", "expert", "bench",
-                                    "cancel"])
+                                    "cancel", "task"])
     ap.add_argument("host", nargs="?")
     ap.add_argument("--until-done", action="store_true", help="run: exit once every pipeline has finished")
     ap.add_argument("--tag")
@@ -975,6 +1000,10 @@ def main():
     ap.add_argument("--reps", type=int, default=1)
     ap.add_argument("--shards", type=int, default=8)
     ap.add_argument("--extra", default=None, help='expert/xdeckrl: JSON list of extra run.py arguments')
+    ap.add_argument("--argv", default=None, help='task: JSON list, the script and its arguments')
+    ap.add_argument("--inputs", default=None, help='task: JSON list of bot/-relative files to push')
+    ap.add_argument("--outputs", default=None, help='task: JSON list of bot/-relative files to fetch')
+    ap.add_argument("--gpu", action="store_true", help="task: run on a GPU machine with CUDA")
     args = ap.parse_args()
     if args.cmd == "run":
         lock = os.path.join(FLEET, "coordinator.pid")
@@ -1036,6 +1065,10 @@ def main():
                            "temperature": args.temperature, "rollouts": args.rollouts, "init": init,
                            "eval_init": args.eval_init, "kinds": ["card", "rest", "event", "map", "shop"],
                            "extra": json.loads(args.extra or "[]")})
+    elif args.cmd == "task":
+        submit("task", {"tag": args.tag, "argv": json.loads(args.argv), "inputs": json.loads(args.inputs or "[]"),
+                        "outputs": json.loads(args.outputs or "[]"), "gpu": args.gpu,
+                        "prio": 0.5 if args.prio is None else args.prio})
     elif args.cmd == "cancel":
         submit("cancel", {"tag": args.tag})
     elif args.cmd == "bench":
