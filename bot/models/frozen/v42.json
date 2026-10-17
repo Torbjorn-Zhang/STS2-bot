@@ -1,0 +1,1 @@
+{"card": "models/frozen/decki_card2.pt", "rest": "models/frozen/decki_rest2.pt", "event": "models/frozen/decki_event2.pt", "map": "models/frozen/decki_map2.pt", "shop": "models/frozen/decki_shop2.pt", "card_decides": true, "neow": true}
