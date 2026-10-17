@@ -20,8 +20,21 @@ TRAINERS = {"card": ["nets.py", "cardrl"], "rest": ["restnet.py", "rl"], "event"
             "map": ["mapnet.py", "rl"], "shop": ["shopnet.py", "rl"]}
 
 
+def expand(paths):
+    """'@list.txt' stands for the paths listed in that file (Windows caps a cmd line at 8191 chars)."""
+    out = []
+    for p in paths:
+        if p.startswith("@"):
+            with open(os.path.join(HERE, p[1:])) as fh:
+                out += [l.strip() for l in fh if l.strip()]
+        else:
+            out.append(p)
+    return out
+
+
 def train(args):
     t0 = time.time()
+    args.data = expand(args.data)
     procs, models = {}, {}
     for kind, (script, mode) in TRAINERS.items():
         init = getattr(args, kind)

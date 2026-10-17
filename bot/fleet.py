@@ -489,15 +489,23 @@ class XDeckRL:
                 summary["wall_s"] = round(time.time() - st["sp"][str(it)]["t0"], 1)
                 st["sp"][str(it)]["summary"] = summary
                 data = [j["outputs"][0] for j in done]
-                argv = ["fleetjob.py", "train"] + data + ["--tag", self.name, "--it", it, "--temperature", sp["temperature"]]
+                # "reuse": N also trains on the previous N iterations' self-play (archived), PPO's
+                # ratio clipping covering the slightly older behaviour policies
+                for back in range(1, sp.get("reuse", 0) + 1):
+                    d = os.path.join(HERE, "data", "xdarchive", f"{self.name}_it{it - back}")
+                    data += sorted(os.path.relpath(p, HERE) for p in glob.glob(os.path.join(d, f"{self.name}_it{it - back}_c*.jsonl")))
+                listing = f"fleetdata/{self.name}_it{it}_train.txt"   # the file list (cmd lines cap at 8191 chars)
+                with open(os.path.join(HERE, listing), "w") as fh:
+                    fh.write("\n".join(data) + "\n")
+                argv = ["fleetjob.py", "train", "@" + listing, "--tag", self.name, "--it", it, "--temperature", sp["temperature"]]
                 for k in self.KINDS:
                     if st["cur"].get(k):
                         argv += [f"--{k}", st["cur"][k]]
                 outs = [f"models/{self.name}_{k}{it}.pt" for k in self.KINDS if st["cur"].get(k)]
                 st["train"] = fl.add_job(self.name, f"{self.name}{it}_train", "train", 0, argv,
-                                         [m for m in st["cur"].values() if m] + data, outs, gpu=True)
+                                         [m for m in st["cur"].values() if m] + data + [listing], outs, gpu=True)
                 st["phase"] = "train"
-                log(f"{self.name}: iteration {it} expert self-play done {json.dumps(summary)}; training")
+                log(f"{self.name}: iteration {it} expert self-play done {json.dumps(summary)}; training on {len(data)} files")
         elif st["phase"] == "train":
             j = fl.jobs[st["train"]]
             it = st["it"]
