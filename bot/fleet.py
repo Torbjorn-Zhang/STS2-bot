@@ -712,6 +712,13 @@ class Fleet:
             if h["state"] == "down":
                 self.kill(h)          # leftovers of jobs that were moved elsewhere
                 self.requeue(h, "rejoin")
+            # the code may have changed while it was away: same code everywhere before any job
+            res = subprocess.run([os.path.join(REPO, "deploy", "winsync.sh"), h["ssh"], h["root"]],
+                                 capture_output=True, text=True, timeout=600)
+            if res.returncode != 0:
+                log(f"{h['name']}: code sync failed ({(res.stderr or res.stdout)[-200:]}); retry next poll")
+                return
+            log(f"{h['name']}: code synced")
             h["state"] = "up"
             if h["clean"]:
                 self.remote_clean(h)
