@@ -79,7 +79,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 left = sum(h or 0 for h in last_enemies.get("hp") or [])
                 boss_dmg += 1.0 if won else max(0.0, 1 - left / max(1, enemy_max))
             hp_log.append({"floor": floor0, "room": room, "enemies": names, "hp_before": hp0,
-                           "hp_after": (st.get("player") or {}).get("hp"), "won": st.get("decision") != "game_over",
+                           "hp_after": (st.get("player") or {}).get("hp"),
+                           "won": st.get("decision") != "game_over" or bool(st.get("victory")),
                            "enemy_hp_left": last_enemies.get("hp"), "rounds": last_enemies.get("round"),
                            "potions_before": pots0, "potions_left": last_enemies.get("potions"),
                            **({"deck": deck_stats} if deck_stats else {})})
