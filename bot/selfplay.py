@@ -32,6 +32,12 @@ FIGHT_ROOMS = ("Monster", "Elite", "Boss")
 CALIBRATE = False
 LOSS_SCALE = {"Monster": 0.8, "Elite": 0.87}
 BOSS_BONUS = 20
+# Act 2+ (A10 act-2 bench, policy_rl105 vs the planner): the network also dies far more
+# often mid-fight in hallways (23/170 vs 11/175), which refunds afterwards cannot undo. So
+# from act 2 every hallway / elite fight starts with a buffer of FIGHT_BUFFER HP (net then
+# wins 163/170, planner 164/175) and the HP lost is scaled to the planner's.
+FIGHT_BUFFER = {"Monster": 15, "Elite": 15}
+LOSS_SCALE_LATE = {"Monster": 0.75, "Elite": 0.82}
 
 
 def sample(pilot, st, acts, temperature, rng):
@@ -62,10 +68,12 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
         combat = d == "combat_play" or (d == "card_select" and room in FIGHT_ROOMS and in_fight)
         if d == "combat_play" and not in_fight:
             in_fight, hp0, fight_steps = True, (st.get("player") or {}).get("hp"), 0
-            fight_room = room
-            if CALIBRATE and room == "Boss":
-                st = dict(st, player=dict(st.get("player") or {}, hp=(hp0 or 0) + BOSS_BONUS))
-                sim.send({"cmd": "set_player", "hp": (hp0 or 0) + BOSS_BONUS})
+            fight_room, fight_act, buffer = room, (ctx.get("act") or 1), 0
+            if CALIBRATE:
+                buffer = BOSS_BONUS if room == "Boss" else FIGHT_BUFFER.get(room, 0) if fight_act >= 2 else 0
+                if buffer:
+                    st = dict(st, player=dict(st.get("player") or {}, hp=(hp0 or 0) + buffer))
+                    sim.send({"cmd": "set_player", "hp": (hp0 or 0) + buffer})
             rec.fight_start(st)
             fights += 1
         if in_fight and not combat:
@@ -76,9 +84,12 @@ def play_fast_run(sim, seed, pilot, ascension, acts, rec, temperature, rng, card
                 p = st.get("player") or {}
                 cur, mhp = p.get("hp") or 0, p.get("max_hp") or 80
                 new = cur
-                if fight_room in LOSS_SCALE and hp0 is not None and hp_last is not None:
-                    new = cur + (1 - LOSS_SCALE[fight_room]) * max(0, hp0 - hp_last)
-                new = int(min(mhp, new))
+                scale = (LOSS_SCALE if fight_act < 2 else LOSS_SCALE_LATE).get(fight_room)
+                if scale is not None and hp0 is not None and hp_last is not None:
+                    # HP before the fight, minus the scaled loss (buffer included), plus
+                    # end-of-combat heals (relics) seen after the fight
+                    new = hp0 - scale * max(0, hp0 + buffer - hp_last) + max(0, cur - hp_last)
+                new = int(max(1, min(mhp, new)))
                 if new != cur:
                     sim.send({"cmd": "set_player", "hp": new})
                     st = dict(st, player=dict(p, hp=new))
