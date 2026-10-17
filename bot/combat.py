@@ -593,7 +593,10 @@ class TurnPlanner:
                 if leaves[i][0] != "terminal"][:cfg.get("k", 4)]
         if len(cand) < 2:
             return scores
-        base = hash((root.get("round"), len(root.get("hand") or []), root.get("energy"))) & 0xFFFFFFFF
+        # hash() of an int tuple is the same in every process and Python version; None hashes
+        # by address (a different rollout seed in every process), so it becomes -1
+        key = (root.get("round"), len(root.get("hand") or []), root.get("energy"))
+        base = hash(tuple(-1 if v is None else v for v in key)) & 0xFFFFFFFF
         out = [float("-inf")] * len(leaves)
         for i, (kind, _, st, snap, last) in enumerate(leaves):
             if kind == "terminal":   # a finished fight needs no rollout; put it on the rollout scale
