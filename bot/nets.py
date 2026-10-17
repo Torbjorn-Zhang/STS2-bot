@@ -63,10 +63,16 @@ def split_runs(runs):
     return tr, va
 
 
+ACT_CLEAR_BONUS = float(os.environ.get("STS2_ACT_CLEAR_BONUS", "10"))   # RL reward per act boss beaten
+
+
 def final_progress(o):
-    if o.get("victory"):
-        return 3 * FLOORS_PER_ACT + 2
-    return progress(o.get("act"), o.get("floor"))
+    """RL return of a run: floors climbed plus ACT_CLEAR_BONUS per act cleared. Floors
+    alone paid almost nothing for beating a boss (dying at the act-2 boss = 33, beating
+    it = 34+), so deck learning aimed at surviving hallways, not at winning boss fights."""
+    acts = 3 if o.get("victory") else max(0, (o.get("act") or 1) - 1)
+    base = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
+    return base + ACT_CLEAR_BONUS * acts
 
 
 # ---------------------------------------------------------------- combat encoding
