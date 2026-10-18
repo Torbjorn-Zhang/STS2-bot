@@ -79,6 +79,9 @@ def option_keys(st):
     return out
 
 
+SMITH_BIAS = 0.0   # logit added to smith options (run.py --rest-smith-bias)
+
+
 class RestPolicy:
     def __init__(self, path):
         blob = torch.load(path, weights_only=False)
@@ -99,6 +102,8 @@ class RestPolicy:
             z = self.model(torch.from_numpy(state_vec(self.enc, run_state(st), route)[None]),
                            torch.from_numpy(np.stack([option_vec(self.enc, k) for k in ks])),
                            torch.zeros(len(ks), dtype=torch.long)).numpy()
+        if SMITH_BIAS:   # experiments (run.py --rest-smith-bias): humans smith 58% / heal 38%, the nets heal 78%
+            z = z + np.asarray([SMITH_BIAS if k.startswith("SMITH") else 0.0 for k in ks], dtype=z.dtype)
         return keys, ks, z, route
 
 

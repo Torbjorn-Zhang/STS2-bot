@@ -46,6 +46,9 @@ def option_vec(desc, hp_frac, gold):
     return x
 
 
+ELITE_BIAS = 0.0   # logit added to elite rooms (run.py --map-elite-bias)
+
+
 class MapPolicy:
     def __init__(self, path):
         blob = torch.load(path, weights_only=False)
@@ -67,6 +70,8 @@ class MapPolicy:
             z = self.model(torch.from_numpy(self.enc.encode(rs)[None]),
                            torch.from_numpy(np.stack([option_vec(d, hpf, rs["gold"]) for d in descs])),
                            torch.zeros(len(chs), dtype=torch.long)).numpy()
+        if ELITE_BIAS:   # experiments (run.py --map-elite-bias): humans path to elites 13%, the nets 6.5%
+            z = z + np.asarray([ELITE_BIAS if d[0] == "Elite" else 0.0 for d in descs], dtype=z.dtype)
         return chs, descs, z
 
 
