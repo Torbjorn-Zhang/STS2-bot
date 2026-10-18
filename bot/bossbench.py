@@ -108,12 +108,51 @@ def collect_one(sim, seed, out_dir, ascension=0, act=1, rollouts=None):
 
 
 SET_DECK = None   # diagnostic (--set-deck): replace the saved deck with these card ids before the fight
+DECK_OP = None    # diagnostic (--deck-op): change the saved deck (removals, upgrades) or HP, see deck_op()
+
+BASICS = ("STRIKE_IRONCLAD", "DEFEND_IRONCLAD")
+
+
+def deck_op(sim, st, op, seed):
+    """What is a card removal, an upgrade or a heal worth at this boss? Applies `op` to the
+    loaded save: base | rmK (K basics, Strikes first) | nostrike | nobasic | upK (K random
+    upgradable cards, non-basics first) | upall | hpmK (K HP less). Needs the Diag engine
+    (set_player remove_cards / upgrade)."""
+    import random
+    import re
+    if not op or op == "base":
+        return
+    p = st.get("player") or {}
+    deck = p.get("deck") or []
+    ids = [c["id"].replace("CARD.", "") for c in deck]
+    rng = random.Random(f"{seed}/{op}")
+    m = re.fullmatch(r"([a-z]+)(\d*)", op)
+    kind, k = m.group(1), int(m.group(2) or 0)
+    if kind == "rm":
+        order = [i for i in ids if i == BASICS[0]] + [i for i in ids if i == BASICS[1]]
+        sim.send({"cmd": "set_player", "remove_cards": order[:k]})
+    elif kind == "nostrike":
+        sim.send({"cmd": "set_player", "remove_cards": [i for i in ids if i == BASICS[0]]})
+    elif kind == "nobasic":
+        sim.send({"cmd": "set_player", "remove_cards": [i for i in ids if i in BASICS]})
+    elif kind == "upall":
+        sim.send({"cmd": "set_player", "upgrade": ["*"]})
+    elif kind == "up":
+        cand = [c for c in deck if not c.get("upgraded") and c.get("after_upgrade")]
+        rng.shuffle(cand)
+        cand.sort(key=lambda c: c["id"].replace("CARD.", "") in BASICS)   # stable: non-basics first
+        sim.send({"cmd": "set_player", "upgrade": [c["id"].replace("CARD.", "") for c in cand[:k]]})
+    elif kind == "hpm":
+        sim.send({"cmd": "set_player", "hp": max(1, (p.get("hp") or 1) - k)})
+    else:
+        raise ValueError(f"unknown deck op {op}")
 
 
 def fight_one(sim, meta, model, value_weight, nodes, rollouts=None, rep=None):
     st = sim.send({"cmd": "load_save", "path": meta["path"]})
     if SET_DECK:
         sim.send({"cmd": "set_player", "deck": SET_DECK})
+    deck_op(sim, st, DECK_OP, meta["seed"])
     col, row = meta.get("node") or meta["boss_node"]
     st = sim.act("select_map_node", col=col, row=row)
     if rep is not None:   # a different hidden future per repetition, the same for every config
@@ -240,6 +279,8 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--reps", type=int, default=1, help=">1: fight each save this many times, determinized")
     ap.add_argument("--rep-offset", type=int, default=0, help="first repetition index (fresh hidden futures per tuning generation)")
+    ap.add_argument("--deck-op", default=None, help="diagnostic: base|rmK|nostrike|nobasic|upK|upall|hpmK (deck_op)")
+    ap.add_argument("--engine-config", default=None, help="engine build to use (Diag: one built for diagnostics)")
     ap.add_argument("--set-deck", default=None, help='diagnostic: JSON list of card ids replacing every saved deck')
     args = ap.parse_args()
     bench_dir = os.path.join(HERE, "data", f"bossbench_{args.tag}")
@@ -268,6 +309,12 @@ def main():
 
     if args.weights:
         combat.W.update(json.loads(args.weights))
+    if args.engine_config:
+        import engine
+        engine.ENGINE_CONFIG = args.engine_config
+    if args.deck_op:
+        global DECK_OP
+        DECK_OP = args.deck_op
     if args.set_deck:
         global SET_DECK
         SET_DECK = json.loads(args.set_deck)

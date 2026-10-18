@@ -455,13 +455,13 @@ class Bench:
                 for k, files in sorted(shards.items()):
                     out = f"runs/{self.name}_{c}_s{k}.jsonl"
                     # "nodes": the planner's search size, "weights": combat.W overrides
-                    roll = {a: v for a, v in cfg.items() if a not in ("nodes", "weights")}
+                    roll = {a: v for a, v in cfg.items() if a not in ("nodes", "weights", "extra")}
                     argv = ["bossbench.py", sp.get("mode", "eval"), "--tag", sp["bench"], "--rollouts", json.dumps(roll, separators=(",", ":")),
                             "--reps", sp.get("reps", 1), "--shard", f"{k}/{sp['shards']}", "--workers", "%W%", "--out", out]
                     argv += ["--variants", sp["variants"], "--rep-offset", sp.get("offset", 0)] if sp.get("mode") == "explore" else []
                     argv += ["--nodes", cfg["nodes"]] if "nodes" in cfg else []
                     argv += ["--weights", json.dumps(cfg["weights"], separators=(",", ":"))] if "weights" in cfg else []
-                    argv += (["--room", sp["room"]] if sp.get("room") else []) + sp.get("extra", [])
+                    argv += (["--room", sp["room"]] if sp.get("room") else []) + sp.get("extra", []) + cfg.get("extra", [])
                     jobs.append(fl.add_job(self.name, f"{self.name}_{c}_s{k}", "bench", sp.get("prio", 0.8), argv,
                                            files + sp.get("inputs", []), [out]))
             st.update(phase="running", jobs=jobs, t0=time.time())

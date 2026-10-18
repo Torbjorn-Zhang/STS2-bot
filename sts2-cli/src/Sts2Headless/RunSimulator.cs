@@ -379,9 +379,49 @@ public class RunSimulator
                 foreach (var cEl in addEl.EnumerateArray())
                 {
                     var id = cEl.GetString();
+                    var up = id != null && id.EndsWith("+");   // "BASH+": add it upgraded
+                    if (up) id = id![..^1];
                     var canonical = id == null ? null : ModelDb.GetById<CardModel>(new ModelId("CARD", id));
                     if (canonical == null) return Error($"Unknown card: {id}");
-                    player.Deck.AddInternal(_runState.CreateCard(canonical, player), silent: true);
+                    var card = _runState.CreateCard(canonical, player);
+                    if (up && card.IsUpgradable)
+                    {
+                        card.UpgradeInternal();
+                        card.FinalizeUpgradeInternal();
+                    }
+                    player.Deck.AddInternal(card, silent: true);
+                }
+            }
+            if (args.TryGetValue("remove_cards", out var remEl))
+            {
+                // diagnostics: remove one deck card per id (an unupgraded copy first); the rest
+                // of the deck keeps its upgrades and enchantments
+                var keep = player.Deck.Cards.ToList();
+                foreach (var cEl in remEl.EnumerateArray())
+                {
+                    var id = cEl.GetString();
+                    var hit = keep.Where(c => c.Id.Entry == id).OrderBy(c => c.IsUpgraded ? 1 : 0).FirstOrDefault();
+                    if (hit == null) continue;
+                    keep.Remove(hit);
+                    _runState.RemoveCard(hit);
+                }
+                player.Deck.Clear(silent: true);
+                foreach (var c in keep)
+                    player.Deck.AddInternal(c, silent: true);
+            }
+            if (args.TryGetValue("upgrade", out var upEl))
+            {
+                // diagnostics: upgrade one deck card per id ("*": every upgradable card)
+                foreach (var cEl in upEl.EnumerateArray())
+                {
+                    var id = cEl.GetString();
+                    var targets = id == "*" ? player.Deck.Cards.Where(c => c.IsUpgradable).ToList()
+                        : player.Deck.Cards.Where(c => c.Id.Entry == id && c.IsUpgradable).Take(1).ToList();
+                    foreach (var c in targets)
+                    {
+                        c.UpgradeInternal();
+                        c.FinalizeUpgradeInternal();
+                    }
                 }
             }
             if (args.TryGetValue("deck", out var deckEl))

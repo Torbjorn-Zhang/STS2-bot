@@ -12,8 +12,13 @@ from simclient import Sim, legal_actions  # noqa: E402,F401
 RECYCLE_MB = int(os.environ.get("STS2_RECYCLE_MB", "1500"))
 
 
+# build configuration of the engine (bin/<config>/net9.0): diagnostics that need engine changes
+# build and use their own (STS2_ENGINE_CONFIG=Diag) while jobs keep running on Release
+ENGINE_CONFIG = os.environ.get("STS2_ENGINE_CONFIG", "Release")
+
+
 def fresh_sim():
-    return Sim("Release", timeout=60)
+    return Sim(ENGINE_CONFIG, timeout=60)
 
 
 def maybe_recycle(sim):
