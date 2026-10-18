@@ -76,7 +76,11 @@ def final_progress(o):
     base = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
     # boss damage: a denser signal than boss wins (a lost boss fight still shows how close
     # the deck came); recorded by selfplay.py as the sum of removed HP shares (a win = 1)
-    return base + ACT_CLEAR_BONUS * acts + BOSS_DMG_BONUS * (o.get("boss_dmg") or 0) + WIN_BONUS * bool(o.get("victory"))
+    bd = o.get("boss_dmg") or 0
+    if o.get("boss_mc"):   # run.py --mc-boss: average the real boss share with the K replays of each boss fight
+        k = len(o["boss_mc"][0]) if o["boss_mc"][0] else 0
+        bd = (bd + sum(sum(m) for m in o["boss_mc"])) / (1 + k)
+    return base + ACT_CLEAR_BONUS * acts + BOSS_DMG_BONUS * bd + WIN_BONUS * bool(o.get("victory"))
 
 
 # ---------------------------------------------------------------- combat encoding

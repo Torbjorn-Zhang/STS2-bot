@@ -23,6 +23,36 @@ def _key(st):
     return json.dumps(st, sort_keys=True)
 
 
+MC_BOSS = 0   # run.py --mc-boss K: K extra determinized plays of every boss fight (lower-variance RL return)
+
+
+def boss_mc(sim, st, planner, seed, enemy_max):
+    """Mean boss-HP share removed (a win = 1) over MC_BOSS replays of this boss fight from its
+    first state, each with a different hidden future; the sim is left as it was."""
+    import zlib
+    import combat
+    snap = sim.send({"cmd": "snapshot"})["id"]
+    shares = []
+    try:
+        for i in range(MC_BOSS):
+            sim.send({"cmd": "restore", "id": snap})
+            sim.send({"cmd": "determinize", "seed": zlib.crc32(f"{seed}/mcboss/{(st.get('context') or {}).get('act')}/{i}".encode())})
+            last = {"s": st}
+
+            def w(s_):
+                if s_.get("enemies") is not None:
+                    last["s"] = s_
+
+            end = planner.play_combat(dict(st), on_state=w)
+            won = end.get("decision") != "game_over" or bool(end.get("victory"))
+            left = 0 if won else sum((e.get("hp") or 0) for e in combat.alive(last["s"]))
+            shares.append(1.0 if won else max(0.0, 1 - left / max(1, enemy_max)))
+    finally:
+        sim.send({"cmd": "restore", "id": snap})
+        sim.send({"cmd": "drop_snapshots", "from": snap})
+    return shares
+
+
 def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0, rollouts=None,
              rec=None, explore=0.0, decknets=None, combat_records=True):
     """rec: optional record.GameRecorder (self-play data for the policy and value nets).
@@ -36,6 +66,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
     t0, steps, fights, hp_log = time.perf_counter(), 0, 0, []
     dead_ends, loops, memo, stuck = {}, 0, {}, False
     boss_dmg = 0.0   # sum over boss fights of the share of boss HP removed (a win = 1), as selfplay.py
+    mc_boss = []     # per boss fight: the MC_BOSS replay shares
     while steps < 5000:
         d = st.get("decision")
         act = (st.get("context") or {}).get("act") or 1
@@ -69,6 +100,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                         extra = {k: {kk: round(v, 2) for kk, v in d.items()} for k, d in planner.last_first.items()}
                     rec.combat_step(s, legal_actions(s) + potion_actions(s) if s.get("decision") == "combat_play"
                                     else legal_actions(s), a, extra)
+            if room == "Boss" and MC_BOSS:
+                mc_boss.append(boss_mc(sim, st, planner, seed, enemy_max))
             st = planner.play_combat(st, on_state=watch, on_step=on_step)
             if rec:
                 rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"),
@@ -118,7 +151,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         "act": ctx.get("act"), "floor": ctx.get("floor"), "room": ctx.get("room_type"),
         "hp": p.get("hp"), "max_hp": p.get("max_hp"), "deck_size": p.get("deck_size"),
         "fights": fights, "seconds": round(time.perf_counter() - t0, 1),
-        "boss_dmg": round(boss_dmg, 3), "planner": dict(planner.stats), "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
+        "boss_dmg": round(boss_dmg, 3), "boss_mc": [[round(x, 3) for x in m] for m in mc_boss] if MC_BOSS else None,
+        "planner": dict(planner.stats), "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
     }
     if rec:
         rec.finish(res)
@@ -148,6 +182,7 @@ def main():
     ap.add_argument("--human-skip-elo", type=float, default=None, help="with --human-prior: skip counts as a card of this Elo")
     ap.add_argument("--rest-smith-bias", type=float, default=0.0, help="rest network: logit added to smith options")
     ap.add_argument("--boss-value", default=None, help='JSON {act: bossvalue model} for value-guided card rewards')
+    ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
     ap.add_argument("--boss-beta", type=float, default=0.0, help="weight of the boss-win logit gain on card rewards")
     ap.add_argument("--map-elite-bias", type=float, default=0.0, help="map network: logit added to elite rooms")
     ap.add_argument("--explore", type=float, default=0.0, help="chance of a random card reward pick (data collection)")
@@ -227,6 +262,9 @@ def main():
     if args.skip_bias is not None:
         import nets
         nets.SKIP_BIAS = args.skip_bias
+    if args.mc_boss:
+        global MC_BOSS
+        MC_BOSS = args.mc_boss
     if args.boss_value and args.boss_beta:
         import nets
         from bossvalue import BossValue
