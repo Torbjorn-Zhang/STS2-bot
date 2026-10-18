@@ -190,6 +190,7 @@ def main():
     ap.add_argument("--deck-nets", default=None, help='collect: JSON for policy.load_deck_nets (decks built like v33)')
     ap.add_argument("--out", default=None)
     ap.add_argument("--reps", type=int, default=1, help=">1: fight each save this many times, determinized")
+    ap.add_argument("--rep-offset", type=int, default=0, help="first repetition index (fresh hidden futures per tuning generation)")
     args = ap.parse_args()
     bench_dir = os.path.join(HERE, "data", f"bossbench_{args.tag}")
     if args.deck_nets:
@@ -252,7 +253,10 @@ def main():
             m["path"] = os.path.join(bench_dir, os.path.basename(m["path"]))
     t0 = time.perf_counter()
     roll = json.loads(args.rollouts) if args.rollouts else None
-    items = [(m, None) for m in metas] if args.reps <= 1 else [(m, r) for m in metas for r in range(args.reps)]
+    if args.reps <= 1 and not args.rep_offset:
+        items = [(m, None) for m in metas]
+    else:
+        items = [(m, r) for m in metas for r in range(args.rep_offset, args.rep_offset + args.reps)]
     res = parallel(items, lambda sim, it: fight_one(sim, it[0], model, args.value_weight, args.nodes, roll, it[1]),
                    args.workers)
     if args.out:

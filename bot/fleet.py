@@ -23,6 +23,7 @@ Network updates go to a free GPU machine (CUDA) while the CPUs keep playing.
 import argparse
 import base64
 import fnmatch
+import math
 import glob
 import hashlib
 import json
@@ -33,6 +34,8 @@ import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
@@ -573,7 +576,150 @@ class Task:
         return self.st["phase"] == "finished"
 
 
-PIPES = {"deckrl": DeckRL, "expert": Expert, "bench": Bench, "xdeckrl": XDeckRL, "task": Task}
+def fight_score(r):
+    """Bench fight -> tuning score: a win 100 + HP left, a loss 0..80 by enemy HP removed."""
+    return max(0.0, min(200.0, float(r.get("graded") or 0.0)))
+
+
+class Tune:
+    """CMA-ES over planner evaluation weights (combat.W), scored on fight benches. Every
+    generation samples `popsize` weight vectors, plays the same fights with the same hidden
+    futures for all of them (common random numbers; a fresh set of futures each generation, so
+    the search cannot fit one draw order), and moves the distribution toward the best half.
+    The distribution mean is played too, as the progress trace. Parameters: {"name": {"x0": v,
+    "log": true}} (value = x0 * exp(x)) or {"x0": v, "scale": s} (value = max(0, x0 + s * x))."""
+
+    def __init__(self, spec, st=None):
+        self.spec = spec
+        self.name = spec["tag"]
+        self.names = list(spec["params"])
+        n = len(self.names)
+        self.st = st or {"gen": 0, "phase": "start", "m": [0.0] * n, "sigma": spec.get("sigma", 0.3),
+                         "C": np.eye(n).tolist(), "pc": [0.0] * n, "ps": [0.0] * n, "history": []}
+
+    def weights_of(self, x):
+        w = {}
+        for k, xi in zip(self.names, x):
+            p = self.spec["params"][k]
+            w[k] = round(p["x0"] * math.exp(xi), 4) if p.get("log") else round(max(0.0, p["x0"] + p.get("scale", 1.0) * xi), 4)
+        return w
+
+    def consts(self):
+        n = len(self.names)
+        lam = self.spec.get("popsize", 4 + int(3 * math.log(n)))
+        mu = lam // 2
+        wts = np.log(mu + 0.5) - np.log(np.arange(1, mu + 1))
+        wts /= wts.sum()
+        mueff = 1.0 / (wts ** 2).sum()
+        cs = (mueff + 2) / (n + mueff + 5)
+        ds = 1 + 2 * max(0.0, math.sqrt((mueff - 1) / (n + 1)) - 1) + cs
+        cc = (4 + mueff / n) / (n + 4 + 2 * mueff / n)
+        c1 = 2 / ((n + 1.3) ** 2 + mueff)
+        cmu = min(1 - c1, 2 * (mueff - 2 + 1 / mueff) / ((n + 2) ** 2 + mueff))
+        chin = math.sqrt(n) * (1 - 1 / (4 * n) + 1 / (21 * n * n))
+        return lam, mu, wts, mueff, cs, ds, cc, c1, cmu, chin
+
+    def start_gen(self, fl):
+        st, sp = self.st, self.spec
+        n = len(self.names)
+        lam = self.consts()[0]
+        rng = np.random.RandomState(1000 + st["gen"])
+        C = np.asarray(st["C"])
+        evals, B = np.linalg.eigh(C)
+        D = np.sqrt(np.maximum(evals, 1e-12))
+        ys = [(B @ (D * rng.randn(n))).tolist() for _ in range(lam)]
+        xs = [(np.asarray(st["m"]) + st["sigma"] * np.asarray(y)).tolist() for y in ys]
+        cands = [{"y": y, "x": x, "w": self.weights_of(x)} for y, x in zip(ys, xs)]
+        cands.append({"y": None, "x": list(st["m"]), "w": self.weights_of(st["m"]), "mean": True})
+        off = 100 * (st["gen"] + 1)   # hidden futures of this generation
+        for ci, c in enumerate(cands):
+            c["jobs"] = []
+            for bi, b in enumerate(sp["benches"]):
+                for k in b.get("use") or range(b["shards"]):
+                    out = f"runs/{self.name}_g{st['gen']}_c{ci}_b{bi}_s{k}.jsonl"
+                    argv = ["bossbench.py", "eval", "--tag", b["bench"], "--rollouts", sp["rollouts"], "--reps", b["reps"],
+                            "--rep-offset", off, "--shard", f"{k}/{b['shards']}", "--workers", "%W%", "--out", out,
+                            "--weights", json.dumps(c["w"], separators=(",", ":"))] + (["--room", b["room"]] if b.get("room") else [])
+                    files = bench_files(b["bench"], b.get("room"), k, b["shards"])
+                    if files:
+                        c["jobs"].append(fl.add_job(self.name, f"{self.name}_g{st['gen']}_c{ci}_b{bi}_s{k}", "tune",
+                                                    sp.get("prio", 0.8), argv, files, [out]))
+        st["cands"] = cands
+        st["phase"] = "running"
+        log(f"{self.name}: generation {st['gen']}, {lam} candidates + mean, sigma {st['sigma']:.3f}")
+
+    def finish_gen(self, fl):
+        st = self.st
+        n = len(self.names)
+        lam, mu, wts, mueff, cs, ds, cc, c1, cmu, chin = self.consts()
+        for c in st["cands"]:
+            rows = read_rows([fl.jobs[j]["outputs"][0] for j in c["jobs"] if fl.jobs[j]["state"] == "done"])
+            c["fights"] = len(rows)
+            c["won"] = sum(bool(r["won"]) for r in rows)
+            c["fit"] = sum(fight_score(r) for r in rows) / max(1, len(rows))
+        samples = [c for c in st["cands"] if not c.get("mean")]
+        mean_c = next(c for c in st["cands"] if c.get("mean"))
+        order = sorted(range(len(samples)), key=lambda i: -samples[i]["fit"])
+        Y = np.asarray([samples[i]["y"] for i in order[:mu]])
+        yw = wts @ Y
+        m = np.asarray(st["m"]) + st["sigma"] * yw
+        C = np.asarray(st["C"])
+        evals, B = np.linalg.eigh(C)
+        Cinvsqrt = B @ np.diag(1 / np.sqrt(np.maximum(evals, 1e-12))) @ B.T
+        ps = (1 - cs) * np.asarray(st["ps"]) + math.sqrt(cs * (2 - cs) * mueff) * (Cinvsqrt @ yw)
+        hs = float(np.linalg.norm(ps) / math.sqrt(1 - (1 - cs) ** (2 * (st["gen"] + 1))) < (1.4 + 2 / (n + 1)) * chin)
+        pc = (1 - cc) * np.asarray(st["pc"]) + hs * math.sqrt(cc * (2 - cc) * mueff) * yw
+        C = (1 - c1 - cmu) * C + c1 * (np.outer(pc, pc) + (1 - hs) * cc * (2 - cc) * C) \
+            + cmu * sum(w * np.outer(y, y) for w, y in zip(wts, Y))
+        sigma = st["sigma"] * math.exp((cs / ds) * (np.linalg.norm(ps) / chin - 1))
+        best = samples[order[0]]
+        row = {"gen": st["gen"], "mean_fit": round(mean_c["fit"], 3), "mean_won": mean_c["won"], "fights": mean_c["fights"],
+               "best_fit": round(best["fit"], 3), "best_won": best["won"], "pop_fit": round(float(np.mean([c["fit"] for c in samples])), 3),
+               "sigma": round(sigma, 4), "mean_w": mean_c["w"], "best_w": best["w"]}
+        st["history"].append(row)
+        with open(os.path.join(HERE, "runs", f"{self.name}.jsonl"), "a") as fh:
+            fh.write(json.dumps(row) + "\n")
+        log(f"{self.name}: generation {st['gen']} mean fit {row['mean_fit']} ({row['mean_won']}/{row['fights']} won), "
+            f"best {row['best_fit']} ({row['best_won']}), pop {row['pop_fit']}, sigma {row['sigma']}")
+        st.update(m=m.tolist(), C=C.tolist(), ps=ps.tolist(), pc=pc.tolist(), sigma=sigma, gen=st["gen"] + 1)
+        with open(os.path.join(HERE, "models", f"{self.name}_mean.json"), "w") as fh:
+            json.dump(self.weights_of(st["m"]), fh)
+        st.pop("cands", None)
+
+    def step(self, fl):
+        st = self.st
+        if st["phase"] == "start":
+            self.start_gen(fl)
+        elif st["phase"] == "running":
+            if all(fl.jobs[j]["state"] in ("done", "failed") for c in st["cands"] for j in c["jobs"]):
+                self.finish_gen(fl)
+                if st["gen"] >= self.spec["generations"]:
+                    st["phase"] = "finished"
+                    log(f"{self.name}: tuning finished; weights in models/{self.name}_mean.json")
+                else:
+                    self.start_gen(fl)
+
+    def finished(self):
+        return self.st["phase"] in ("finished", "cancelled")
+
+
+def bench_files(bench, room, k, shards):
+    """bot/-relative save files (and metadata) of a bench shard, as bossbench.py --shard sees it."""
+    bdir = f"data/bossbench_{bench}"
+    out = []
+    for p in sorted(glob.glob(os.path.join(HERE, bdir, "*.save.json"))):
+        with open(p) as fh:
+            m = json.load(fh)
+        if room and m.get("room", "Boss") != room:
+            continue
+        if int(hashlib.md5(m["seed"].encode()).hexdigest(), 16) % shards != k:
+            continue
+        base = os.path.basename(m["path"])
+        out += [f"{bdir}/{base}", f"{bdir}/{base}.json"]
+    return out
+
+
+PIPES = {"deckrl": DeckRL, "expert": Expert, "bench": Bench, "xdeckrl": XDeckRL, "task": Task, "tune": Tune}
 
 
 # ---------------------------------------------------------------- coordinator
