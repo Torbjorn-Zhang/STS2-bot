@@ -180,6 +180,7 @@ def main():
     ap.add_argument("--human-prior", type=float, default=0.0, help="card rewards: + this x human pick Elo (per 100 over 1200)")
     ap.add_argument("--human-prior-from-act", type=int, default=1)
     ap.add_argument("--skip-bias", type=float, default=None, help="card rewards: logit added to skipping")
+    ap.add_argument("--skip-bias-from-act", type=int, default=1)
     ap.add_argument("--human-skip-elo", type=float, default=None, help="with --human-prior: skip counts as a card of this Elo")
     ap.add_argument("--decktest-from-act", type=int, default=0,
                     help="with card_decides nets: card rewards from this act on by the deck test, the net as prior")
@@ -265,6 +266,7 @@ def main():
     if args.skip_bias is not None:
         import nets
         nets.SKIP_BIAS = args.skip_bias
+        nets.SKIP_BIAS_MIN_ACT = args.skip_bias_from_act
     if args.mc_boss:
         global MC_BOSS
         MC_BOSS = args.mc_boss

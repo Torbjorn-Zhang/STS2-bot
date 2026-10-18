@@ -918,6 +918,7 @@ def train_card(paths, out, epochs=40, hidden=128, lr=1e-3):
 
 
 SKIP_BIAS = float(os.environ.get("CARD_SKIP_BIAS", "0"))
+SKIP_BIAS_MIN_ACT = 1   # the skip bias applies from this act on (run.py --skip-bias-from-act)
 
 
 BOSS_VALUES = {}    # act -> bossvalue.BossValue (P(win the act boss) from the deck), run.py --boss-value
@@ -955,7 +956,9 @@ class CardPolicy:
         with torch.no_grad():
             z = self.model(torch.from_numpy(self.enc.encode(run_state(st))[None]), torch.from_numpy(np.stack(opts)),
                            torch.zeros(len(acts), dtype=torch.long)).numpy()
-        if SKIP_BIAS:   # experiments: shift the skip option's logit
+        # experiments: shift the skip option's logit (boss bench: removing a 24-card act-2
+        # deck's 7 basics wins 39% vs 23%, so lean decks may want fewer mediocre adds)
+        if SKIP_BIAS and ((st.get("context") or {}).get("act") or 1) >= SKIP_BIAS_MIN_ACT:
             for i, a in enumerate(acts):
                 if a[0] == "skip_card_reward":
                     z[i] += SKIP_BIAS
