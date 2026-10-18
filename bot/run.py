@@ -181,6 +181,8 @@ def main():
     ap.add_argument("--human-prior-from-act", type=int, default=1)
     ap.add_argument("--skip-bias", type=float, default=None, help="card rewards: logit added to skipping")
     ap.add_argument("--human-skip-elo", type=float, default=None, help="with --human-prior: skip counts as a card of this Elo")
+    ap.add_argument("--decktest-from-act", type=int, default=0,
+                    help="with card_decides nets: card rewards from this act on by the deck test, the net as prior")
     ap.add_argument("--rest-smith-bias", type=float, default=0.0, help="rest network: logit added to smith options")
     ap.add_argument("--boss-value", default=None, help='JSON {act: bossvalue model} for value-guided card rewards')
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
@@ -247,14 +249,14 @@ def main():
             from shopnet import ShopPolicy
             policy.SHOP_NET = ShopPolicy(args.shop_net)
         policy.CARD_NET_DECIDES = args.card_net_decides
-        if args.card_prior_weight is not None:
-            policy.CARD_PRIOR_WEIGHT = args.card_prior_weight
         if args.value_weight_run is not None:
             policy.VALUE_WEIGHT = args.value_weight_run
         policy.REST_VALUE = args.rest_value
     if args.deck_nets:
         with open(args.deck_nets) as fh:
             policy.load_deck_nets(json.load(fh))
+    if args.card_prior_weight is not None:   # also with --deck-nets alone
+        policy.CARD_PRIOR_WEIGHT = args.card_prior_weight
     if args.human_prior:
         import nets
         nets.set_human_prior(args.human_prior)
@@ -271,6 +273,7 @@ def main():
         from bossvalue import BossValue
         nets.BOSS_VALUES = {int(a): BossValue(os.path.join(HERE, p)) for a, p in json.loads(args.boss_value).items()}
         nets.BOSS_BETA = args.boss_beta
+    policy.DECKTEST_FROM_ACT = args.decktest_from_act
     if args.rest_smith_bias:
         import restnet
         restnet.SMITH_BIAS = args.rest_smith_bias

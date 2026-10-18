@@ -271,6 +271,7 @@ EVENT_NET = None        # optional eventnet.EventPolicy: event choice by the net
 MAP_NET = None          # optional mapnet.MapPolicy: next map node by the network (greedy)
 EVENT_NET_NEOW = False  # the event network also picks Neow's opening option (it learns them in self-play)
 CARD_NET_DECIDES = False  # card rewards by the card network alone (CARD_PRIOR), no deck test
+DECKTEST_FROM_ACT = 0   # with CARD_NET_DECIDES: from this act on, the deck test decides again (net as prior)
 SHOP_NET = None         # optional shopnet.ShopPolicy: shop purchases by the network (greedy)
 STRAT = None            # optional stratsearch.StratSearch: rest sites by rollouts of the rest of the act
 RUN_VALUE = None        # optional nets.RunValue: the run value network (trained on self-play outcomes)
@@ -317,7 +318,11 @@ def choose_card_reward(st, sim=None):
     if CARD_NET is not None and not DECK_TEST and st.get("cards"):
         return CARD_NET(st)
     if CARD_NET_DECIDES and CARD_PRIOR is not None and st.get("cards"):
-        return CARD_PRIOR(st)
+        # the nets build act-1 decks well; act-2/3 bosses (Kaiser Crab: 428 HP, 25-57 a turn)
+        # need decks judged against the boss itself
+        act0 = (st.get("context") or {}).get("act") or 1
+        if not (DECKTEST_FROM_ACT and act0 >= DECKTEST_FROM_ACT and DECK_TEST and sim is not None):
+            return CARD_PRIOR(st)
     if DECK_TEST and sim is not None and st.get("cards"):
         import decktest
         scores = decktest.evaluate_options(sim, st)

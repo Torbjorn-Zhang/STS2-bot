@@ -140,8 +140,31 @@ for i in ids:
         jobs[i] = {"state": "running"}
     else:
         jobs[i] = {"state": "lost"}
+def sample():
+    # (all CPU ticks, idle ticks, ticks of our processes: command line under our root)
+    v = [int(x) for x in open("/proc/stat").readline().split()[1:9]]
+    mine = 0
+    for p in os.listdir("/proc"):
+        if not p.isdigit():
+            continue
+        try:
+            if root.encode() not in open("/proc/" + p + "/cmdline", "rb").read():
+                continue
+            s = open("/proc/" + p + "/stat").read()
+            f = s[s.rfind(")") + 2:].split()
+            mine += int(f[11]) + int(f[12])
+        except (OSError, ValueError, IndexError):
+            pass
+    return sum(v), v[3] + v[4], mine
+import time
+a = sample(); time.sleep(1.5); b = sample()
+ncpu = os.cpu_count()
+per_cpu = max(1, (b[0] - a[0]) / ncpu)
+busy = ((b[0] - a[0]) - (b[1] - a[1])) / per_cpu
+mine = max(0, b[2] - a[2]) / per_cpu
 print(json.dumps({"pause": os.path.exists(root + "/PAUSE"), "jobs": jobs, "gpu": None, "ours": len(alive),
-                  "load": float(open("/proc/loadavg").read().split()[0]), "ncpu": os.cpu_count()}))
+                  "load": float(open("/proc/loadavg").read().split()[0]), "ncpu": ncpu,
+                  "others_now": round(max(0.0, busy - mine), 2), "ours_cpu": round(mine, 2)}))
 """
 
 
@@ -1004,12 +1027,27 @@ class Fleet:
         if h.get("dynamic") and r.get("ncpu"):
             # shared machine: at most `share` (half) of the threads other users leave idle; when they
             # need more, stop our newest jobs (only ours, found by our own job names)
-            ours_threads = sum(h["workers"] for _ in self.running_on(h))
-            others = max(0.0, r["load"] - ours_threads)
-            allow = int((r["ncpu"] - others) * h.get("share", 0.5)) // max(1, h["workers"])
-            h["slots_now"] = max(0, min(h["slots"], allow))
+            if r.get("others_now") is not None:
+                # measured over 1.5 s (/proc/stat minus our own processes), not the load
+                # average, which lags our own starts and stops by minutes and made us start
+                # jobs, see the load rise, and stop them again; rises at once, falls slowly
+                prev = h.get("others_ema")
+                others = r["others_now"] if prev is None else max(r["others_now"], 0.75 * prev + 0.25 * r["others_now"])
+                h["others_ema"] = others
+                # new jobs only within the peak of the last 10 minutes (others' use swings
+                # 20 -> 40 threads within a minute); stopping goes by the current estimate
+                now = time.time()
+                hist = [x for x in h.get("others_hist", []) if now - x[0] < 600] + [[now, r["others_now"]]]
+                h["others_hist"] = hist
+                peak = max([others] + [x[1] for x in hist])
+            else:
+                ours_threads = sum(h["workers"] for _ in self.running_on(h))
+                others = peak = max(0.0, r["load"] - ours_threads)
+            per = max(1, h["workers"])
+            allow = int((r["ncpu"] - others) * h.get("share", 0.5)) // per
+            h["slots_now"] = max(0, min(h["slots"], int((r["ncpu"] - peak) * h.get("share", 0.5)) // per))
             h["others_load"] = round(others, 1)
-            extra = len(self.running_on(h)) - h["slots_now"]
+            extra = len(self.running_on(h)) - max(0, min(h["slots"], allow))
             if extra > 1:   # one slot of slack against load-average jitter
                 for j in sorted(self.running_on(h), key=lambda j: -j.get("t_start", 0))[:extra]:
                     self.kill_job(h["name"], j["id"])
