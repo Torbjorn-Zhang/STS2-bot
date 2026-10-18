@@ -920,6 +920,7 @@ BOSS_VALUES = {}    # act -> bossvalue.BossValue (P(win the act boss) from the d
 BOSS_BETA = 0.0     # weight of its logit gain in CardPolicy.scores
 HUMAN_PRIOR = 0.0   # weight of the human card-pick prior in CardPolicy.scores (run.py --human-prior)
 HUMAN_ELO = {}      # card token -> pairwise pick Elo from human runs (data/human_card_stats.json)
+HUMAN_PRIOR_MIN_ACT = 1   # the prior applies from this act on (run.py --human-prior-from-act)
 
 
 def set_human_prior(weight, path=os.path.join(HERE, "data", "human_card_stats.json")):
@@ -960,7 +961,8 @@ class CardPolicy:
                 extras = [[card_tok(by_index[a[1]["card_index"]])] if a[0] == "select_card_reward" else [] for a in acts]
                 lg = bv.logits(rs, extras + [[]])
                 z = z + BOSS_BETA * (lg[:-1] - lg[-1])
-        if HUMAN_PRIOR:   # human pick preference (Elo from uploaded human runs), per 100 Elo above 1200
+        if HUMAN_PRIOR and ((st.get("context") or {}).get("act") or 1) >= HUMAN_PRIOR_MIN_ACT:
+            # human pick preference (Elo from uploaded human runs), per 100 Elo above 1200
             for i, a in enumerate(acts):
                 if a[0] == "select_card_reward":
                     tok = card_tok(by_index[a[1]["card_index"]]).rstrip("+")

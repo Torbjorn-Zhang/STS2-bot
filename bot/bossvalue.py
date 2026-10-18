@@ -52,6 +52,9 @@ def boss_fights(paths, act):
     return out
 
 
+USE_RELICS = True
+
+
 def featurize(run, enemies, vocab=None):
     f = Counter()
     for c in run.get("deck") or []:
@@ -59,8 +62,9 @@ def featurize(run, enemies, vocab=None):
         f["card:" + base] += 1
         if c.endswith("+"):
             f["up:" + base] += 1
-    for rl in run.get("relics") or []:
-        f["relic:" + rl] += 1
+    if USE_RELICS:
+        for rl in run.get("relics") or []:
+            f["relic:" + rl] += 1
     f["boss:" + (run.get("boss") or "?")] = 1
     f["hp"] = (run.get("hp") or 0) / 100.0
     f["hp_frac"] = (run.get("hp") or 0) / max(1, run.get("mhp") or 1)
@@ -113,7 +117,10 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--min-count", type=int, default=15)
     ap.add_argument("--C", type=float, default=0.3)
+    ap.add_argument("--no-relics", action="store_true", help="cards, HP and boss only (relics are constant within a save)")
     args = ap.parse_args()
+    global USE_RELICS
+    USE_RELICS = not args.no_relics
     from sklearn.linear_model import LogisticRegression
     from sklearn.model_selection import cross_val_predict
     from sklearn.metrics import roc_auc_score
@@ -145,10 +152,22 @@ def main():
     kw = {"groups": groups} if groups else {}
     p = cross_val_predict(clf, Xs, y, cv=cv, method="predict_proba", **kw)[:, 1]
     pb = cross_val_predict(LogisticRegression(C=args.C, max_iter=2000), Xs[:, base_cols], y, cv=cv, method="predict_proba", **kw)[:, 1]
+    within = None
+    if groups:   # decisions compare options at one state: rank variants of the same save
+        num = den = 0.0
+        g = np.asarray(groups)
+        for sv in set(groups):
+            m = g == sv
+            pw, pl = p[m & (y == 1)], p[m & (y == 0)]
+            if len(pw) and len(pl):
+                num += (pw[:, None] > pl[None, :]).sum() + 0.5 * (pw[:, None] == pl[None, :]).sum()
+                den += len(pw) * len(pl)
+        within = round(num / den, 3) if den else None
     clf.fit(Xs, y)
     coef = dict(zip(vocab, clf.coef_[0]))
     res = {"act": args.act, "fights": len(rows), "win_rate": round(float(y.mean()), 3), "features": len(vocab),
            "auc": round(float(roc_auc_score(y, p)), 3), "auc_hp_boss_only": round(float(roc_auc_score(y, pb)), 3),
+           "auc_within_save": within,
            "top": sorted(((k, round(v, 3)) for k, v in coef.items() if ":" in k and not k.startswith("boss:")),
                          key=lambda x: -x[1])[:25],
            "bottom": sorted(((k, round(v, 3)) for k, v in coef.items() if ":" in k and not k.startswith("boss:")),
@@ -158,7 +177,7 @@ def main():
     if args.out:
         with open(os.path.join(HERE, args.out), "wb") as fh:
             pickle.dump({"vocab": vocab, "mu": mu, "sd": sd, "clf": clf, "act": args.act}, fh)
-    print(json.dumps({"auc": res["auc"], "auc_base": res["auc_hp_boss_only"], "fights": res["fights"]}))
+    print(json.dumps({"auc": res["auc"], "auc_base": res["auc_hp_boss_only"], "within": within, "fights": res["fights"]}))
 
 
 if __name__ == "__main__":

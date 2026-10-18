@@ -143,6 +143,7 @@ def main():
     ap.add_argument("--no-combat-records", action="store_true", help="--record without combat steps (deck RL)")
     ap.add_argument("--weights", default=None, help="JSON overrides for combat.W (e.g. graded rollout deaths)")
     ap.add_argument("--human-prior", type=float, default=0.0, help="card rewards: + this x human pick Elo (per 100 over 1200)")
+    ap.add_argument("--human-prior-from-act", type=int, default=1)
     ap.add_argument("--rest-smith-bias", type=float, default=0.0, help="rest network: logit added to smith options")
     ap.add_argument("--boss-value", default=None, help='JSON {act: bossvalue model} for value-guided card rewards')
     ap.add_argument("--boss-beta", type=float, default=0.0, help="weight of the boss-win logit gain on card rewards")
@@ -219,6 +220,7 @@ def main():
     if args.human_prior:
         import nets
         nets.set_human_prior(args.human_prior)
+        nets.HUMAN_PRIOR_MIN_ACT = args.human_prior_from_act
     if args.boss_value and args.boss_beta:
         import nets
         from bossvalue import BossValue
