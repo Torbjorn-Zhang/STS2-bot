@@ -1258,7 +1258,16 @@ class Fleet:
 
     def loop(self):
         log("coordinator started: " + ", ".join(self.hosts))
+        import signal
+        term = []
+        # `kill` (SIGTERM): finish this round, save the state, exit; dying mid-round lost
+        # whatever the inbox had just applied (a cancel came back on restart)
+        signal.signal(signal.SIGTERM, lambda *_: term.append(1))
         while True:
+            if term:
+                self.save()
+                log("coordinator stopped (SIGTERM; state saved)")
+                return
             self.inbox()
             if os.path.exists(os.path.join(FLEET, "STOP")):
                 os.remove(os.path.join(FLEET, "STOP"))
