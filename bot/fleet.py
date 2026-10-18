@@ -922,9 +922,15 @@ class Fleet:
             self.kill(h)
         self.requeue(h, f"{h['name']} drained")
 
+    def sync_code(self, h):
+        res = subprocess.run([os.path.join(REPO, "deploy", "winsync.sh"), h["ssh"], h["root"]],
+                             capture_output=True, text=True, timeout=600)
+        return res.returncode == 0, (res.stderr or res.stdout)[-200:]
+
     def undrain(self, h, why):
         if h["drain"]:
-            log(f"{h['name']}: back in the fleet ({why})")
+            ok, msg = self.sync_code(h)   # the code may have changed while it was drained
+            log(f"{h['name']}: back in the fleet ({why}){'' if ok else ' (code sync failed: ' + msg + ')'}")
             h["drain"] = None
 
     def poll(self, h):
