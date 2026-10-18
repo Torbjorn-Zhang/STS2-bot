@@ -308,7 +308,7 @@ class Expert:
                         "--workers", "%W%", "--rollouts", sp["rollouts"], "--deck-nets", sp["deck_nets"],
                         "--tag", f"{self.name}_c{k}"] + sp.get("extra", [])
                 jobs.append(fl.add_job(self.name, f"{self.name}_c{k}", "expert", sp.get("prio", 1.5), argv,
-                                       [sp["deck_nets"]] + nets, [f"runs/{self.name}_c{k}.jsonl"]))
+                                       [sp["deck_nets"]] + nets + sp.get("inputs", []), [f"runs/{self.name}_c{k}.jsonl"]))
             st.update(phase="running", jobs=jobs, t0=time.time())
             log(f"{self.name}: expert evaluation, {len(jobs)} chunks")
         elif st["phase"] == "running":
@@ -1222,7 +1222,8 @@ def main():
             print(f"{len(seeds)} seeds missing")
         submit("expert", {"tag": args.tag, "deck_nets": args.deck_nets, "n": args.n, "start": 0, "chunk": args.expert_chunk,
                           "prefix": args.prefix, "rollouts": args.rollouts, "seeds": seeds,
-                          "prio": 1.5 if args.prio is None else args.prio, "extra": json.loads(args.extra or "[]")})
+                          "prio": 1.5 if args.prio is None else args.prio, "extra": json.loads(args.extra or "[]"),
+                          "inputs": json.loads(args.inputs or "[]")})
     elif args.cmd == "xdeckrl":
         with open(os.path.join(HERE, args.deck_nets)) as fh:
             cfg = json.load(fh)

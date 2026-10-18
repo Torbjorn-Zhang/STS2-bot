@@ -142,6 +142,7 @@ def main():
     ap.add_argument("--record", default=None, help="append self-play records to this .jsonl (record.py)")
     ap.add_argument("--no-combat-records", action="store_true", help="--record without combat steps (deck RL)")
     ap.add_argument("--weights", default=None, help="JSON overrides for combat.W (e.g. graded rollout deaths)")
+    ap.add_argument("--human-prior", type=float, default=0.0, help="card rewards: + this x human pick Elo (per 100 over 1200)")
     ap.add_argument("--explore", type=float, default=0.0, help="chance of a random card reward pick (data collection)")
     ap.add_argument("--net-rollouts", default=None, help="policy network (nets.py) as the planner's rollout policy")
     ap.add_argument("--net-decktest", default=None, help="policy network as the deck test's pilot")
@@ -211,6 +212,9 @@ def main():
     if args.deck_nets:
         with open(args.deck_nets) as fh:
             policy.load_deck_nets(json.load(fh))
+    if args.human_prior:
+        import nets
+        nets.set_human_prior(args.human_prior)
     if args.strat:
         from stratsearch import StratSearch
         with open(args.deck_nets) as fh:

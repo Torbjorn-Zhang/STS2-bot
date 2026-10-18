@@ -915,6 +915,17 @@ def train_card(paths, out, epochs=40, hidden=128, lr=1e-3):
 SKIP_BIAS = float(os.environ.get("CARD_SKIP_BIAS", "0"))
 
 
+HUMAN_PRIOR = 0.0   # weight of the human card-pick prior in CardPolicy.scores (run.py --human-prior)
+HUMAN_ELO = {}      # card token -> pairwise pick Elo from human runs (data/human_card_stats.json)
+
+
+def set_human_prior(weight, path=os.path.join(HERE, "data", "human_card_stats.json")):
+    global HUMAN_PRIOR, HUMAN_ELO
+    with open(path) as fh:
+        HUMAN_ELO = {k.replace("CARD.", ""): v["elo"] for k, v in json.load(fh)["cards"].items() if v.get("elo_n", 0) >= 100}
+    HUMAN_PRIOR = weight
+
+
 class CardPolicy:
     """Card reward choice by the imitation network (fast stand-in for the deck test)."""
 
@@ -939,6 +950,11 @@ class CardPolicy:
             for i, a in enumerate(acts):
                 if a[0] == "skip_card_reward":
                     z[i] += SKIP_BIAS
+        if HUMAN_PRIOR:   # human pick preference (Elo from uploaded human runs), per 100 Elo above 1200
+            for i, a in enumerate(acts):
+                if a[0] == "select_card_reward":
+                    tok = card_tok(by_index[a[1]["card_index"]]).rstrip("+")
+                    z[i] += HUMAN_PRIOR * (HUMAN_ELO.get(tok, 1200) - 1200) / 100.0
         return acts, z
 
     def __call__(self, st):
