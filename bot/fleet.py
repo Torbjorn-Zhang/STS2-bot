@@ -1154,9 +1154,11 @@ class Fleet:
             sftp(h, [f'-mkdir "{rpath(h, d)}"' for d in ("fleet", "fleet/jobs", "fleetdata", "runs")] + lines)
             if linux(h):
                 R = h["root"].rstrip("/")
-                cmds = [f"cd {R}/bot && rm -f fleet/jobs/{j['id']}.rc fleet/jobs/{j['id']}.out fleet/jobs/{j['id']}.err && "
-                        f"setsid nohup nice -n 19 ionice -c3 bash {R}/bot/fleet/jobs/{j['id']}.sh > /dev/null 2>&1 < /dev/null &"
-                        for j in js]
+                # one statement per job with its own redirections, so nothing keeps the ssh channel open
+                cmds = [f"cd {R}/bot"]
+                for j in js:
+                    cmds.append(f"rm -f fleet/jobs/{j['id']}.rc fleet/jobs/{j['id']}.out fleet/jobs/{j['id']}.err")
+                    cmds.append(f"setsid nohup nice -n 19 ionice -c3 bash {R}/bot/fleet/jobs/{j['id']}.sh > /dev/null 2>&1 < /dev/null &")
                 lx(h, "\n".join(cmds) + "\necho ok")
             else:
                 out = ps(h, LAUNCH_PS.replace("%ROOT%", wroot(h)).replace("%IDS%", ",".join(f"'{j['id']}'" for j in js)))
