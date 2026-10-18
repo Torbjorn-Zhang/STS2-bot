@@ -1,6 +1,33 @@
 {
-  "hosts": {
-    "pc5070":  {"ssh": "pc5070",  "root": "D:/sts2", "slots": 8, "workers": 2, "gpu": true, "order": 1, "yield_gpu": true},
-    "lap3070": {"ssh": "lap3070", "root": "D:/sts2", "slots": 8, "workers": 2, "gpu": true, "order": 2, "yield_gpu": false}
+ "hosts": {
+  "pc5070": {
+   "ssh": "pc5070",
+   "root": "D:/sts2",
+   "slots": 8,
+   "workers": 2,
+   "gpu": true,
+   "order": 1,
+   "yield_gpu": true
+  },
+  "lap3070": {
+   "ssh": "lap3070",
+   "root": "D:/sts2",
+   "slots": 8,
+   "workers": 2,
+   "gpu": true,
+   "order": 2,
+   "yield_gpu": false
+  },
+  "lab0": {
+   "ssh": "lab0",
+   "os": "linux",
+   "root": "/mnt/sda/share/slzhang/vio_lab0/sts2",
+   "slots": 16,
+   "workers": 2,
+   "dynamic": true,
+   "share": 0.5,
+   "gpu": false,
+   "order": 3
   }
+ }
 }

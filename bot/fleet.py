@@ -86,9 +86,63 @@ def sftp(host, lines, timeout=900):
         raise RuntimeError(f"sftp rc {res.returncode}: {(res.stderr or res.stdout)[-300:]}")
 
 
+def linux(host):
+    return host.get("os") == "linux"
+
+
 def rpath(host, rel=""):
-    """Remote path for sftp ("/D:/sts2/bot/<rel>")."""
+    """Remote path for sftp ("/D:/sts2/bot/<rel>" on Windows, "<root>/bot/<rel>" on Linux)."""
+    if linux(host):
+        return host["root"].rstrip("/") + "/bot/" + rel
     return "/" + host["root"].replace("\\", "/").rstrip("/") + "/bot/" + rel.replace("\\", "/")
+
+
+def lx(host, script, timeout=60, interp="bash -s"):
+    """Run a script on a Linux host (bash, or python3 with interp='python3 -'); returns stdout."""
+    res = subprocess.run(SSH + [host["ssh"], interp], input=script, capture_output=True, text=True, timeout=timeout,
+                         encoding="utf-8", errors="replace")
+    if res.returncode != 0:
+        raise RuntimeError(f"ssh rc {res.returncode}: {res.stderr[-300:]}")
+    return res.stdout
+
+
+def lx_pat(path):
+    """pgrep/pkill pattern for a path that does not match the pkill command line itself."""
+    return "[" + path[0] + "]" + path[1:]
+
+
+LX_POLL = r"""
+import json, os, re, subprocess
+root, ids = %ROOT%, %IDS%
+ps = subprocess.run(["ps", "-eww", "-o", "args"], capture_output=True, text=True).stdout.splitlines()
+alive = set()
+for line in ps:
+    m = re.search(r"fleet/jobs/([\w.\-]+)\.sh", line)
+    if m and root in line:
+        alive.add(m.group(1))
+jobs = {}
+for i in ids:
+    d = root + "/bot/fleet/jobs/" + i
+    if os.path.exists(d + ".rc"):
+        rc = open(d + ".rc").read().strip()
+        try:
+            lines = open(d + ".out", errors="replace").read().splitlines()
+        except OSError:
+            lines = []
+        err = ""
+        if rc != "0":
+            try:
+                err = "\n".join(open(d + ".err", errors="replace").read().splitlines()[-12:])
+            except OSError:
+                pass
+        jobs[i] = {"state": "done", "rc": rc, "out": lines[-1] if lines else "", "err": err}
+    elif i in alive:
+        jobs[i] = {"state": "running"}
+    else:
+        jobs[i] = {"state": "lost"}
+print(json.dumps({"pause": os.path.exists(root + "/PAUSE"), "jobs": jobs, "gpu": None, "ours": len(alive),
+                  "load": float(open("/proc/loadavg").read().split()[0]), "ncpu": os.cpu_count()}))
+"""
 
 
 def wroot(host):
@@ -149,6 +203,21 @@ foreach ($id in $ids) {
 }
 $pids | ConvertTo-Json -Compress
 """
+
+
+def job_sh(host, job):
+    """Linux job script: env on the data disk (HOME too), below-normal CPU and idle IO come from the launcher."""
+    R = host["root"].rstrip("/")
+    jid = job["id"]
+    argv = [str(host["workers"]) if a == "%W%" else str(a) for a in job["argv"]]
+    env = {"HOME": f"{R}/home", "DOTNET": f"{R}/dotnet/dotnet", "DOTNET_ROOT": f"{R}/dotnet", "DOTNET_CLI_HOME": f"{R}/cache/dotnethome",
+           "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "OMP_NUM_THREADS": "1", "XDG_CACHE_HOME": f"{R}/cache", "NETS_DEVICE": "cpu",
+           "PYTHONUNBUFFERED": "1"}
+    lines = ["#!/bin/bash"] + [f"export {k}={shlex.quote(v)}" for k, v in env.items()] + [f"mkdir -p {R}/home", f"cd {R}/bot"] + \
+        [f"rm -f {shlex.quote(o)}" for o in job["outputs"]] + \
+        [f"{R}/.venv/bin/python {' '.join(shlex.quote(a) for a in argv)} > fleet/jobs/{jid}.out 2> fleet/jobs/{jid}.err",
+         f"echo $? > fleet/jobs/{jid}.rc"]
+    return "\n".join(lines) + "\n"
 
 
 def job_cmd(host, job):
@@ -820,12 +889,24 @@ class Fleet:
         h = self.hosts.get(host)
         if h and h["state"] == "up":
             try:
+                if linux(h):   # the job runs in its own session (setsid): stop the whole process group
+                    pat = lx_pat(h["root"].rstrip("/") + "/bot/fleet/jobs/" + jid + ".sh")
+                    lx(h, f"for p in $(pgrep -f '{pat}'); do kill -TERM -- -$p 2>/dev/null; done; sleep 1; "
+                          f"for p in $(pgrep -f '{pat}'); do kill -KILL -- -$p 2>/dev/null; done; echo ok")
+                    return
                 ps(h, KILL_JOB_PS.replace("%ROOT%", wroot(h)).replace("%ID%", jid), timeout=60)
             except Exception as e:
                 log(f"{host}: kill of {jid} failed: {e}")
 
     def kill(self, h):
         try:
+            if linux(h):
+                pat = lx_pat(h["root"].rstrip("/") + "/")
+                out = lx(h, f"pkill -TERM -f '{pat}'; sleep 1; pkill -KILL -f '{pat}'; sleep 0.5; "
+                            f"echo killed, left $(pgrep -fc '{pat}')").strip().splitlines()[-1]
+                if not out.endswith("left 0"):
+                    log(f"{h['name']}: {out}")
+                return
             out = ps(h, KILL_PS.replace("%ROOT%", wroot(h)), timeout=60).strip().splitlines()[-1]
             if not out.endswith("left 0"):
                 log(f"{h['name']}: {out}")
@@ -848,8 +929,12 @@ class Fleet:
 
     def poll(self, h):
         ids = [j["id"] for j in self.running_on(h)]
-        script = POLL_PS.replace("%ROOT%", wroot(h)).replace("%IDS%", ",".join(f"'{i}'" for i in ids) or "")
         try:
+            if linux(h):
+                out = lx(h, LX_POLL.replace("%ROOT%", json.dumps(h["root"].rstrip("/"))).replace("%IDS%", json.dumps(ids)),
+                         interp="python3 -")
+                return json.loads(out.strip().splitlines()[-1])
+            script = POLL_PS.replace("%ROOT%", wroot(h)).replace("%IDS%", ",".join(f"'{i}'" for i in ids) or "")
             out = ps(h, script, timeout=60)
             return json.loads(out.strip().splitlines()[-1])
         except Exception as e:
@@ -910,6 +995,21 @@ class Fleet:
             self.drain(h, ", ".join(reasons))
         elif not reasons and h["drain"]:
             self.undrain(h, "no reason left")
+        if h.get("dynamic") and r.get("ncpu"):
+            # shared machine: at most `share` (half) of the threads other users leave idle; when they
+            # need more, stop our newest jobs (only ours, found by our own job names)
+            ours_threads = sum(h["workers"] for _ in self.running_on(h))
+            others = max(0.0, r["load"] - ours_threads)
+            allow = int((r["ncpu"] - others) * h.get("share", 0.5)) // max(1, h["workers"])
+            h["slots_now"] = max(0, min(h["slots"], allow))
+            h["others_load"] = round(others, 1)
+            extra = len(self.running_on(h)) - h["slots_now"]
+            if extra > 1:   # one slot of slack against load-average jitter
+                for j in sorted(self.running_on(h), key=lambda j: -j.get("t_start", 0))[:extra]:
+                    self.kill_job(h["name"], j["id"])
+                    if not self.drop_copy(j, h["name"]):
+                        j["state"], j["host"] = "queued", None
+                log(f"{h['name']}: others' load {others:.0f} of {r['ncpu']} threads; stopped {extra} of our jobs")
         if reasons:
             h["drain"] = ", ".join(reasons)
             if r.get("ours"):         # a kill that did not take (or jobs started by hand): again
@@ -964,6 +1064,14 @@ class Fleet:
                     j["state"], j["host"] = "queued", None
 
     def remote_clean(self, h):
+        if linux(h):
+            try:
+                R = h["root"].rstrip("/")
+                lx(h, "cd " + shlex.quote(R + "/bot") + " && rm -f " + " ".join(p for p in h["clean"]) + "; echo ok")
+                h["clean"] = []
+            except Exception:
+                pass
+            return
         pats = ",".join(f"'{wroot(h)}\\bot\\{p.replace('/', chr(92))}'" for p in h["clean"])
         try:
             ps(h, f"foreach ($p in @({pats})) {{ Remove-Item $p -ErrorAction SilentlyContinue }}")
@@ -974,7 +1082,8 @@ class Fleet:
     # ---- scheduling
 
     def free_slots(self, h):
-        return h["slots"] - len(self.running_on(h))
+        cap = h.get("slots_now", h["slots"]) if h.get("dynamic") else h["slots"]
+        return cap - len(self.running_on(h))
 
     def pick(self, job, hosts):
         if job["gpu"]:
@@ -1037,13 +1146,21 @@ class Fleet:
                             made.add(sub)
                     lines.append(f'put "{loc}" "{rpath(h, rel)}"')
                     h["files"][rel] = size
-                cmdf = os.path.join(FLEET, "jobs", f"{j['id']}.cmd")
+                ext = "sh" if linux(h) else "cmd"
+                cmdf = os.path.join(FLEET, "jobs", f"{j['id']}.{ext}")
                 with open(cmdf, "w", newline="") as fh:
-                    fh.write(job_cmd(h, j))
-                lines.append(f'put "{cmdf}" "{rpath(h, "fleet/jobs/" + j["id"] + ".cmd")}"')
+                    fh.write(job_sh(h, j) if linux(h) else job_cmd(h, j))
+                lines.append(f'put "{cmdf}" "{rpath(h, "fleet/jobs/" + j["id"] + "." + ext)}"')
             sftp(h, [f'-mkdir "{rpath(h, d)}"' for d in ("fleet", "fleet/jobs", "fleetdata", "runs")] + lines)
-            out = ps(h, LAUNCH_PS.replace("%ROOT%", wroot(h)).replace("%IDS%", ",".join(f"'{j['id']}'" for j in js)))
-            json.loads(out.strip().splitlines()[-1])
+            if linux(h):
+                R = h["root"].rstrip("/")
+                cmds = [f"cd {R}/bot && rm -f fleet/jobs/{j['id']}.rc fleet/jobs/{j['id']}.out fleet/jobs/{j['id']}.err && "
+                        f"setsid nohup nice -n 19 ionice -c3 bash {R}/bot/fleet/jobs/{j['id']}.sh > /dev/null 2>&1 < /dev/null &"
+                        for j in js]
+                lx(h, "\n".join(cmds) + "\necho ok")
+            else:
+                out = ps(h, LAUNCH_PS.replace("%ROOT%", wroot(h)).replace("%IDS%", ",".join(f"'{j['id']}'" for j in js)))
+                json.loads(out.strip().splitlines()[-1])
             for j in js:
                 if not backup:
                     j["t_start"] = time.time()
