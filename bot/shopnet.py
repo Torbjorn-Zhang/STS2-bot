@@ -7,6 +7,7 @@ then self-play RL on final progress (cardloop.py --shop-init).
 
 import argparse
 import json
+import os
 import zlib
 from collections import defaultdict
 
@@ -176,6 +177,7 @@ def train_sl(paths, out, enc_from, epochs=30, hidden=128, lr=1e-3):
 
 
 def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, clip=0.2, ent=0.01):
+    lr *= float(os.environ.get("NETS_LR_SCALE", "1"))   # fleet xdeckrl lr_scale
     blob = torch.load(init, weights_only=False)
     enc = RunEncoder.from_json(blob["enc"])
     model = PolicyNet(state_dim(enc), opt_dim(enc), blob["hidden"])

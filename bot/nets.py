@@ -951,6 +951,7 @@ def train_card_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, batch=25
     run's final progress (floors), baseline: mean final progress of runs at the same
     (act, floor) in this data. NETS_DEVICE=cuda trains on the GPU."""
     t0 = time.time()
+    lr *= float(os.environ.get("NETS_LR_SCALE", "1"))   # fleet xdeckrl lr_scale
     dev = torch.device(os.environ.get("NETS_DEVICE", "cpu"))
     blob = torch.load(init, weights_only=False)
     enc = RunEncoder.from_json(blob["enc"])

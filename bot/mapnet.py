@@ -9,6 +9,7 @@ on final progress (cardloop.py --map-init).
 
 import argparse
 import json
+import os
 from collections import defaultdict
 
 import numpy as np
@@ -136,6 +137,7 @@ def train_sl(paths, out, enc_from, epochs=30, hidden=128, lr=1e-3):
 
 
 def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, clip=0.2, ent=0.01):
+    lr *= float(os.environ.get("NETS_LR_SCALE", "1"))   # fleet xdeckrl lr_scale
     blob = torch.load(init, weights_only=False)
     enc = RunEncoder.from_json(blob["enc"])
     model = PolicyNet(enc.dim, OPT_DIM, blob["hidden"])

@@ -44,7 +44,8 @@ def train(args):
         cmd = [PY, script, mode] + args.data + ["--init", init, "--out", out, "--temperature", str(args.temperature)]
         log = open(os.path.join(HERE, "fleet", "jobs", f"train_{args.tag}{args.it}_{kind}.log"), "w")
         procs[kind] = (subprocess.Popen(cmd, cwd=HERE, stdout=log, stderr=subprocess.STDOUT,
-                                        env={**os.environ, "OMP_NUM_THREADS": "2", "NETS_THREADS": "2"}), log, time.time())
+                                        env={**os.environ, "OMP_NUM_THREADS": "2", "NETS_THREADS": "2",
+                                             "NETS_LR_SCALE": str(args.lr_scale)}), log, time.time())
         models[kind] = out
     timing, failed = {}, []
     for kind, (p, log, ts) in procs.items():
@@ -69,6 +70,7 @@ def main():
     ap.add_argument("--tag", required=True)
     ap.add_argument("--it", type=int, required=True)
     ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--lr-scale", type=float, default=1.0, help="multiplies every trainer's learning rate")
     for kind in TRAINERS:
         ap.add_argument(f"--{kind}", default=None)
     args = ap.parse_args()

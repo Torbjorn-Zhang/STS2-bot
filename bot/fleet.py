@@ -497,7 +497,8 @@ class XDeckRL:
                 listing = f"fleetdata/{self.name}_it{it}_train.txt"   # the file list (cmd lines cap at 8191 chars)
                 with open(os.path.join(HERE, listing), "w") as fh:
                     fh.write("\n".join(data) + "\n")
-                argv = ["fleetjob.py", "train", "@" + listing, "--tag", self.name, "--it", it, "--temperature", sp["temperature"]]
+                argv = ["fleetjob.py", "train", "@" + listing, "--tag", self.name, "--it", it, "--temperature", sp["temperature"],
+                        "--lr-scale", sp.get("lr_scale", 1.0)]
                 for k in self.KINDS:
                     if st["cur"].get(k):
                         argv += [f"--{k}", st["cur"][k]]

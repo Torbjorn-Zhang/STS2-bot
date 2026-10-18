@@ -169,6 +169,7 @@ def train_sl(paths, out, epochs=30, hidden=128, lr=1e-3, init_enc=None):
 
 
 def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, clip=0.2, ent=0.01):
+    lr *= float(os.environ.get("NETS_LR_SCALE", "1"))   # fleet xdeckrl lr_scale
     blob = torch.load(init, weights_only=False)
     enc = RunEncoder.from_json(blob["enc"])
     model = PolicyNet(enc.dim + len(ROUTE) + 2, HASH * 2 + len(NUMS) * 2 + 3, blob["hidden"])

@@ -185,6 +185,7 @@ def train_sl(paths, out, epochs=60, hidden=128, lr=1e-3):
 def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, clip=0.2, ent=0.01):
     """PPO on sampled rest choices in self-play; return = final progress, baseline = mean
     final progress at the same (act, floor) in this data."""
+    lr *= float(os.environ.get("NETS_LR_SCALE", "1"))   # fleet xdeckrl lr_scale
     blob = torch.load(init, weights_only=False)
     enc = RunEncoder.from_json(blob["enc"])
     model = PolicyNet(enc.dim + len(ROUTE) + 2, len(enc.cards) + 1 + len(KINDS), blob["hidden"])
