@@ -916,6 +916,8 @@ def train_card(paths, out, epochs=40, hidden=128, lr=1e-3):
 SKIP_BIAS = float(os.environ.get("CARD_SKIP_BIAS", "0"))
 
 
+BOSS_VALUES = {}    # act -> bossvalue.BossValue (P(win the act boss) from the deck), run.py --boss-value
+BOSS_BETA = 0.0     # weight of its logit gain in CardPolicy.scores
 HUMAN_PRIOR = 0.0   # weight of the human card-pick prior in CardPolicy.scores (run.py --human-prior)
 HUMAN_ELO = {}      # card token -> pairwise pick Elo from human runs (data/human_card_stats.json)
 
@@ -951,6 +953,13 @@ class CardPolicy:
             for i, a in enumerate(acts):
                 if a[0] == "skip_card_reward":
                     z[i] += SKIP_BIAS
+        if BOSS_BETA and BOSS_VALUES:   # value-guided: how much each option raises P(beat this act's boss)
+            rs = run_state(st)
+            bv = BOSS_VALUES.get(rs.get("act"))
+            if bv is not None:
+                extras = [[card_tok(by_index[a[1]["card_index"]])] if a[0] == "select_card_reward" else [] for a in acts]
+                lg = bv.logits(rs, extras + [[]])
+                z = z + BOSS_BETA * (lg[:-1] - lg[-1])
         if HUMAN_PRIOR:   # human pick preference (Elo from uploaded human runs), per 100 Elo above 1200
             for i, a in enumerate(acts):
                 if a[0] == "select_card_reward":

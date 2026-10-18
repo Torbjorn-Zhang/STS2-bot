@@ -364,12 +364,14 @@ class Bench:
                     out = f"runs/{self.name}_{c}_s{k}.jsonl"
                     # "nodes": the planner's search size, "weights": combat.W overrides
                     roll = {a: v for a, v in cfg.items() if a not in ("nodes", "weights")}
-                    argv = ["bossbench.py", "eval", "--tag", sp["bench"], "--rollouts", json.dumps(roll, separators=(",", ":")),
+                    argv = ["bossbench.py", sp.get("mode", "eval"), "--tag", sp["bench"], "--rollouts", json.dumps(roll, separators=(",", ":")),
                             "--reps", sp.get("reps", 1), "--shard", f"{k}/{sp['shards']}", "--workers", "%W%", "--out", out]
+                    argv += ["--variants", sp["variants"], "--rep-offset", sp.get("offset", 0)] if sp.get("mode") == "explore" else []
                     argv += ["--nodes", cfg["nodes"]] if "nodes" in cfg else []
                     argv += ["--weights", json.dumps(cfg["weights"], separators=(",", ":"))] if "weights" in cfg else []
                     argv += (["--room", sp["room"]] if sp.get("room") else []) + sp.get("extra", [])
-                    jobs.append(fl.add_job(self.name, f"{self.name}_{c}_s{k}", "bench", sp.get("prio", 0.8), argv, files, [out]))
+                    jobs.append(fl.add_job(self.name, f"{self.name}_{c}_s{k}", "bench", sp.get("prio", 0.8), argv,
+                                           files + sp.get("inputs", []), [out]))
             st.update(phase="running", jobs=jobs, t0=time.time())
             log(f"{self.name}: bench {sp['bench']}, {len(sp['configs'])} configs x {len(shards)} shards")
         elif st["phase"] == "running" and all(fl.jobs[j]["state"] in ("done", "failed") for j in st["jobs"]):
@@ -388,11 +390,11 @@ class Bench:
                         fh.write(json.dumps(r) + "\n")
                 by = {}
                 for r in rows:
-                    b = by.setdefault(r["boss"], [0, 0])
+                    b = by.setdefault(str(r.get("boss")), [0, 0])
                     b[0] += 1
                     b[1] += bool(r["won"])
                 summ[c] = {"fights": len(rows), "won": sum(bool(r["won"]) for r in rows),
-                           "mean_s": round(sum(r["seconds"] for r in rows) / max(1, len(rows)), 1),
+                           "mean_s": round(sum(r.get("seconds", 0) for r in rows) / max(1, len(rows)), 1),
                            "by_boss": {k: f"{w}/{n}" for k, (n, w) in sorted(by.items())}}
                 log(f"{self.name}: {c} {json.dumps(summ[c])}")
             st.update(phase="finished", summary=summ)

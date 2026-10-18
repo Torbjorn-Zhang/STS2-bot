@@ -12,6 +12,7 @@ import argparse
 import glob
 import hashlib
 import json
+import math
 import os
 import time
 import zlib
@@ -106,8 +107,13 @@ def collect_one(sim, seed, out_dir, ascension=0, act=1, rollouts=None):
     return None
 
 
+SET_DECK = None   # diagnostic (--set-deck): replace the saved deck with these card ids before the fight
+
+
 def fight_one(sim, meta, model, value_weight, nodes, rollouts=None, rep=None):
     st = sim.send({"cmd": "load_save", "path": meta["path"]})
+    if SET_DECK:
+        sim.send({"cmd": "set_player", "deck": SET_DECK})
     col, row = meta.get("node") or meta["boss_node"]
     st = sim.act("select_map_node", col=col, row=row)
     if rep is not None:   # a different hidden future per repetition, the same for every config
@@ -143,6 +149,48 @@ def shard_of(seed, n):
     return int(hashlib.md5(seed.encode()).hexdigest(), 16) % n
 
 
+def explore_one(sim, meta, variant, offset, pool, nodes, rollouts):
+    """One deck variant on a boss save: add pool cards to the saved deck (70%) or build a fresh
+    deck of basics + pool cards (30%), fight the boss, return the deck and the result. Deck
+    diversity the bot's own runs lack (boss-value training data)."""
+    import random
+    from record import card_tok
+    rng = random.Random(f"{meta['seed']}/{variant}/{offset}")
+    st = sim.send({"cmd": "load_save", "path": meta["path"]})
+    p = st.get("player") or {}
+    deck = [card_tok(c) for c in p.get("deck") or []]
+    ids, wts = zip(*pool)
+    if rng.random() < 0.7:
+        add = [rng.choices(ids, weights=wts)[0] for _ in range(rng.randint(1, 8))]
+        sim.send({"cmd": "set_player", "add_cards": add})
+        deck = deck + add
+    else:
+        add = [rng.choices(ids, weights=wts)[0] for _ in range(rng.randint(6, 16))]
+        deck = ["BASH"] + ["STRIKE_IRONCLAD"] * 3 + ["DEFEND_IRONCLAD"] * 3 + add
+        sim.send({"cmd": "set_player", "deck": deck})
+    ctx = st.get("context") or {}
+    col, row = meta.get("node") or meta["boss_node"]
+    st = sim.act("select_map_node", col=col, row=row)
+    sim.send({"cmd": "determinize", "seed": zlib.crc32(f"{meta['seed']}/x{variant}/{offset}".encode())})
+    planner = TurnPlanner(sim, max_nodes=nodes, rollouts=rollouts)
+    hp0 = (st.get("player") or {}).get("hp")
+    enemy_max = sum((e.get("max_hp") or 0) for e in st.get("enemies") or [])
+    last = {"s": st}
+
+    def watch(s_):
+        if s_.get("enemies") is not None:
+            last["s"] = s_
+
+    st = planner.play_combat(st, on_state=watch)
+    won = st.get("decision") != "game_over" or bool(st.get("victory"))
+    hp = (last["s"].get("player") or {}).get("hp") if won else 0
+    left = 0 if won else sum((e.get("hp") or 0) for e in combat.alive(last["s"]))
+    return {"seed": meta["seed"], "variant": variant, "act": ctx.get("act"), "boss": (ctx.get("boss") or {}).get("id"),
+            "deck": deck, "relics": [r.get("name") for r in p.get("relics") or []], "hp": hp0, "mhp": p.get("max_hp"),
+            "potions": len([x for x in p.get("potions") or [] if x]), "won": won, "hp_after": hp or 0,
+            "graded": decktest.graded(won, hp or 0, left, enemy_max)}
+
+
 def in_shard(seed, k, n):
     return shard_of(seed, n) == k
 
@@ -166,7 +214,8 @@ def parallel(items, fn, workers):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["collect", "collect-fights", "eval"])
+    ap.add_argument("mode", choices=["collect", "collect-fights", "eval", "explore"])
+    ap.add_argument("--variants", type=int, default=20, help="explore: deck variants per save")
     ap.add_argument("n", type=int, nargs="?", default=0)
     ap.add_argument("--tag", required=True)
     ap.add_argument("--workers", type=int, default=6)
@@ -191,6 +240,7 @@ def main():
     ap.add_argument("--out", default=None)
     ap.add_argument("--reps", type=int, default=1, help=">1: fight each save this many times, determinized")
     ap.add_argument("--rep-offset", type=int, default=0, help="first repetition index (fresh hidden futures per tuning generation)")
+    ap.add_argument("--set-deck", default=None, help='diagnostic: JSON list of card ids replacing every saved deck')
     args = ap.parse_args()
     bench_dir = os.path.join(HERE, "data", f"bossbench_{args.tag}")
     if args.deck_nets:
@@ -218,6 +268,9 @@ def main():
 
     if args.weights:
         combat.W.update(json.loads(args.weights))
+    if args.set_deck:
+        global SET_DECK
+        SET_DECK = json.loads(args.set_deck)
     if args.net_rollouts or args.rollout_value or args.rollout_xvalue or args.leaf_xvalue:
         import torch
         torch.set_num_threads(1)
@@ -253,6 +306,19 @@ def main():
             m["path"] = os.path.join(bench_dir, os.path.basename(m["path"]))
     t0 = time.perf_counter()
     roll = json.loads(args.rollouts) if args.rollouts else None
+    if args.mode == "explore":
+        with open(os.path.join(HERE, "data", "human_card_stats.json")) as fh:
+            hum = json.load(fh)["cards"]
+        pool = [(k.replace("CARD.", ""), math.exp((v["elo"] - 1200) / 250.0)) for k, v in hum.items()
+                if v["chars"] and max(v["chars"], key=v["chars"].get) == "IRONCLAD" and v["elo_n"] >= 100]
+        items = [(m, v) for m in metas for v in range(args.variants)]
+        res = parallel(items, lambda sim, it: explore_one(sim, it[0], it[1], args.rep_offset, pool, args.nodes, roll),
+                       args.workers)
+        with open(args.out, "w") as fh:
+            for r in res:
+                fh.write(json.dumps(r) + "\n")
+        print(json.dumps({"fights": len(res), "won": sum(r["won"] for r in res)}))
+        return
     if args.reps <= 1 and not args.rep_offset:
         items = [(m, None) for m in metas]
     else:

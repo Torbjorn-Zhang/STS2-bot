@@ -144,6 +144,8 @@ def main():
     ap.add_argument("--weights", default=None, help="JSON overrides for combat.W (e.g. graded rollout deaths)")
     ap.add_argument("--human-prior", type=float, default=0.0, help="card rewards: + this x human pick Elo (per 100 over 1200)")
     ap.add_argument("--rest-smith-bias", type=float, default=0.0, help="rest network: logit added to smith options")
+    ap.add_argument("--boss-value", default=None, help='JSON {act: bossvalue model} for value-guided card rewards')
+    ap.add_argument("--boss-beta", type=float, default=0.0, help="weight of the boss-win logit gain on card rewards")
     ap.add_argument("--map-elite-bias", type=float, default=0.0, help="map network: logit added to elite rooms")
     ap.add_argument("--explore", type=float, default=0.0, help="chance of a random card reward pick (data collection)")
     ap.add_argument("--net-rollouts", default=None, help="policy network (nets.py) as the planner's rollout policy")
@@ -217,6 +219,11 @@ def main():
     if args.human_prior:
         import nets
         nets.set_human_prior(args.human_prior)
+    if args.boss_value and args.boss_beta:
+        import nets
+        from bossvalue import BossValue
+        nets.BOSS_VALUES = {int(a): BossValue(os.path.join(HERE, p)) for a, p in json.loads(args.boss_value).items()}
+        nets.BOSS_BETA = args.boss_beta
     if args.rest_smith_bias:
         import restnet
         restnet.SMITH_BIAS = args.rest_smith_bias
