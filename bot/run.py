@@ -44,7 +44,8 @@ def boss_mc(sim, st, planner, seed, enemy_max):
                     last["s"] = s_
 
             end = planner.play_combat(dict(st), on_state=w)
-            won = end.get("decision") != "game_over" or bool(end.get("victory"))
+            # still in combat = the planner's action cap: not a win
+            won = end.get("decision") not in ("game_over", "combat_play", "card_select") or bool(end.get("victory"))
             left = 0 if won else sum((e.get("hp") or 0) for e in combat.alive(last["s"]))
             shares.append(1.0 if won else max(0.0, 1 - left / max(1, enemy_max)))
     finally:
