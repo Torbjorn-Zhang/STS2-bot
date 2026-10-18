@@ -502,6 +502,8 @@ class XDeckRL:
                     fh.write("\n".join(data) + "\n")
                 argv = ["fleetjob.py", "train", "@" + listing, "--tag", self.name, "--it", it, "--temperature", sp["temperature"],
                         "--lr-scale", sp.get("lr_scale", 1.0)]
+                if sp.get("reward"):
+                    argv += ["--reward", json.dumps(sp["reward"], separators=(",", ":"))]
                 for k in self.KINDS:
                     if st["cur"].get(k):
                         argv += [f"--{k}", st["cur"][k]]
