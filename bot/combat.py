@@ -44,6 +44,9 @@ W = {
     # dies within the horizon the search still prefers dying later with the enemy lower
     "death_turn": 0.0,
     "death_dmg": 0.0,
+    # focus fire (bottled_ai ranks "lowest-HP monster" above total enemy HP): per HP taken
+    # off the weakest living enemy in multi-enemy fights (Kaiser Crab's two halves)
+    "focus": 0.0,
     "steam_lethal": 0.0,    # Waterfall Giant: penalty when its death blast (Steam Eruption) would kill us (80: 9 vs 7 of 44 WG fights)
 }
 PLAYER_DEBUFFS = ("Vulnerable", "Weak", "Frail")
@@ -267,6 +270,11 @@ def evaluate(root, st):
         score += (1 - fm) * w_dmg * (W["scaling"] if grows else 1.0) * dealt * mult
     if fm:
         score -= fm * future_loss(st)
+    if W["focus"] and len(root_alive) >= 2:
+        weakest = min(e["hp"] for e in root_alive)
+        killed = any(eid(e) not in now_by_id for e in root_alive)
+        now_weakest = 0 if killed else min((e["hp"] for e in now_alive), default=0)
+        score += W["focus"] * max(0, weakest - now_weakest)
     # enemies from the root that are dead now (a kill that spawns new enemies is still a kill)
     score += W["kill"] * sum((W["illusion_credit"] if "Illusion" in powers(e.get("powers")) else 1.0)
                              for e in root_alive if eid(e) not in now_by_id)
