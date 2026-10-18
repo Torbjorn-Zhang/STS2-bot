@@ -47,6 +47,9 @@ W = {
     # focus fire (bottled_ai ranks "lowest-HP monster" above total enemy HP): per HP taken
     # off the weakest living enemy in multi-enemy fights (Kaiser Crab's two halves)
     "focus": 0.0,
+    # diagnostic: 0 = rollouts replay the real hidden future (draw order, enemy rolls) instead
+    # of a determinized sample, i.e. a planner that knows the future
+    "determinize": 1,
     "steam_lethal": 0.0,    # Waterfall Giant: penalty when its death blast (Steam Eruption) would kill us (80: 9 vs 7 of 44 WG fights)
 }
 PLAYER_DEBUFFS = ("Vulnerable", "Weak", "Frail")
@@ -529,7 +532,8 @@ class TurnPlanner:
 
     def _rollout(self, root, snap, last, seed, turns, pilot_nodes=0, lam=0.0):
         self._restore(snap)
-        self.sim.send({"cmd": "determinize", "seed": seed})
+        if W["determinize"]:
+            self.sim.send({"cmd": "determinize", "seed": seed})
         s = self.sim.act(last[0], **last[1])
         future = 1 if last[0] == "end_turn" else 0
         seen = s if s.get("enemies") is not None else None   # last state that shows the enemies
