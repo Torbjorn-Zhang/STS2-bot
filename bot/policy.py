@@ -314,6 +314,38 @@ def lab_value(cid, act, floor):
     return boss
 
 
+def _potion_ids():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "sts2-cli", "localization_eng", "potions.json")) as fh:
+            return {v: k[:-len(".title")] for k, v in json.load(fh).items() if k.endswith(".title")}
+    except (OSError, ValueError):
+        return {}
+
+
+POTION_IDS = _potion_ids()   # display name -> POTION id (the state shows potions by name only)
+
+
+def potion_id(p):
+    return POTION_IDS.get(p.get("name") or "")
+
+
+def potion_slots(st):
+    """Potion slots: 3, one fewer from ascension 4, +2 with Alchemical Coffer (a guess at its
+    {PotionSlots}; an over-count only makes a purchase fail). The state lists filled slots
+    only, so free slots = this - len(player.potions)."""
+    p = st.get("player") or {}
+    asc = (st.get("context") or {}).get("ascension") or 0
+    cap = 3 - (1 if asc >= 4 else 0)
+    if any((r.get("name") if isinstance(r, dict) else r) == "Alchemical Coffer" for r in p.get("relics") or []):
+        cap += 2
+    return cap
+
+
+def free_potion_slots(st):
+    return max(0, potion_slots(st) - len([x for x in (st.get("player") or {}).get("potions") or [] if x]))
+
+
 def choose_card_reward(st, sim=None):
     if CARD_NET is not None and not DECK_TEST and st.get("cards"):
         return CARD_NET(st)
@@ -693,8 +725,7 @@ def choose_shop(st, memo, sim=None):
         if card_value(best, deck, full, act) >= 2.8:
             m["cards"] += 1
             return ("buy_card", {"card_index": best["index"]})
-    slots = (st.get("player") or {}).get("potions") or []   # one entry per slot, None when empty
-    empty = sum(1 for p in slots if not p)
+    empty = free_potion_slots(st)   # the state lists filled slots only (no None for empty ones)
     pots = [p for p in st.get("potions") or [] if p.get("is_stocked", True) and (p.get("cost") or 9999) <= gold]
     if pots and empty > 0 and m["potions"] < 2:   # potions decide boss fights; fill free slots
         m["potions"] += 1

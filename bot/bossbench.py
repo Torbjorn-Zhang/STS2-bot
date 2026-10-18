@@ -111,6 +111,14 @@ SET_DECK = None   # diagnostic (--set-deck): replace the saved deck with these c
 DECK_OP = None    # diagnostic (--deck-op): change the saved deck (removals, upgrades) or HP, see deck_op()
 
 BASICS = ("STRIKE_IRONCLAD", "DEFEND_IRONCLAD")
+COMMON_POTIONS = ("FIRE_POTION", "EXPLOSIVE_AMPOULE", "BLOCK_POTION", "STRENGTH_POTION", "DEXTERITY_POTION",
+                  "ENERGY_POTION", "SWIFT_POTION", "WEAK_POTION", "VULNERABLE_POTION", "ATTACK_POTION",
+                  "SKILL_POTION", "POWER_POTION", "FLEX_POTION", "BLOOD_POTION", "REGEN_POTION", "LIQUID_BRONZE")
+
+
+def potion_slots(st):
+    from policy import potion_slots as ps
+    return ps(st)
 
 
 def deck_op(sim, st, op, seed):
@@ -144,6 +152,12 @@ def deck_op(sim, st, op, seed):
         sim.send({"cmd": "set_player", "upgrade": [c["id"].replace("CARD.", "") for c in cand[:k]]})
     elif kind == "hpm":
         sim.send({"cmd": "set_player", "hp": max(1, (p.get("hp") or 1) - k)})
+    elif kind in ("pot", "potfill"):   # potK: K more random common potions; potfill: every free slot
+        from policy import potion_id
+        have = [potion_id(x) for x in p.get("potions") or [] if x and potion_id(x)]
+        cap = potion_slots(st)
+        add = max(0, cap - len(have)) if kind == "potfill" else min(k, max(0, cap - len(have)))
+        sim.send({"cmd": "set_player", "potions": have + [rng.choice(COMMON_POTIONS) for _ in range(add)]})
     else:
         raise ValueError(f"unknown deck op {op}")
 

@@ -184,6 +184,10 @@ def main():
     ap.add_argument("--human-skip-elo", type=float, default=None, help="with --human-prior: skip counts as a card of this Elo")
     ap.add_argument("--decktest-from-act", type=int, default=0,
                     help="with card_decides nets: card rewards from this act on by the deck test, the net as prior")
+    ap.add_argument("--decktest-pilot", default=None, help="quick (quick_policy) or planner (TurnPlanner, --decktest-nodes)")
+    ap.add_argument("--decktest-nodes", type=int, default=None)
+    ap.add_argument("--decktest-reps", type=int, default=None)
+    ap.add_argument("--decktest-boss-only", action="store_true", help="deck test against the act boss only")
     ap.add_argument("--rest-smith-bias", type=float, default=0.0, help="rest network: logit added to smith options")
     ap.add_argument("--boss-value", default=None, help='JSON {act: bossvalue model} for value-guided card rewards')
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
@@ -276,6 +280,13 @@ def main():
         nets.BOSS_VALUES = {int(a): BossValue(os.path.join(HERE, p)) for a, p in json.loads(args.boss_value).items()}
         nets.BOSS_BETA = args.boss_beta
     policy.DECKTEST_FROM_ACT = args.decktest_from_act
+    if args.decktest_pilot or args.decktest_nodes or args.decktest_reps or args.decktest_boss_only:
+        import decktest   # card rewards only; upgrades, shops and events keep the defaults
+        if args.decktest_pilot == "planner":
+            decktest.CARD_PILOT = "planner"
+            decktest.REFINE_NODES = args.decktest_nodes or decktest.REFINE_NODES
+        decktest.CARD_REPS = args.decktest_reps
+        decktest.CARD_BOSS_ONLY = args.decktest_boss_only
     if args.rest_smith_bias:
         import restnet
         restnet.SMITH_BIAS = args.rest_smith_bias

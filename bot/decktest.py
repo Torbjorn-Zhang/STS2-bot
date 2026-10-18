@@ -143,6 +143,13 @@ HARD_HALLWAY_ACT1 = {
 }
 
 
+# card rewards only (run.py --decktest-*): the pilot, its search size, the repetitions, and
+# boss-only tests; upgrades, shops and events keep the defaults
+CARD_PILOT = None       # None: PILOT; "planner": TurnPlanner(REFINE_NODES)
+CARD_REPS = None        # None: REPS
+CARD_BOSS_ONLY = False  # test against the act boss only (no hard hallway fight)
+
+
 def tests_for(st):
     ctx = st.get("context") or {}
     boss = (ctx.get("boss") or {}).get("id")
@@ -440,13 +447,16 @@ def evaluate_arms_path(sim, st, arms, tag="", pilot=None, reps=PATH_REPS):
     return out
 
 
-def evaluate_arms(sim, st, arms, reps=REPS, tag="", pilot=None):
+def evaluate_arms(sim, st, arms, reps=None, tag="", pilot=None, boss_only=False):
     """arms: {key: [(action, kwargs), ...]}, the moves that make each alternative from st.
     Each arm is applied in the sandbox, then the bot walks to the map and fights the test
     encounters (same seeds for every arm). Returns {key: mean graded score}; restores st."""
+    reps = REPS if reps is None else reps   # read at call time (run.py --decktest-reps)
     if PATH_TEST:
         return evaluate_arms_path(sim, st, arms, tag=tag, pilot=pilot)
     tests = tests_for(st)
+    if boss_only:
+        tests = tests[:1]
     if not tests or len(arms) < 2:
         return {}
     snap = sim.send({"cmd": "snapshot"})["id"]
@@ -478,7 +488,7 @@ def evaluate_options(sim, st):
     arms = {c["index"]: [("select_card_reward", {"card_index": c["index"]})] for c in st.get("cards") or []}
     if st.get("can_skip", True):
         arms[None] = [("skip_card_reward", {})]
-    return evaluate_arms(sim, st, arms)
+    return evaluate_arms(sim, st, arms, reps=CARD_REPS, pilot=CARD_PILOT, boss_only=CARD_BOSS_ONLY)
 
 
 def evaluate_upgrades(sim, st, candidates):
