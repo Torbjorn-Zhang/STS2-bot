@@ -1064,12 +1064,18 @@ class Fleet:
                 for x in self.pipes:
                     if x.name == tag and not x.finished():
                         x.st["phase"] = "cancelled"
-                n = 0
+                n = k = 0
                 for j in self.jobs.values():
                     if j["pipe"] == tag and j["state"] == "queued":
                         j["state"] = "failed"
                         n += 1
-                log(f"pipeline {tag} cancelled ({n} queued jobs dropped; running ones finish)")
+                    elif j["pipe"] == tag and j["state"] == "running":   # stop them too: the slots go to live work
+                        for host in (j["host"], j.get("backup")):
+                            if host:
+                                self.kill_job(host, j["id"])
+                        j["state"], j["backup"] = "failed", None
+                        k += 1
+                log(f"pipeline {tag} cancelled ({n} queued jobs dropped, {k} running ones stopped)")
                 os.remove(p)
                 continue
             if any(x.name == spec["spec"]["tag"] for x in self.pipes):
