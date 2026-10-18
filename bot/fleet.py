@@ -633,6 +633,8 @@ class Tune:
         xs = [(np.asarray(st["m"]) + st["sigma"] * np.asarray(y)).tolist() for y in ys]
         cands = [{"y": y, "x": x, "w": self.weights_of(x)} for y, x in zip(ys, xs)]
         cands.append({"y": None, "x": list(st["m"]), "w": self.weights_of(st["m"]), "mean": True})
+        # control: the starting weights on the same fights, for a paired mean-vs-start difference
+        cands.append({"y": None, "x": [0.0] * n, "w": self.weights_of([0.0] * n), "control": True})
         off = 100 * (st["gen"] + 1)   # hidden futures of this generation
         for ci, c in enumerate(cands):
             c["jobs"] = []
@@ -659,8 +661,9 @@ class Tune:
             c["fights"] = len(rows)
             c["won"] = sum(bool(r["won"]) for r in rows)
             c["fit"] = sum(fight_score(r) for r in rows) / max(1, len(rows))
-        samples = [c for c in st["cands"] if not c.get("mean")]
+        samples = [c for c in st["cands"] if not c.get("mean") and not c.get("control")]
         mean_c = next(c for c in st["cands"] if c.get("mean"))
+        ctrl = next((c for c in st["cands"] if c.get("control")), None)
         order = sorted(range(len(samples)), key=lambda i: -samples[i]["fit"])
         Y = np.asarray([samples[i]["y"] for i in order[:mu]])
         yw = wts @ Y
@@ -678,11 +681,14 @@ class Tune:
         row = {"gen": st["gen"], "mean_fit": round(mean_c["fit"], 3), "mean_won": mean_c["won"], "fights": mean_c["fights"],
                "best_fit": round(best["fit"], 3), "best_won": best["won"], "pop_fit": round(float(np.mean([c["fit"] for c in samples])), 3),
                "sigma": round(sigma, 4), "mean_w": mean_c["w"], "best_w": best["w"]}
+        if ctrl is not None:
+            row.update(control_fit=round(ctrl["fit"], 3), control_won=ctrl["won"])
         st["history"].append(row)
         with open(os.path.join(HERE, "runs", f"{self.name}.jsonl"), "a") as fh:
             fh.write(json.dumps(row) + "\n")
         log(f"{self.name}: generation {st['gen']} mean fit {row['mean_fit']} ({row['mean_won']}/{row['fights']} won), "
-            f"best {row['best_fit']} ({row['best_won']}), pop {row['pop_fit']}, sigma {row['sigma']}")
+            f"best {row['best_fit']} ({row['best_won']}), pop {row['pop_fit']}, sigma {row['sigma']}"
+            + (f", start weights {row['control_fit']} ({row['control_won']} won)" if ctrl is not None else ""))
         st.update(m=m.tolist(), C=C.tolist(), ps=ps.tolist(), pc=pc.tolist(), sigma=sigma, gen=st["gen"] + 1)
         with open(os.path.join(HERE, "models", f"{self.name}_mean.json"), "w") as fh:
             json.dump(self.weights_of(st["m"]), fh)
