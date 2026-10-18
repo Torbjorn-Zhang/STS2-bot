@@ -144,6 +144,8 @@ def main():
     ap.add_argument("--weights", default=None, help="JSON overrides for combat.W (e.g. graded rollout deaths)")
     ap.add_argument("--human-prior", type=float, default=0.0, help="card rewards: + this x human pick Elo (per 100 over 1200)")
     ap.add_argument("--human-prior-from-act", type=int, default=1)
+    ap.add_argument("--skip-bias", type=float, default=None, help="card rewards: logit added to skipping")
+    ap.add_argument("--human-skip-elo", type=float, default=None, help="with --human-prior: skip counts as a card of this Elo")
     ap.add_argument("--rest-smith-bias", type=float, default=0.0, help="rest network: logit added to smith options")
     ap.add_argument("--boss-value", default=None, help='JSON {act: bossvalue model} for value-guided card rewards')
     ap.add_argument("--boss-beta", type=float, default=0.0, help="weight of the boss-win logit gain on card rewards")
@@ -221,6 +223,10 @@ def main():
         import nets
         nets.set_human_prior(args.human_prior)
         nets.HUMAN_PRIOR_MIN_ACT = args.human_prior_from_act
+        nets.HUMAN_SKIP_ELO = args.human_skip_elo
+    if args.skip_bias is not None:
+        import nets
+        nets.SKIP_BIAS = args.skip_bias
     if args.boss_value and args.boss_beta:
         import nets
         from bossvalue import BossValue

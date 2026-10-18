@@ -921,6 +921,7 @@ BOSS_BETA = 0.0     # weight of its logit gain in CardPolicy.scores
 HUMAN_PRIOR = 0.0   # weight of the human card-pick prior in CardPolicy.scores (run.py --human-prior)
 HUMAN_ELO = {}      # card token -> pairwise pick Elo from human runs (data/human_card_stats.json)
 HUMAN_PRIOR_MIN_ACT = 1   # the prior applies from this act on (run.py --human-prior-from-act)
+HUMAN_SKIP_ELO = None     # with the prior: skipping counts as a card of this Elo (run.py --human-skip-elo)
 
 
 def set_human_prior(weight, path=os.path.join(HERE, "data", "human_card_stats.json")):
@@ -967,6 +968,8 @@ class CardPolicy:
                 if a[0] == "select_card_reward":
                     tok = card_tok(by_index[a[1]["card_index"]]).rstrip("+")
                     z[i] += HUMAN_PRIOR * (HUMAN_ELO.get(tok, 1200) - 1200) / 100.0
+                elif a[0] == "skip_card_reward" and HUMAN_SKIP_ELO is not None:   # lean decks: skip below this Elo
+                    z[i] += HUMAN_PRIOR * (HUMAN_SKIP_ELO - 1200) / 100.0
         return acts, z
 
     def __call__(self, st):
