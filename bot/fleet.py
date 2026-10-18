@@ -716,9 +716,14 @@ class Fleet:
             res = subprocess.run([os.path.join(REPO, "deploy", "winsync.sh"), h["ssh"], h["root"]],
                                  capture_output=True, text=True, timeout=600)
             if res.returncode != 0:
-                log(f"{h['name']}: code sync failed ({(res.stderr or res.stdout)[-200:]}); retry next poll")
-                return
-            log(f"{h['name']}: code synced")
+                h["sync_fails"] = h.get("sync_fails", 0) + 1
+                if h["sync_fails"] < 3:
+                    log(f"{h['name']}: code sync failed ({(res.stderr or res.stdout)[-200:]}); retry next poll")
+                    return
+                log(f"{h['name']}: code sync failed 3 times; joining anyway")
+            else:
+                log(f"{h['name']}: code synced")
+            h["sync_fails"] = 0
             h["state"] = "up"
             if h["clean"]:
                 self.remote_clean(h)

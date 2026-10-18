@@ -1210,6 +1210,14 @@ def main():
     ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--max-runs", type=int, default=None)
     args = ap.parse_args()
+    data = []
+    for p in args.data:   # '@list.txt' stands for the paths listed there (Windows caps cmd lines at 8191 chars)
+        if p.startswith("@"):
+            with open(os.path.join(HERE, p[1:])) as fh:
+                data += [l.strip() for l in fh if l.strip()]
+        else:
+            data.append(p)
+    args.data = data
     torch.set_num_threads(int(os.environ.get("NETS_THREADS", "2")))
     if args.mode == "policy":
         train_policy(args.data, args.out or os.path.join(HERE, "models", "policy.pt"), epochs=args.epochs or 8,

@@ -28,3 +28,4 @@ bot/models/*.pkl
 bot/models/*.pt
 !bot/models/frozen/
 bot/fleetdata/
+bot/models/*_nets*.json
