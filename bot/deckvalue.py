@@ -267,7 +267,8 @@ def main():
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
-    torch.set_num_threads(max(1, min(8, os.cpu_count() or 1)))
+    # a fleet job is budgeted as 2 threads (the lab machines' rule: at most half of what others leave idle)
+    torch.set_num_threads(int(os.environ.get("DV_THREADS", "2")))
     device = args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu"
     rows = load_rows(args.data)
     print(json.dumps({"rows": len(rows), "saves": len({r['save'] for r in rows}),
