@@ -142,6 +142,26 @@ def batches(n, bs, rng):
         yield idx[i:i + bs]
 
 
+def save_batches(save_ids, bs, rng):
+    """Batches of whole saves (every variant of a save in the same batch), for the within-save loss."""
+    by = defaultdict(list)
+    for i, s in enumerate(save_ids):
+        by[s].append(i)
+    keys = list(by)
+    rng.shuffle(keys)
+    cur = []
+    for k in keys:
+        cur += by[k]
+        if len(cur) >= bs:
+            yield cur
+            cur = []
+    if cur:
+        yield cur
+
+
+PAIR_WEIGHT = 0.0   # weight of the within-save loss (deck decisions compare variants of one state)
+
+
 def fit(rows, enc, epochs=60, device="cpu", seed=0, val=None, log=True):
     torch.manual_seed(seed)
     rng = random.Random(seed)
@@ -150,14 +170,24 @@ def fit(rows, enc, epochs=60, device="cpu", seed=0, val=None, log=True):
     X = [t.to(device) for t in enc.encode(rows)]
     yw = torch.tensor([float(r["won"]) for r in rows], device=device)
     ys = torch.tensor([fight_score(r) for r in rows], device=device)
+    sid_of = {s: i for i, s in enumerate(sorted({r["save"] for r in rows}))}
+    sid = torch.tensor([sid_of[r["save"]] for r in rows], device=device)
     bce = nn.BCEWithLogitsLoss()
     for ep in range(epochs):
         net.train()
         tot = 0.0
-        for b in batches(len(rows), 256, rng):
+        for b in save_batches([r["save"] for r in rows], 256, rng):
             b = torch.tensor(b, device=device)
             lw, s = net(*[x[b] for x in X])
             loss = bce(lw, yw[b]) + 4.0 * ((s - ys[b]) ** 2).mean()
+            if PAIR_WEIGHT:
+                # within-save: prediction and target relative to their save's mean in the batch
+                g = torch.unique(sid[b], return_inverse=True)[1]
+                ng = int(g.max()) + 1
+                cnt = torch.zeros(ng, device=device).index_add_(0, g, torch.ones_like(s))
+                ms = torch.zeros(ng, device=device).index_add_(0, g, s) / cnt
+                my = torch.zeros(ng, device=device).index_add_(0, g, ys[b]) / cnt
+                loss = loss + PAIR_WEIGHT * (((s - ms[g]) - (ys[b] - my[g])) ** 2).mean()
             opt.zero_grad()
             loss.backward()
             opt.step()
@@ -283,7 +313,10 @@ def main():
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--pair-weight", type=float, default=0.0, help="within-save loss weight")
     args = ap.parse_args()
+    global PAIR_WEIGHT
+    PAIR_WEIGHT = args.pair_weight
     # a fleet job is budgeted as 2 threads (the lab machines' rule: at most half of what others leave idle)
     torch.set_num_threads(int(os.environ.get("DV_THREADS", "2")))
     device = args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu"
