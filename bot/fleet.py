@@ -71,9 +71,65 @@ def ps(host, script, timeout=60):
     return res.stdout
 
 
+def remote_argv(host, cmd):
+    """ssh argv running `cmd` on the host. Hosts with "via" (lab2/lab3: this Mac's key is not
+    authorised there) are reached by running ssh on the jump host with its own key."""
+    if host.get("via"):
+        inner = (f"ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -p {host.get('port', 22)} "
+                 f"{host['target']} {shlex.quote(cmd)}")
+        return SSH + [host["via"], inner]
+    return SSH + [host["ssh"], cmd]
+
+
+def sftp_via(host, lines, timeout=900):
+    """The sftp batch subset the fleet uses (put / get / -mkdir with quoted absolute remote
+    paths) as tar streams through the jump host."""
+    import io
+    import re
+    import tarfile
+    puts, gets, dirs = [], [], []
+    for line in lines:
+        m = re.fullmatch(r'-?(put|get|mkdir) "([^"]*)"(?: "([^"]*)")?', line.strip())
+        if not m:
+            raise RuntimeError(f"sftp_via: cannot parse {line!r}")
+        op, a, b = m.groups()
+        if op == "put":
+            puts.append((a, b))
+        elif op == "get":
+            gets.append((a, b))
+        else:
+            dirs.append(a)
+    if puts or dirs:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            for loc, rem in puts:
+                tf.add(loc, arcname=rem.lstrip("/"), recursive=False)
+        cmd = (f"mkdir -p {' '.join(shlex.quote(d) for d in dirs)} && " if dirs else "") + "tar -xf - -C /"
+        res = subprocess.run(remote_argv(host, cmd), input=buf.getvalue(), capture_output=True, timeout=timeout)
+        if res.returncode != 0:
+            raise RuntimeError(f"put via rc {res.returncode}: {res.stderr.decode(errors='replace')[-300:]}")
+    if gets:
+        want = {rem.lstrip("/"): loc for rem, loc in gets}
+        cmd = "tar -cf - -C / " + " ".join(shlex.quote(r) for r in want)
+        res = subprocess.run(remote_argv(host, cmd), capture_output=True, timeout=timeout)
+        got = 0
+        with tarfile.open(fileobj=io.BytesIO(res.stdout), mode="r") as tf:
+            for mem in tf.getmembers():
+                if mem.isfile() and mem.name in want:
+                    os.makedirs(os.path.dirname(want[mem.name]) or ".", exist_ok=True)
+                    with open(want[mem.name], "wb") as out:
+                        out.write(tf.extractfile(mem).read())
+                    got += 1
+        if res.returncode != 0 or got < len(want):
+            raise RuntimeError(f"get via rc {res.returncode}, {got}/{len(want)} files: "
+                               f"{res.stderr.decode(errors='replace')[-300:]}")
+
+
 def sftp(host, lines, timeout=900):
     if not lines:
         return
+    if host.get("via"):
+        return sftp_via(host, lines, timeout)
     with tempfile.NamedTemporaryFile("w", suffix=".sftp", delete=False) as fh:
         fh.write("\n".join(lines) + "\n")
         batch = fh.name
@@ -99,7 +155,7 @@ def rpath(host, rel=""):
 
 def lx(host, script, timeout=60, interp="bash -s"):
     """Run a script on a Linux host (bash, or python3 with interp='python3 -'); returns stdout."""
-    res = subprocess.run(SSH + [host["ssh"], interp], input=script, capture_output=True, text=True, timeout=timeout,
+    res = subprocess.run(remote_argv(host, interp), input=script, capture_output=True, text=True, timeout=timeout,
                          encoding="utf-8", errors="replace")
     if res.returncode != 0:
         raise RuntimeError(f"ssh rc {res.returncode}: {res.stderr[-300:]}")
@@ -946,6 +1002,15 @@ class Fleet:
         self.requeue(h, f"{h['name']} drained")
 
     def sync_code(self, h):
+        if h.get("via"):   # deploy/winsync.sh's file list, piped through the jump host
+            files = subprocess.run("git ls-files -co --exclude-standard bot deploy harness sts2-cli/src sts2-cli/localization_eng "
+                                   "sts2-cli/localization_zhs | grep -v '\\.pt$'", shell=True, cwd=REPO,
+                                   capture_output=True, text=True).stdout
+            tar = subprocess.run(["tar", "--no-mac-metadata", "--no-xattrs", "-cf", "-", "-T", "-"], cwd=REPO, input=files.encode(),
+                                 capture_output=True, env={**os.environ, "COPYFILE_DISABLE": "1"}, timeout=300)
+            res = subprocess.run(remote_argv(h, f"tar -xf - -C {shlex.quote(h['root'])}"), input=tar.stdout,
+                                 capture_output=True, timeout=600)
+            return res.returncode == 0 and tar.returncode == 0, (res.stderr or tar.stderr).decode(errors="replace")[-200:]
         res = subprocess.run([os.path.join(REPO, "deploy", "winsync.sh"), h["ssh"], h["root"]],
                              capture_output=True, text=True, timeout=600)
         return res.returncode == 0, (res.stderr or res.stdout)[-200:]
@@ -984,12 +1049,11 @@ class Fleet:
                 self.kill(h)          # leftovers of jobs that were moved elsewhere
                 self.requeue(h, "rejoin")
             # the code may have changed while it was away: same code everywhere before any job
-            res = subprocess.run([os.path.join(REPO, "deploy", "winsync.sh"), h["ssh"], h["root"]],
-                                 capture_output=True, text=True, timeout=600)
-            if res.returncode != 0:
+            ok, msg = self.sync_code(h)
+            if not ok:
                 h["sync_fails"] = h.get("sync_fails", 0) + 1
                 if h["sync_fails"] < 3:
-                    log(f"{h['name']}: code sync failed ({(res.stderr or res.stdout)[-200:]}); retry next poll")
+                    log(f"{h['name']}: code sync failed ({msg}); retry next poll")
                     return
                 log(f"{h['name']}: code sync failed 3 times; joining anyway")
             else:
