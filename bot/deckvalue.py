@@ -212,13 +212,16 @@ def within_save_ranking(rows, pred, min_gap=0.1):
 
 
 def evaluate(net, enc, rows, device="cpu"):
-    from sklearn.metrics import roc_auc_score
+    try:
+        from sklearn.metrics import roc_auc_score
+    except ImportError:   # not installed on every fleet host
+        roc_auc_score = None
     pw, ps = predict(net, enc, rows, device)
     y = np.array([float(r["won"]) for r in rows])
     ys = np.array([fight_score(r) for r in rows])
     res = {"n": len(rows), "rank": within_save_ranking(rows, ps)[0], "rank_pairs": within_save_ranking(rows, ps)[1],
            "mse": round(float(((ps - ys) ** 2).mean()), 4)}
-    if 0 < y.sum() < len(y):
+    if roc_auc_score is not None and 0 < y.sum() < len(y):
         res["auc"] = round(float(roc_auc_score(y, pw)), 3)
     return res
 
