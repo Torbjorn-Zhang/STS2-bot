@@ -1015,6 +1015,23 @@ class Fleet:
                              capture_output=True, text=True, timeout=600)
         return res.returncode == 0, (res.stderr or res.stdout)[-200:]
 
+    # engine builds that jobs may ask for (run.py / bossbench.py --engine-config); Windows hosts
+    # build missing ones after a code sync (the Linux hosts get theirs copied from lab0)
+    ENGINE_BUILDS = ("Fix1", "Diag")
+
+    def ensure_builds(self, h):
+        R = wroot(h)
+        script = "$env:DOTNET_CLI_TELEMETRY_OPTOUT='1'; Set-Location '" + R + "\\sts2-cli'\n" + "\n".join(
+            f"if (-not (Test-Path '{R}\\sts2-cli\\src\\Sts2Headless\\bin\\{c}\\net9.0\\Sts2Headless.dll')) {{ "
+            f"& '{R}\\dotnet\\dotnet.exe' build src\\Sts2Headless\\Sts2Headless.csproj -c {c} -p:Optimize=true --no-incremental "
+            f"2>&1 | Select-Object -Last 2; 'built {c}' }}" for c in self.ENGINE_BUILDS)
+        try:
+            out = ps(h, script, timeout=600)
+            if "built" in out:
+                log(f"{h['name']}: engine builds: {' '.join(l for l in out.split() if l in self.ENGINE_BUILDS)}")
+        except Exception as e:
+            log(f"{h['name']}: engine build check failed ({str(e)[:100]})")
+
     def undrain(self, h, why):
         if h["drain"]:
             ok, msg = self.sync_code(h)   # the code may have changed while it was drained
@@ -1050,6 +1067,8 @@ class Fleet:
                 self.requeue(h, "rejoin")
             # the code may have changed while it was away: same code everywhere before any job
             ok, msg = self.sync_code(h)
+            if ok and not linux(h):
+                self.ensure_builds(h)
             if not ok:
                 h["sync_fails"] = h.get("sync_fails", 0) + 1
                 if h["sync_fails"] < 3:
