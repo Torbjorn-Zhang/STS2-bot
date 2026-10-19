@@ -188,6 +188,8 @@ def main():
     ap.add_argument("--deck-value", default=None, help="deckvalue.py model: card rewards by the boss-fight deck value")
     ap.add_argument("--deck-value-beta", type=float, default=None, help="weight of the card net's log-probability")
     ap.add_argument("--deck-value-from-act", type=int, default=1)
+    ap.add_argument("--deck-value-margin", type=float, default=None,
+                    help="gated: keep the card net's pick unless the value net rates another option this much higher")
     ap.add_argument("--rest-smith-hp", type=float, default=None, help="rest net: smith whenever HP >= this share of max")
     ap.add_argument("--rest-smith-hp-boss", type=float, default=None, help="... when the boss is the next node")
     ap.add_argument("--shop-potions", action="store_true", help="with the shop net: leftover gold buys potions for free slots")
@@ -300,6 +302,7 @@ def main():
         from deckvalue import DeckValue
         policy.DECK_VALUE = DeckValue(os.path.join(HERE, args.deck_value))
         policy.DECK_VALUE_FROM_ACT = args.deck_value_from_act
+        policy.DECK_VALUE_MARGIN = args.deck_value_margin
         if args.deck_value_beta is not None:
             policy.DECK_VALUE_BETA = args.deck_value_beta
     policy.REMOVE_FIRST = args.remove_first

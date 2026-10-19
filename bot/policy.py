@@ -377,6 +377,8 @@ def shop_potion(st):
 DECK_VALUE = None        # optional deckvalue.DeckValue: card rewards by the boss-fight deck value net
 DECK_VALUE_BETA = 0.02   # weight of the card net's log-probability next to the value (score units 0..1.25)
 DECK_VALUE_FROM_ACT = 1
+DECK_VALUE_MARGIN = None   # gated mode: keep the card net's pick unless the value net rates another
+                           # option this much higher (held-out ranking: 61% overall, 70% at gaps >= 0.08)
 
 
 def deck_value_choice(st):
@@ -405,8 +407,13 @@ def deck_value_choice(st):
         lps = z - np.log(np.exp(z).sum())
         lookup = {json.dumps(a, sort_keys=True): l for a, l in zip(acts_, lps)}
         lp = np.array([lookup.get(json.dumps(a, sort_keys=True), lps.min()) for a in acts])
-    total = v + DECK_VALUE_BETA * lp
-    i = int(np.argmax(total))
+    if DECK_VALUE_MARGIN is not None:
+        i0 = int(np.argmax(lp))            # the card net's own pick
+        j = int(np.argmax(v))
+        i = j if v[j] - v[i0] >= DECK_VALUE_MARGIN else i0
+    else:
+        total = v + DECK_VALUE_BETA * lp
+        i = int(np.argmax(total))
     _LAST_SCORES.v = {"dv": {str(a[1].get("card_index")): round(float(x), 4) for a, x in zip(acts, v)},
                       "lp": {str(a[1].get("card_index")): round(float(x), 3) for a, x in zip(acts, lp)}}
     return acts[i]
