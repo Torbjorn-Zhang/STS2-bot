@@ -1112,8 +1112,10 @@ def expert_value_dataset(runs, enc, rooms=None):
 
 def train_expert_value(paths, out, init_enc, epochs=6, hidden=128, lr=3e-4, batch=512):
     t0 = time.time()
-    enc = CombatEncoder.from_json(torch.load(init_enc, weights_only=False)["enc"])
     runs = load_runs(paths)
+    # a fresh vocabulary from these records unless an encoder is given (cards, enemies and
+    # powers met since the old encoder was built would otherwise all be unknown)
+    enc = CombatEncoder.from_json(torch.load(init_enc, weights_only=False)["enc"]) if init_enc else CombatEncoder.build(runs.values())
     tr, va = split_runs(runs)
     Str, Wtr, Dtr, _ = expert_value_dataset(tr, enc)
     Sva, Wva, Dva, _ = expert_value_dataset(va, enc)
