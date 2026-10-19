@@ -373,6 +373,27 @@ public class RunSimulator
                     }
                 }
             }
+            if (args.TryGetValue("add_relics", out var addRelEl))
+            {
+                // diagnostics: obtain these relics on top of the current ones ("relics" clears the
+                // list and re-obtains everything, re-running pickup effects; that hung on some saves).
+                // Obtain runs on a background task, pumped, with a timeout, as purchases do.
+                foreach (var rEl in addRelEl.EnumerateArray())
+                {
+                    var id = rEl.GetString();
+                    var model = id == null ? null : ModelDb.GetById<RelicModel>(new ModelId("RELIC", id));
+                    if (model == null) return Error($"Unknown relic: {id}");
+                    var mutable = model.ToMutable();
+                    var task = Task.Run(() => RelicCmd.Obtain(mutable, player));
+                    for (int i = 0; i < 400 && !task.IsCompleted; i++)
+                    {
+                        _syncCtx.Pump();
+                        Thread.Sleep(5);
+                    }
+                    _syncCtx.Pump();
+                    if (!task.IsCompleted) return Error($"Obtaining {id} did not finish");
+                }
+            }
             if (args.TryGetValue("add_cards", out var addEl))
             {
                 // append cards, keeping the rest of the deck (and its upgrades) as it is

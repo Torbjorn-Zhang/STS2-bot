@@ -331,6 +331,22 @@ def _potion_ids():
 POTION_IDS = _potion_ids()   # display name -> POTION id (the state shows potions by name only)
 
 
+def _relic_ids():
+    try:
+        with open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "sts2-cli", "localization_eng", "relics.json")) as fh:
+            return {v: k[:-len(".title")] for k, v in json.load(fh).items() if k.endswith(".title")}
+    except (OSError, ValueError):
+        return {}
+
+
+RELIC_IDS = _relic_ids()     # display name -> RELIC id
+
+
+def relic_id(r):
+    return RELIC_IDS.get(r.get("name") if isinstance(r, dict) else r)
+
+
 def potion_id(p):
     return POTION_IDS.get(p.get("name") or "")
 

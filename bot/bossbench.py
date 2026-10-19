@@ -173,6 +173,11 @@ def deck_op(sim, st, op, seed):
     if not op or op == "base":
         return
     p = st.get("player") or {}
+    if op.startswith("relic:"):   # relic:ID: the save's relics plus this one (passive combat relics;
+        from policy import relic_id     # pickup effects such as removals are not run)
+        have = [relic_id(r) for r in p.get("relics") or []]
+        sim.send({"cmd": "set_player", "add_relics": [op.split(":", 1)[1]]})
+        return
     deck = p.get("deck") or []
     ids = [c["id"].replace("CARD.", "") for c in deck]
     rng = random.Random(f"{seed}/{op}")
