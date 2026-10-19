@@ -47,6 +47,7 @@ def option_vec(desc, hp_frac, gold):
 
 
 ELITE_BIAS = 0.0   # logit added to elite rooms (run.py --map-elite-bias)
+NODE_BIAS = {}     # room type -> logit added (run.py --map-node-bias '{"RestSite": 1, "Shop": 1}')
 
 
 class MapPolicy:
@@ -72,6 +73,8 @@ class MapPolicy:
                            torch.zeros(len(chs), dtype=torch.long)).numpy()
         if ELITE_BIAS:   # experiments (run.py --map-elite-bias): humans path to elites 13%, the nets 6.5%
             z = z + np.asarray([ELITE_BIAS if d[0] == "Elite" else 0.0 for d in descs], dtype=z.dtype)
+        if NODE_BIAS:    # rest sites (now smiths when healthy) and shops (potions, removals) feed deck power
+            z = z + np.asarray([NODE_BIAS.get(d[0], 0.0) for d in descs], dtype=z.dtype)
         return chs, descs, z
 
 

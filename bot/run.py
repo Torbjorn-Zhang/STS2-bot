@@ -192,6 +192,7 @@ def main():
                     help="gated: keep the card net's pick unless the value net rates another option this much higher")
     ap.add_argument("--rest-smith-hp", type=float, default=None, help="rest net: smith whenever HP >= this share of max")
     ap.add_argument("--rest-smith-hp-boss", type=float, default=None, help="... when the boss is the next node")
+    ap.add_argument("--map-node-bias", default=None, help='map net: JSON {room type: logit}, e.g. {"RestSite": 1}')
     ap.add_argument("--shop-potions", action="store_true", help="with the shop net: leftover gold buys potions for free slots")
     ap.add_argument("--remove-first", action="store_true", help="with the shop net: remove a card first whenever affordable")
     ap.add_argument("--decktest-pilot", default=None, help="quick (quick_policy) or planner (TurnPlanner, --decktest-nodes)")
@@ -319,6 +320,9 @@ def main():
     if args.map_elite_bias:
         import mapnet
         mapnet.ELITE_BIAS = args.map_elite_bias
+    if args.map_node_bias:
+        import mapnet
+        mapnet.NODE_BIAS = json.loads(args.map_node_bias)
     if args.strat:
         from stratsearch import StratSearch
         with open(args.deck_nets) as fh:
