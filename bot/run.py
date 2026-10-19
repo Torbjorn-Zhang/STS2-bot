@@ -188,6 +188,8 @@ def main():
     ap.add_argument("--deck-value", default=None, help="deckvalue.py model: card rewards by the boss-fight deck value")
     ap.add_argument("--deck-value-beta", type=float, default=None, help="weight of the card net's log-probability")
     ap.add_argument("--deck-value-from-act", type=int, default=1)
+    ap.add_argument("--rest-smith-hp", type=float, default=None, help="rest net: smith whenever HP >= this share of max")
+    ap.add_argument("--rest-smith-hp-boss", type=float, default=None, help="... when the boss is the next node")
     ap.add_argument("--shop-potions", action="store_true", help="with the shop net: leftover gold buys potions for free slots")
     ap.add_argument("--remove-first", action="store_true", help="with the shop net: remove a card first whenever affordable")
     ap.add_argument("--decktest-pilot", default=None, help="quick (quick_policy) or planner (TurnPlanner, --decktest-nodes)")
@@ -290,6 +292,8 @@ def main():
         nets.BOSS_BETA = args.boss_beta
     policy.DECKTEST_FROM_ACT = args.decktest_from_act
     policy.SHOP_POTIONS = args.shop_potions
+    policy.REST_SMITH_HP = args.rest_smith_hp
+    policy.REST_SMITH_HP_BOSS = args.rest_smith_hp_boss
     if args.deck_value:
         import torch
         torch.set_num_threads(1)

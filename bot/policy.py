@@ -267,6 +267,11 @@ CARD_NET = None         # optional nets.CardPolicy: card rewards without the dec
 CARD_PRIOR = None       # optional nets.CardPolicy whose log-probabilities are added to the deck test's scores
 CARD_PRIOR_WEIGHT = 5.0 # graded points per unit of log-probability
 REST_NET = None         # optional restnet.RestPolicy: rest-site choice by the network (greedy)
+# with the rest net: smith whenever HP is at least this share of max HP (the net healed in 59% of
+# rests at 90%+ HP, gaining a few HP for a lost upgrade); *_BOSS: the same when the boss is the next
+# node (HP there is what the boss fight starts with, 24 HP ~ 18% of act-2 boss wins)
+REST_SMITH_HP = None
+REST_SMITH_HP_BOSS = None
 EVENT_NET = None        # optional eventnet.EventPolicy: event choice by the network (greedy)
 MAP_NET = None          # optional mapnet.MapPolicy: next map node by the network (greedy)
 EVENT_NET_NEOW = False  # the event network also picks Neow's opening option (it learns them in self-play)
@@ -651,7 +656,15 @@ def choose_rest(st, sim=None):
     if REST_NET is not None and sim is not None and len(opts) > 1:
         keys, ks, z, _ = REST_NET.scores(sim, st)
         if ks:
-            k = ks[int(np.argmax(z))]
+            order = [int(i) for i in np.argsort(-np.asarray(z))]
+            k = ks[order[0]]
+            if REST_SMITH_HP is not None and k.split(":")[0] == "HEAL":
+                p = st.get("player") or {}
+                frac = (p.get("hp") or 0) / max(1, p.get("max_hp") or 1)
+                thr = REST_SMITH_HP_BOSS if REST_SMITH_HP_BOSS is not None and boss_is_next(sim, st) else REST_SMITH_HP
+                smiths = [ks[i] for i in order if ks[i].split(":")[0] == "SMITH"]
+                if frac >= thr and smiths:
+                    k = smiths[0]   # the net's best upgrade
             idx, tok = keys[k]
             _LAST_REST.option = k.split(":")[0]
             _REST_PICK.token = tok
