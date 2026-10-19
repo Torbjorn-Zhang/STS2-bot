@@ -331,19 +331,40 @@ def potion_id(p):
 
 
 def potion_slots(st):
-    """Potion slots: 3, one fewer from ascension 4, +2 with Alchemical Coffer (a guess at its
-    {PotionSlots}; an over-count only makes a purchase fail). The state lists filled slots
+    """Potion slots: 3, one fewer from ascension 4, +2 each with Alchemical Coffer / Potion Belt
+    (a guess at their {PotionSlots}; an over-count only makes a purchase fail). The state lists filled slots
     only, so free slots = this - len(player.potions)."""
     p = st.get("player") or {}
     asc = (st.get("context") or {}).get("ascension") or 0
     cap = 3 - (1 if asc >= 4 else 0)
-    if any((r.get("name") if isinstance(r, dict) else r) == "Alchemical Coffer" for r in p.get("relics") or []):
-        cap += 2
+    names = {(r.get("name") if isinstance(r, dict) else r) for r in p.get("relics") or []}
+    cap += 2 * len(names & {"Alchemical Coffer", "Potion Belt"})
     return cap
 
 
 def free_potion_slots(st):
     return max(0, potion_slots(st) - len([x for x in (st.get("player") or {}).get("potions") or [] if x]))
+
+
+SHOP_POTIONS = False   # with the shop net: gold it leaves buys potions for free slots
+# boss bench, filling the free slots: act-1 bosses +11+-4% wins, act-2 +6+-3% (the bot had never
+# bought one: see free_potion_slots)
+POTION_PREF = {"FAIRY_IN_A_BOTTLE": 3.0, "GHOST_IN_A_JAR": 2.5, "FIRE_POTION": 2.0, "EXPLOSIVE_AMPOULE": 2.0,
+               "STRENGTH_POTION": 2.0, "BLOCK_POTION": 1.7, "ENERGY_POTION": 1.6, "SWIFT_POTION": 1.6,
+               "LIQUID_BRONZE": 1.5, "REGEN_POTION": 1.5, "BLOOD_POTION": 1.5, "VULNERABLE_POTION": 1.5,
+               "WEAK_POTION": 1.5, "DEXTERITY_POTION": 1.4, "HEART_OF_IRON": 1.4, "FLEX_POTION": 1.2}
+
+
+def shop_potion(st):
+    """The potion to buy for a free slot (preferred kind, then the cheaper), or None."""
+    if free_potion_slots(st) <= 0:
+        return None
+    gold = (st.get("player") or {}).get("gold") or 0
+    pots = [x for x in st.get("potions") or [] if x.get("is_stocked", True) and (x.get("cost") or 9999) <= gold]
+    if not pots:
+        return None
+    best = max(pots, key=lambda x: (POTION_PREF.get(potion_id(x), 1.0), -(x.get("cost") or 0)))
+    return ("buy_potion", {"potion_index": best["index"]})
 
 
 def choose_card_reward(st, sim=None):
@@ -769,6 +790,10 @@ def decide(sim, st, avoid=(), memo=None):
         for i in np.argsort(-z):
             a = opts[int(i)][1]
             if json.dumps(a, sort_keys=True) not in avoid:
+                if a[0] == "leave_room" and SHOP_POTIONS:   # the net is done: potions with what is left
+                    pa = shop_potion(st)
+                    if pa is not None and json.dumps(pa, sort_keys=True) not in avoid:
+                        return pa
                 if a[0] == "remove_card":
                     visit["removed"] = True
                 elif a[0].startswith("buy_"):

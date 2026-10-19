@@ -1635,6 +1635,11 @@ public class RunSimulator
         var entry = entries[idx];
         if (!entry.IsStocked) return Error("Relic already purchased");
         if (player.Gold < entry.Cost) return Error("Not enough gold");
+        // read before buying: a sold entry's Model is null, and the NRE in the log line below
+        // turned every successful relic purchase into an error (the bot then shopped on a stale
+        // state, and its records saw failures)
+        var relicName = entry.Model?.GetType().Name ?? "?";
+        var relicCost = entry.Cost;
 
         try
         {
@@ -1655,14 +1660,14 @@ public class RunSimulator
             }
             if (_cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null)
             {
-                Log($"Buy relic {entry.Model.GetType().Name}: yielded for pending selection");
+                Log($"Buy relic {relicName}: yielded for pending selection");
                 return DetectDecisionPoint();
             }
             if (!task.IsCompleted) task.Wait(2000);
             _syncCtx.Pump();
-            Log($"Bought relic: {entry.Model.GetType().Name} for {entry.Cost}g");
+            Log($"Bought relic: {relicName} for {relicCost}g");
         }
-        catch (Exception ex) { return Error($"Buy relic failed: {ex.Message}"); }
+        catch (Exception ex) { return ErrorWithTrace("Buy relic failed", ex); }
 
         return DetectDecisionPoint();
     }
@@ -1681,12 +1686,14 @@ public class RunSimulator
         var entry = entries[idx];
         if (!entry.IsStocked) return Error("Potion already purchased");
         if (player.Gold < entry.Cost) return Error("Not enough gold");
+        var potionName = entry.Model?.GetType().Name ?? "?";   // a sold entry's Model is null
+        var potionCost = entry.Cost;
 
         try
         {
             entry.OnTryPurchaseWrapper(merchantRoom.GetLocalInventory()).GetAwaiter().GetResult();
             _syncCtx.Pump();
-            Log($"Bought potion: {entry.Model.GetType().Name} for {entry.Cost}g");
+            Log($"Bought potion: {potionName} for {potionCost}g");
         }
         catch (Exception ex)
         {
