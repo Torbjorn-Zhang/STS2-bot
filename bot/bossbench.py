@@ -173,6 +173,9 @@ def deck_op(sim, st, op, seed):
     if not op or op == "base":
         return
     p = st.get("player") or {}
+    if op.startswith("card:"):    # card:ID: the save's deck plus this card ("ID+" upgraded)
+        sim.send({"cmd": "set_player", "add_cards": [op.split(":", 1)[1]]})
+        return
     if op.startswith("relic:"):   # relic:ID: the save's relics plus this one (passive combat relics;
         from policy import relic_id     # pickup effects such as removals are not run)
         have = [relic_id(r) for r in p.get("relics") or []]
