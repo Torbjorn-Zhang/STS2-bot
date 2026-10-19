@@ -251,6 +251,28 @@ def within_save_ranking(rows, pred, min_gap=0.1, only=None):
     return round(agree / tot, 3) if tot else None, tot
 
 
+def ranking_by_margin(rows, pred, only=deck_only, min_gap=0.1, cuts=(0.0, 0.01, 0.02, 0.04, 0.08)):
+    """Deck-only pairs: ranking accuracy by the size of the predicted gap. If big predicted gaps
+    are right more often, the net can overrule the card net only when it is confident."""
+    keep = [i for i, r in enumerate(rows) if only(r)]
+    vm = variant_means([rows[i] for i in keep], np.asarray(pred)[keep])
+    by = defaultdict(list)
+    for (s, v), x in vm.items():
+        by[s].append(x)
+    acc = {c: [0, 0] for c in cuts}
+    for xs in by.values():
+        for i in range(len(xs)):
+            for j in range(i + 1, len(xs)):
+                d, p = xs[i][0] - xs[j][0], xs[i][1] - xs[j][1]
+                if abs(d) < min_gap:
+                    continue
+                for c in cuts:
+                    if abs(p) >= c:
+                        acc[c][0] += (d > 0) == (p > 0)
+                        acc[c][1] += 1
+    return {f"m{c}": (round(a / n, 3) if n else None, n) for c, (a, n) in acc.items()}
+
+
 def evaluate(net, enc, rows, device="cpu"):
     try:
         from sklearn.metrics import roc_auc_score
@@ -264,6 +286,7 @@ def evaluate(net, enc, rows, device="cpu"):
            "rank_deck_pairs": within_save_ranking(rows, ps, only=deck_only)[1],
            "rank_deck_small": within_save_ranking(rows, -np.array([len(r["deck"]) for r in rows], dtype=float), only=deck_only)[0],
            "mse": round(float(((ps - ys) ** 2).mean()), 4)}
+    res["by_margin"] = ranking_by_margin(rows, ps)
     for a in (1, 2, 3):   # per act (act 2/3 bosses are where the bot loses)
         sub = [i for i, r in enumerate(rows) if r.get("act") == a]
         if sub:
@@ -335,7 +358,17 @@ def main():
             print(f"fold {k}: {json.dumps(r)}", flush=True)
             res.append(r)
         keys = [k for k in res[0] if isinstance(res[0][k], float)]
-        print(json.dumps({"cv": {k: round(float(np.mean([r[k] for r in res if r.get(k) is not None])), 3) for k in keys}}))
+        out = {k: round(float(np.mean([r[k] for r in res if r.get(k) is not None])), 3) for k in keys}
+        # accuracy by predicted margin, pooled over folds
+        mar = {}
+        for r in res:
+            for c, (acc, n) in r["by_margin"].items():
+                if acc is not None:
+                    a = mar.setdefault(c, [0.0, 0])
+                    a[0] += acc * n
+                    a[1] += n
+        out["by_margin"] = {c: [round(a / n, 3), n] for c, (a, n) in mar.items()}
+        print(json.dumps({"cv": out}))
         return
     tr, va = split_by_save(rows, 0, args.folds)
     enc = Encoder(rows)
