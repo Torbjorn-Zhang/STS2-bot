@@ -193,9 +193,19 @@ def variant_means(rows, pred=None):
     return {k: (a / n, b / n, n) for k, (a, b, n) in g.items()}
 
 
-def within_save_ranking(rows, pred, min_gap=0.1):
+def deck_only(r):
+    """A variant that changes only the deck (no HP or potion change): the card decisions."""
+    ops = r.get("ops") or {}
+    return "hp_frac" not in ops and "potions" not in ops
+
+
+def within_save_ranking(rows, pred, min_gap=0.1, only=None):
     """Share of variant pairs on the same save, observed score differing by >= min_gap, that the
-    prediction orders the same way (deck decisions compare options at one state)."""
+    prediction orders the same way (deck decisions compare options at one state). only: a row
+    filter (e.g. deck_only) applied to both members of a pair."""
+    if only is not None:
+        keep = [i for i, r in enumerate(rows) if only(r)]
+        rows, pred = [rows[i] for i in keep], np.asarray(pred)[keep]
     vm = variant_means(rows, pred)
     by = defaultdict(list)
     for (s, v), x in vm.items():
@@ -220,7 +230,14 @@ def evaluate(net, enc, rows, device="cpu"):
     y = np.array([float(r["won"]) for r in rows])
     ys = np.array([fight_score(r) for r in rows])
     res = {"n": len(rows), "rank": within_save_ranking(rows, ps)[0], "rank_pairs": within_save_ranking(rows, ps)[1],
+           "rank_deck": within_save_ranking(rows, ps, only=deck_only)[0],
+           "rank_deck_pairs": within_save_ranking(rows, ps, only=deck_only)[1],
+           "rank_deck_small": within_save_ranking(rows, -np.array([len(r["deck"]) for r in rows], dtype=float), only=deck_only)[0],
            "mse": round(float(((ps - ys) ** 2).mean()), 4)}
+    for a in (1, 2, 3):   # per act (act 2/3 bosses are where the bot loses)
+        sub = [i for i, r in enumerate(rows) if r.get("act") == a]
+        if sub:
+            res[f"rank_deck_a{a}"] = within_save_ranking([rows[i] for i in sub], ps[sub], only=deck_only)[0]
     if roc_auc_score is not None and 0 < y.sum() < len(y):
         res["auc"] = round(float(roc_auc_score(y, pw)), 3)
     return res
