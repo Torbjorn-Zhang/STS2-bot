@@ -1436,6 +1436,9 @@ def main():
     ap.add_argument("--configs", help='bench: JSON {name: rollout config}')
     ap.add_argument("--room", default=None)
     ap.add_argument("--reps", type=int, default=1)
+    ap.add_argument("--mode", default=None, help="bench: eval (default), explore or vary")
+    ap.add_argument("--variants", type=int, default=20, help="bench explore/vary: deck variants per save")
+    ap.add_argument("--offset", type=int, default=0, help="bench explore/vary: variant/repetition seed offset")
     ap.add_argument("--shards", type=int, default=8)
     ap.add_argument("--extra", default=None, help='expert/xdeckrl: JSON list of extra run.py arguments')
     ap.add_argument("--argv", default=None, help='task: JSON list, the script and its arguments')
@@ -1511,8 +1514,12 @@ def main():
     elif args.cmd == "cancel":
         submit("cancel", {"tag": args.tag})
     elif args.cmd == "bench":
-        submit("bench", {"tag": args.tag, "bench": args.bench, "configs": json.loads(args.configs), "room": args.room,
-                         "reps": args.reps, "shards": args.shards, "prio": 0.8 if args.prio is None else args.prio})
+        spec = {"tag": args.tag, "bench": args.bench, "configs": json.loads(args.configs), "room": args.room,
+                "reps": args.reps, "shards": args.shards, "prio": 0.8 if args.prio is None else args.prio,
+                "inputs": json.loads(args.inputs or "[]"), "extra": json.loads(args.extra or "[]")}
+        if args.mode:   # explore / vary: deck variants per save
+            spec.update(mode=args.mode, variants=args.variants, offset=args.offset)
+        submit("bench", spec)
 
 
 if __name__ == "__main__":

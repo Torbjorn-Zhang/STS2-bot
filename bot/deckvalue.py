@@ -85,9 +85,9 @@ class Encoder:
 
     def encode(self, rows):
         n = len(rows)
-        lc = max(1, max(len(r["deck"]) for r in rows))
-        lr = max(1, max(len(r.get("relics") or []) for r in rows))
-        lp = max(1, max(len(r.get("potions") or []) for r in rows))
+        lc = max([1] + [len(r["deck"]) for r in rows])
+        lr = max([1] + [len(r.get("relics") or []) for r in rows])
+        lp = max([1] + [len(r.get("potions") or []) for r in rows])
         C = np.zeros((n, lc), np.int64)
         U = np.zeros((n, lc), np.float32)
         R = np.zeros((n, lr), np.int64)
@@ -161,7 +161,7 @@ def fit(rows, enc, epochs=60, device="cpu", seed=0, val=None, log=True):
             opt.zero_grad()
             loss.backward()
             opt.step()
-            tot += float(loss) * len(b)
+            tot += float(loss.detach()) * len(b)
         if log and (ep % 10 == 9 or ep == epochs - 1):
             msg = f"epoch {ep + 1} loss {tot / len(rows):.4f}"
             if val is not None:
@@ -285,7 +285,8 @@ def main():
         return
     tr, va = split_by_save(rows, 0, args.folds)
     enc = Encoder(rows)
-    fit(tr, enc, args.epochs, device, val=va)          # report held-out quality
+    if tr and va:                                       # report held-out quality first
+        fit(tr, enc, args.epochs, device, val=va)
     net = fit(rows, enc, args.epochs, device, log=False)   # then train on everything
     if args.out:
         torch.save({"enc": enc.to_json(), "state": net.state_dict(), "dims": {}, "rows": len(rows)},

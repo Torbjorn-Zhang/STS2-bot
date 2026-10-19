@@ -369,7 +369,48 @@ def shop_potion(st):
     return ("buy_potion", {"potion_index": best["index"]})
 
 
+DECK_VALUE = None        # optional deckvalue.DeckValue: card rewards by the boss-fight deck value net
+DECK_VALUE_BETA = 0.02   # weight of the card net's log-probability next to the value (score units 0..1.25)
+DECK_VALUE_FROM_ACT = 1
+
+
+def deck_value_choice(st):
+    """Card reward by the deck value network: each option's deck (and skipping) as it would meet
+    this act's boss (full HP, current relics and potions), plus BETA x the card net's
+    log-probability. None when it does not apply."""
+    ctx = st.get("context") or {}
+    act = ctx.get("act") or 1
+    if DECK_VALUE is None or act < DECK_VALUE_FROM_ACT or not st.get("cards"):
+        return None
+    from record import card_tok
+    p = st.get("player") or {}
+    deck = [card_tok(c) for c in p.get("deck") or []]
+    base = {"deck": deck, "relics": [r.get("name") for r in p.get("relics") or []],
+            "potions": [potion_id(x) or x.get("name") for x in p.get("potions") or [] if x],
+            "hp": p.get("max_hp"), "mhp": p.get("max_hp"), "act": act, "boss": (ctx.get("boss") or {}).get("id")}
+    acts = legal_actions(st)
+    by_index = {c["index"]: c for c in st["cards"]}
+    states = [dict(base, deck=deck + [card_tok(by_index[a[1]["card_index"]])]) if a[0] == "select_card_reward" else base
+              for a in acts]
+    v = DECK_VALUE.score(states)
+    lp = np.zeros(len(acts))
+    if CARD_PRIOR is not None:
+        acts_, z = CARD_PRIOR.scores(st)
+        z = z - z.max()
+        lps = z - np.log(np.exp(z).sum())
+        lookup = {json.dumps(a, sort_keys=True): l for a, l in zip(acts_, lps)}
+        lp = np.array([lookup.get(json.dumps(a, sort_keys=True), lps.min()) for a in acts])
+    total = v + DECK_VALUE_BETA * lp
+    i = int(np.argmax(total))
+    _LAST_SCORES.v = {"dv": {str(a[1].get("card_index")): round(float(x), 4) for a, x in zip(acts, v)},
+                      "lp": {str(a[1].get("card_index")): round(float(x), 3) for a, x in zip(acts, lp)}}
+    return acts[i]
+
+
 def choose_card_reward(st, sim=None):
+    dv = deck_value_choice(st)
+    if dv is not None:
+        return dv
     if CARD_NET is not None and not DECK_TEST and st.get("cards"):
         return CARD_NET(st)
     if CARD_NET_DECIDES and CARD_PRIOR is not None and st.get("cards"):

@@ -185,6 +185,9 @@ def main():
     ap.add_argument("--decktest-from-act", type=int, default=0,
                     help="with card_decides nets: card rewards from this act on by the deck test, the net as prior")
     ap.add_argument("--engine-config", default=None, help="engine build (bin/<config>), e.g. Fix1 while Release jobs still run")
+    ap.add_argument("--deck-value", default=None, help="deckvalue.py model: card rewards by the boss-fight deck value")
+    ap.add_argument("--deck-value-beta", type=float, default=None, help="weight of the card net's log-probability")
+    ap.add_argument("--deck-value-from-act", type=int, default=1)
     ap.add_argument("--shop-potions", action="store_true", help="with the shop net: leftover gold buys potions for free slots")
     ap.add_argument("--remove-first", action="store_true", help="with the shop net: remove a card first whenever affordable")
     ap.add_argument("--decktest-pilot", default=None, help="quick (quick_policy) or planner (TurnPlanner, --decktest-nodes)")
@@ -287,6 +290,14 @@ def main():
         nets.BOSS_BETA = args.boss_beta
     policy.DECKTEST_FROM_ACT = args.decktest_from_act
     policy.SHOP_POTIONS = args.shop_potions
+    if args.deck_value:
+        import torch
+        torch.set_num_threads(1)
+        from deckvalue import DeckValue
+        policy.DECK_VALUE = DeckValue(os.path.join(HERE, args.deck_value))
+        policy.DECK_VALUE_FROM_ACT = args.deck_value_from_act
+        if args.deck_value_beta is not None:
+            policy.DECK_VALUE_BETA = args.deck_value_beta
     policy.REMOVE_FIRST = args.remove_first
     if args.decktest_pilot or args.decktest_nodes or args.decktest_reps or args.decktest_boss_only:
         import decktest   # card rewards only; upgrades, shops and events keep the defaults
