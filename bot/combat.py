@@ -23,6 +23,11 @@ W = {
     "power_scale": 1.0, # lasting powers: POWER_TURN etc. x expected remaining turns
     "player_debuff": 1.2,
     "potion": 5.0,      # cost of drinking a potion (keeps them for fights that need them)
+    # extra cost per potion drunk outside the boss fight from this floor of the act on: the bot
+    # drank both potions in the elite before the act-2 boss and met the boss with none (a filled
+    # potion slot is worth +6% act-2 / +11% act-1 boss wins on the bench)
+    "potion_near_boss": 0.0,
+    "potion_near_boss_floor": 11,
     "win": 300.0,
     "fight_model": 0.0,     # 0..1: replace fixed damage weights by -future_loss (turns to kill x threat)
     "leader": 1.0,          # damage weight on the leader of Minions (they leave when it dies)
@@ -298,7 +303,11 @@ def evaluate(root, st):
         score += W["vuln"] * pw.get("Vulnerable", 0) + W["weak"] * pw.get("Weak", 0)
     f, t = future_weight(st)
     score += W["power_scale"] * power_value(st, f, t)
-    score -= W["potion"] * max(0, len(potions(root)) - len(potions(st)))
+    drunk = max(0, len(potions(root)) - len(potions(st)))
+    if drunk:
+        ctx = root.get("context") or {}
+        late = W["potion_near_boss"] and ctx.get("room_type") != "Boss" and (ctx.get("floor") or 0) >= W["potion_near_boss_floor"]
+        score -= (W["potion"] + (W["potion_near_boss"] if late else 0.0)) * drunk
     if W["steam_lethal"]:
         blast = steam_threat(root, st)
         if blast:
