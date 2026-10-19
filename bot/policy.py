@@ -737,6 +737,33 @@ NEOW = {
 }
 
 
+# Ancient relic choices (act-start events): measured boss-win gain of each combat relic on 307
+# act-2/3 boss saves (bossbench --deck-op relic:ID, rlab/rlab2), minus a cost the boss fight cannot
+# show (Sozu: no more potions; Ectoplasm: no more gold; Seal of Gold: spends gold). The event net
+# never took Runic Pyramid and took Snecko Eye, the best of them, about half the time.
+ANCIENT_RULE = False
+ANCIENT_UNTESTED = 0.15   # assumed value of relics the lab cannot measure (pickup effects)
+ANCIENT_MARGIN = 0.03     # overrule the event net only by at least this much
+ANCIENT_VALUES = {
+    "Snecko Eye": 0.257, "Fiddle": 0.231, "Prismatic Gem": 0.212, "Velvet Choker": 0.202,
+    "Seal of Gold": 0.202 - 0.05, "Runic Pyramid": 0.160, "Pael's Blood": 0.160, "Pael's Flesh": 0.134,
+    "Pael's Legion": 0.098, "Pael's Tears": 0.085, "Very Hot Cocoa": 0.075, "Pael's Eye": 0.0,
+    "Toasty Mittens": 0.007, "Ectoplasm": 0.212 - 0.05, "Sozu": 0.208 - 0.08, "Philosopher's Stone": 0.147,
+}
+
+
+def ancient_pick(opts, net_choice):
+    """The option to take instead of the event net's, or None."""
+    tested = [o for o in opts if o.get("title") in ANCIENT_VALUES]
+    if not tested:
+        return None
+    best = max(tested, key=lambda o: ANCIENT_VALUES[o["title"]])
+    net_v = ANCIENT_VALUES.get((net_choice or {}).get("title"), ANCIENT_UNTESTED)
+    if best is not net_choice and ANCIENT_VALUES[best["title"]] >= net_v + ANCIENT_MARGIN:
+        return best
+    return None
+
+
 def choose_event(st, sim=None):
     opts = [o for o in st.get("options") or [] if not o.get("is_locked")]
     if not opts:
@@ -751,6 +778,8 @@ def choose_event(st, sim=None):
         eo, _, z, _ = EVENT_NET.scores(sim, st)
         if z is not None:
             best = eo[int(np.argmax(z))]
+            if ANCIENT_RULE:
+                best = ancient_pick(opts, best) or best
             _remember_event(best)
             return ("choose_option", {"option_index": best["index"]})
     if DECK_TEST and sim is not None and len(opts) > 1:

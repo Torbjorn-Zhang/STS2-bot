@@ -193,6 +193,7 @@ def main():
     ap.add_argument("--rest-smith-hp", type=float, default=None, help="rest net: smith whenever HP >= this share of max")
     ap.add_argument("--rest-smith-hp-boss", type=float, default=None, help="... when the boss is the next node")
     ap.add_argument("--map-node-bias", default=None, help='map net: JSON {room type: logit}, e.g. {"RestSite": 1}')
+    ap.add_argument("--ancient-rule", action="store_true", help="Ancient relic choices by the relic lab's measured values")
     ap.add_argument("--shop-potions", action="store_true", help="with the shop net: leftover gold buys potions for free slots")
     ap.add_argument("--remove-first", action="store_true", help="with the shop net: remove a card first whenever affordable")
     ap.add_argument("--decktest-pilot", default=None, help="quick (quick_policy) or planner (TurnPlanner, --decktest-nodes)")
@@ -295,6 +296,7 @@ def main():
         nets.BOSS_BETA = args.boss_beta
     policy.DECKTEST_FROM_ACT = args.decktest_from_act
     policy.SHOP_POTIONS = args.shop_potions
+    policy.ANCIENT_RULE = args.ancient_rule
     policy.REST_SMITH_HP = args.rest_smith_hp
     policy.REST_SMITH_HP_BOSS = args.rest_smith_hp_boss
     if args.deck_value:
