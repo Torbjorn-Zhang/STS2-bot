@@ -530,6 +530,11 @@ def choose_card_select(st, sim=None):
                 prio = {c.get("index", i): upgrade_priority(c) for i, c in enumerate(cards)}
                 best = max(scores, key=lambda k: scores[k] + 1.0 * prio.get(k, 0))
                 return ("select_cards", {"indices": str(best)})
+    elif room == "Event" and event_prompt_kind() == "add":     # choose cards to add: the best ones
+        deck_n = (st.get("player") or {}).get("deck_size") or 10
+        full = (st.get("player") or {}).get("deck")
+        act = (st.get("context") or {}).get("act") or 1
+        order = sorted(cards, key=lambda c: card_value(c, deck_n, full, act), reverse=True)
     elif room == "Event" and event_prompt_kind() == "better":   # event upgrade / duplicate / enchant
         order = sorted(cards, key=upgrade_priority, reverse=True)
     else:                                        # shop removal / event remove-transform: Strikes, then Defends
@@ -757,9 +762,15 @@ def _remember_event(opt):
 
 def event_prompt_kind():
     """What the card prompt after an event option is for: 'better' (upgrade, duplicate,
-    enchant: pick the best cards) or 'worse' (remove, transform: pick the worst)."""
-    t = getattr(_LAST_EVENT, "text", "") or ""
-    if re.search(r"upgrade|duplicate|copy|clone|enchant", t) and not re.search(r"remove|transform", t):
+    enchant: pick the best cards), 'add' (choose cards to add to the deck: Room Full of Cheese's
+    Gorge, Brain Leech's Share Knowledge; these were picked worst-first) or 'worse' (remove,
+    transform: pick the worst)."""
+    t = re.sub(r"\[/?[a-z]+\]", "", getattr(_LAST_EVENT, "text", "") or "")   # drop [gold] markup
+    if re.search(r"remove|transform", t):
+        return "worse"
+    if re.search(r"to add to your deck", t):
+        return "add"
+    if re.search(r"upgrade|duplicate|copy|clone|enchant", t):
         return "better"
     return "worse"
 
