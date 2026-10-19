@@ -347,6 +347,8 @@ def free_potion_slots(st):
 
 
 SHOP_POTIONS = False   # with the shop net: gold it leaves buys potions for free slots
+REMOVE_FIRST = False   # with the shop net: a removal first whenever one is affordable (boss bench:
+                       # removing all 7 basics of an act-2 deck wins 39% vs 23%; the net removes in 60-78% of visits)
 # boss bench, filling the free slots: act-1 bosses +11+-4% wins, act-2 +6+-3% (the bot had never
 # bought one: see free_potion_slots)
 POTION_PREF = {"FAIRY_IN_A_BOTTLE": 3.0, "GHOST_IN_A_JAR": 2.5, "FIRE_POTION": 2.0, "EXPLOSIVE_AMPOULE": 2.0,
@@ -787,6 +789,11 @@ def decide(sim, st, avoid=(), memo=None):
         ctx = st.get("context") or {}
         visit = memo.setdefault(("shopnet", ctx.get("act"), ctx.get("floor")), {"removed": False, "bought": 0})
         opts, _, z = SHOP_NET.scores(sim, st, visit)
+        if REMOVE_FIRST and not visit["removed"]:
+            for _, a in opts:
+                if a[0] == "remove_card" and json.dumps(a, sort_keys=True) not in avoid:
+                    visit["removed"] = True
+                    return a
         for i in np.argsort(-z):
             a = opts[int(i)][1]
             if json.dumps(a, sort_keys=True) not in avoid:

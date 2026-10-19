@@ -186,6 +186,7 @@ def main():
                     help="with card_decides nets: card rewards from this act on by the deck test, the net as prior")
     ap.add_argument("--engine-config", default=None, help="engine build (bin/<config>), e.g. Fix1 while Release jobs still run")
     ap.add_argument("--shop-potions", action="store_true", help="with the shop net: leftover gold buys potions for free slots")
+    ap.add_argument("--remove-first", action="store_true", help="with the shop net: remove a card first whenever affordable")
     ap.add_argument("--decktest-pilot", default=None, help="quick (quick_policy) or planner (TurnPlanner, --decktest-nodes)")
     ap.add_argument("--decktest-nodes", type=int, default=None)
     ap.add_argument("--decktest-reps", type=int, default=None)
@@ -286,6 +287,7 @@ def main():
         nets.BOSS_BETA = args.boss_beta
     policy.DECKTEST_FROM_ACT = args.decktest_from_act
     policy.SHOP_POTIONS = args.shop_potions
+    policy.REMOVE_FIRST = args.remove_first
     if args.decktest_pilot or args.decktest_nodes or args.decktest_reps or args.decktest_boss_only:
         import decktest   # card rewards only; upgrades, shops and events keep the defaults
         if args.decktest_pilot == "planner":
