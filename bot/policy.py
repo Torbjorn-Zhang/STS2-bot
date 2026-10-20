@@ -397,6 +397,28 @@ DECK_VALUE_MARGIN = None   # gated mode: keep the card net's pick unless the val
                            # option this much higher (held-out ranking: 61% overall, 70% at gaps >= 0.08)
 
 
+CARD_LAB_RULE = False     # from act 2: take a card the card lab rates CARD_LAB_MARGIN higher than the net's pick
+CARD_LAB_MARGIN = 0.05
+CARD_LAB_A23 = _load_prior("card_lab_a23.json")   # card -> boss-win gain at act-2/3 bosses (skip = 0)
+
+
+def card_lab_override(st, pick):
+    """The card net's pick, or a clearly better one by the card lab (act 2+)."""
+    if not CARD_LAB_RULE or ((st.get("context") or {}).get("act") or 1) < 2 or not st.get("cards"):
+        return pick
+    from record import card_tok
+
+    def val(a):
+        if a[0] != "select_card_reward":
+            return 0.0
+        c = next((c for c in st["cards"] if c["index"] == a[1]["card_index"]), None)
+        return CARD_LAB_A23.get(card_tok(c).rstrip("+"), 0.0) if c else 0.0
+
+    opts = [("select_card_reward", {"card_index": c["index"]}) for c in st["cards"]]
+    best = max(opts, key=val)
+    return best if val(best) >= val(pick) + CARD_LAB_MARGIN else pick
+
+
 def deck_value_choice(st):
     """Card reward by the deck value network: each option's deck (and skipping) as it would meet
     this act's boss (full HP, current relics and potions), plus BETA x the card net's
@@ -446,7 +468,7 @@ def choose_card_reward(st, sim=None):
         # need decks judged against the boss itself
         act0 = (st.get("context") or {}).get("act") or 1
         if not (DECKTEST_FROM_ACT and act0 >= DECKTEST_FROM_ACT and DECK_TEST and sim is not None):
-            return CARD_PRIOR(st)
+            return card_lab_override(st, CARD_PRIOR(st))
     if DECK_TEST and sim is not None and st.get("cards"):
         import decktest
         scores = decktest.evaluate_options(sim, st)
