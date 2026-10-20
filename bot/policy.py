@@ -584,12 +584,52 @@ def upgrade_priority(c):
     return 3 + TIER.get(base_key(c), RARITY.get(c.get("rarity"), 1.0)) + 0.5 * stat_value(c)
 
 
+DECK_ROLL_SELECT = False   # also shop removals and rest-site smiths by imagined deck futures
+
+
+def deck_roll_select(st, cards, room):
+    """One shop removal or one smith, chosen by DECK_ROLL's futures of the resulting decks.
+    A removable curse or status goes first (the deck model has seen curse-free decks mostly in
+    random, weaker decks, a confound that makes it underrate removing them)."""
+    from deckroll import choose_deck
+    from record import card_tok
+    if room == "Shop" and any(c.get("type") in ("Curse", "Status") for c in cards):
+        return None
+    deck = [card_tok(c) for c in (st.get("player") or {}).get("deck") or []]
+    opts, seen = [], set()
+    for c in cards:
+        t = card_tok(c)
+        if t in seen:
+            continue
+        seen.add(t)
+        if room == "RestSite":
+            if c.get("upgraded") or t.endswith("+") or t not in deck:
+                continue
+            d = list(deck)
+            d[d.index(t)] = t + "+"
+        else:
+            if t not in deck:
+                continue
+            d = list(deck)
+            d.remove(t)
+        opts.append((("select_cards", {"indices": str(c.get("index"))}), d))
+    best, vals = choose_deck(DECK_ROLL, st, opts)
+    if best is not None:
+        _LAST_SCORES.v = {"roll_select": vals}
+    return best
+
+
 def choose_card_select(st, sim=None):
     cards = st.get("cards") or []
     lo, hi = st.get("min_select") or 0, st.get("max_select") or 1
     if not cards:
         return ("skip_select", {})
     room = (st.get("context") or {}).get("room_type")
+    if (DECK_ROLL is not None and DECK_ROLL_SELECT and hi == 1 and lo <= 1
+            and ((room == "RestSite" and getattr(_LAST_REST, "option", None) != "COOK") or room == "Shop")):
+        a = deck_roll_select(st, cards, room)
+        if a is not None:
+            return a
     if room == "RestSite" and getattr(_LAST_REST, "option", None) != "COOK":   # smith (Cook's prompt is a removal)
         order = sorted(cards, key=upgrade_priority, reverse=True)
         token = getattr(_REST_PICK, "token", None)

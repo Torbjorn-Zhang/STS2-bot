@@ -134,6 +134,25 @@ class DeckRoller:
         return opts[i], {json.dumps(a, sort_keys=True): round(float(x), 4) for a, x in zip(opts, val)}
 
 
+def choose_deck(roller, st, options):
+    """options: [(action, resulting deck tokens)] -> (best action, values); for removals and
+    upgrades (the deck after the choice, judged by its futures like a card reward)."""
+    from policy import potion_id
+    ctx_ = st.get("context") or {}
+    p = st.get("player") or {}
+    ctx = {"relics": [r.get("name") for r in p.get("relics") or []],
+           "potions": [potion_id(x) or x.get("name") for x in p.get("potions") or [] if x],
+           "hp": p.get("max_hp"), "mhp": p.get("max_hp")}
+    if len(options) < 2:
+        return None, {}
+    decks = [d for _, d in options]
+    key = f"sel/{ctx_.get('act')}/{ctx_.get('floor')}/{','.join(sorted(decks[0]))[:200]}"
+    val, _ = roller.futures(decks, ctx, ctx_.get("act") or 1, ctx_.get("floor") or 0, key)
+    roller.stats["decisions"] += 1
+    i = int(np.argmax(val))
+    return options[i][0], {json.dumps(a, sort_keys=True): round(float(x), 4) for (a, _), x in zip(options, val)}
+
+
 def _without(d, c):
     d = list(d)
     d.remove(c)
