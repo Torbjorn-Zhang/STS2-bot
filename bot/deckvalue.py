@@ -135,6 +135,45 @@ class DeckNet(nn.Module):
         return out[:, 0], out[:, 1]
 
 
+class DeckAttn(nn.Module):
+    """Self-attention over every card, relic and potion of the run state: each token sees all
+    the others, so interactions of any size (combos with many pieces, a thin deck, relic-card
+    pairs) can be learned, not just per-card values. A summary token carries the boss and the
+    scalars; a sum over the card outputs keeps counts (copies, deck size) visible."""
+
+    def __init__(self, enc, d=64, layers=3, heads=4):
+        super().__init__()
+        self.card = nn.Embedding(len(enc.cards), d, padding_idx=0)
+        self.up = nn.Parameter(torch.zeros(d))
+        self.relic = nn.Embedding(len(enc.relics), d, padding_idx=0)
+        self.pot = nn.Embedding(len(enc.pots), d, padding_idx=0)
+        self.kind = nn.Embedding(4, d)   # card, relic, potion, summary
+        self.boss = nn.Embedding(len(enc.bosses), d)
+        self.scal = nn.Linear(8, d)
+        layer = nn.TransformerEncoderLayer(d, heads, 2 * d, dropout=0.1, batch_first=True)
+        self.tf = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
+        self.head = nn.Sequential(nn.Linear(2 * d + 8, 2 * d), nn.ReLU(), nn.Linear(2 * d, 2))
+
+    def forward(self, C, U, R, P, B, S):
+        n = C.shape[0]
+        k = self.kind.weight
+        cls = (self.boss(B) + self.scal(S) + k[3]).unsqueeze(1)
+        x = torch.cat([cls, self.card(C) + U.unsqueeze(-1) * self.up + k[0], self.relic(R) + k[1], self.pot(P) + k[2]], 1)
+        pad = torch.cat([torch.zeros(n, 1, dtype=torch.bool, device=C.device), C == 0, R == 0, P == 0], 1)
+        h = self.tf(x, src_key_padding_mask=pad)
+        cm = (C > 0).float().unsqueeze(-1)
+        csum = (h[:, 1:1 + C.shape[1]] * cm).sum(1) / 10.0
+        out = self.head(torch.cat([h[:, 0], csum, S], -1))
+        return out[:, 0], out[:, 1]
+
+
+ARCH = "sets"   # --arch: sets (DeckNet, DeepSets) or attn (DeckAttn)
+
+
+def make_net(enc, arch=None):
+    return DeckAttn(enc) if (arch or ARCH) == "attn" else DeckNet(enc)
+
+
 def batches(n, bs, rng):
     idx = list(range(n))
     rng.shuffle(idx)
@@ -165,8 +204,8 @@ PAIR_WEIGHT = 0.0   # weight of the within-save loss (deck decisions compare var
 def fit(rows, enc, epochs=60, device="cpu", seed=0, val=None, log=True):
     torch.manual_seed(seed)
     rng = random.Random(seed)
-    net = DeckNet(enc).to(device)
-    opt = torch.optim.AdamW(net.parameters(), lr=2e-3, weight_decay=1e-4)
+    net = make_net(enc).to(device)
+    opt = torch.optim.AdamW(net.parameters(), lr=1e-3 if ARCH == "attn" else 2e-3, weight_decay=1e-4)
     X = [t.to(device) for t in enc.encode(rows)]
     yw = torch.tensor([float(r["won"]) for r in rows], device=device)
     ys = torch.tensor([fight_score(r) for r in rows], device=device)
@@ -316,7 +355,8 @@ class DeckValue:
     def __init__(self, path, device="cpu"):
         blob = torch.load(path, map_location=device, weights_only=False)
         self.enc = Encoder(blob=blob["enc"])
-        self.net = DeckNet(self.enc, **blob.get("dims", {}))
+        dims = dict(blob.get("dims", {}))
+        self.net = make_net(self.enc, dims.pop("arch", "sets"))
         self.net.load_state_dict(blob["state"])
         self.net.eval()
         self.device = device
@@ -337,9 +377,12 @@ def main():
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--pair-weight", type=float, default=0.0, help="within-save loss weight")
+    ap.add_argument("--arch", default="sets", choices=["sets", "attn"])
+    ap.add_argument("--seed", type=int, default=0, help="train: network seed (ensembles)")
     args = ap.parse_args()
-    global PAIR_WEIGHT
+    global PAIR_WEIGHT, ARCH
     PAIR_WEIGHT = args.pair_weight
+    ARCH = args.arch
     # a fleet job is budgeted as 2 threads (the lab machines' rule: at most half of what others leave idle)
     torch.set_num_threads(int(os.environ.get("DV_THREADS", "2")))
     device = args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu"
@@ -374,9 +417,9 @@ def main():
     enc = Encoder(rows)
     if tr and va:                                       # report held-out quality first
         fit(tr, enc, args.epochs, device, val=va)
-    net = fit(rows, enc, args.epochs, device, log=False)   # then train on everything
+    net = fit(rows, enc, args.epochs, device, seed=args.seed, log=False)   # then train on everything
     if args.out:
-        torch.save({"enc": enc.to_json(), "state": net.state_dict(), "dims": {}, "rows": len(rows)},
+        torch.save({"enc": enc.to_json(), "state": net.state_dict(), "dims": {"arch": ARCH}, "rows": len(rows)},
                    os.path.join(HERE, args.out))
         print(json.dumps({"saved": args.out}))
 

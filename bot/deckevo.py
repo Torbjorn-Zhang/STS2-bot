@@ -27,8 +27,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MIN_DECK, MAX_DECK = 8, 40
 
 
-def fight(sim, meta, deck, rep, nodes, rollouts):
-    """deck: card ids, "ID+" upgraded. -> graded score (needs the Fix1 or Diag engine)."""
+def fight(sim, meta, deck, rep, nodes, rollouts, detail=False):
+    """deck: card ids, "ID+" upgraded. -> (graded score, won[, info]) (needs the Fix1 or Diag engine)."""
     import combat
     import decktest
     from combat import TurnPlanner
@@ -45,6 +45,7 @@ def fight(sim, meta, deck, rep, nodes, rollouts):
         got = sum(1 for c in (r.get("player") or {}).get("deck") or [] if c.get("upgraded"))
         if got < len(ups):
             raise RuntimeError(f"upgrades not applied ({got}/{len(ups)})")
+    player = r.get("player") or {}
     col, row = meta["node"]
     st = sim.act("select_map_node", col=col, row=row)
     sim.send({"cmd": "determinize", "seed": zlib.crc32(f"{meta['seed']}/evo/{rep}".encode())})
@@ -65,9 +66,13 @@ def fight(sim, meta, deck, rep, nodes, rollouts):
     won = end.get("decision") not in ("game_over", "combat_play", "card_select") or bool(end.get("victory"))
     hp = (last["s"].get("player") or {}).get("hp") if won else 0
     left = 0 if won else sum((e.get("hp") or 0) for e in combat.alive(last["s"]))
+    info = {"player": player, "hp_after": hp or 0, "rounds": last["s"].get("round"),
+            "left_frac": 0.0 if won else left / max(1.0, last["dmg"] + left)}
     if won:
-        return decktest.graded(True, hp or 0, 0, 1), True
-    return 80.0 * last["dmg"] / max(1.0, last["dmg"] + left), False
+        g = decktest.graded(True, hp or 0, 0, 1)
+    else:
+        g = 80.0 * last["dmg"] / max(1.0, last["dmg"] + left)
+    return (g, won, info) if detail else (g, won)
 
 
 def mutate(deck, pool, rng):
