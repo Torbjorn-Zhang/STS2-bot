@@ -240,7 +240,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         "act_states": act_states, **({"mc_save": mc_save} if mc_save else {}),
         "planner": dict(planner.stats), "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
     }
-    if rec:
+    if rec and not (MC_K and mc_save):   # with act-start rollouts pending, the worker finishes the record
         rec.finish(res)
     return res
 
@@ -475,6 +475,8 @@ def main():
                     if MC_K and r.get("mc_save") and not r.get("error"):
                         sim, r["mc"] = mc_rollouts(sim, r["mc_save"], s, args.acts, args.nodes, model, args.value_weight,
                                                    json.loads(args.rollouts) if args.rollouts else None)
+                    if rec and MC_K and r.get("mc_save"):
+                        rec.finish(r)
                 except Exception as e:  # engine hang/crash: record it, restart the engine, go on
                     r = {"seed": s, "character": args.character, "ascension": args.ascension, "cleared_acts": 0,
                          "victory": False, "died": False, "act": None, "floor": None, "room": None, "hp": None,

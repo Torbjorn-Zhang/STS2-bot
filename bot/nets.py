@@ -68,10 +68,25 @@ BOSS_DMG_BONUS = float(os.environ.get("STS2_BOSS_DMG_BONUS", "5"))      # ... pe
 WIN_BONUS = float(os.environ.get("STS2_WIN_BONUS", "0"))                # ... for winning the run
 
 
+RETURN = os.environ.get("STS2_RETURN", "progress")   # "win": 100 x the run's win-chance estimate
+
+
+def win_estimate(o):
+    """(real win + wins of the run.py --mc-k plays from act --mc-act's start) / (1 + K); a run
+    that never reached that act scores its real outcome (a loss)."""
+    mc = o.get("mc") or {}
+    w = mc.get("win") or []
+    return (bool(o.get("victory")) + sum(w)) / (1 + len(w))
+
+
 def final_progress(o):
     """RL return of a run: floors climbed plus ACT_CLEAR_BONUS per act cleared. Floors
     alone paid almost nothing for beating a boss (dying at the act-2 boss = 33, beating
-    it = 34+), so deck learning aimed at surviving hallways, not at winning boss fights."""
+    it = 34+), so deck learning aimed at surviving hallways, not at winning boss fights.
+    STS2_RETURN=win: 100 x the win-chance estimate instead. Floors reward going far, and
+    healing, hoarding potions and dodging elites go far without winning; only wins count."""
+    if RETURN == "win":
+        return 100.0 * win_estimate(o)
     acts = 3 if o.get("victory") else max(0, (o.get("act") or 1) - 1)
     base = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
     # boss damage: a denser signal than boss wins (a lost boss fight still shows how close
