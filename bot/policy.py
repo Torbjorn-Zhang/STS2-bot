@@ -786,10 +786,24 @@ def ancient_pick(opts, net_choice):
     return None
 
 
+FORCE_NEOW = None   # Neow lab (run.py --force-neow K): take option K of the opening choice
+
+
+def is_neow(st, opts):
+    """The opening Neow choice: act 1, floor <= 1, every option a relic."""
+    ctx = st.get("context") or {}
+    return (ctx.get("act") or 1) == 1 and (ctx.get("floor") or 0) <= 1 and len(opts) > 1 and \
+        all(o.get("title") in RELIC_IDS for o in opts)
+
+
 def choose_event(st, sim=None):
     opts = [o for o in st.get("options") or [] if not o.get("is_locked")]
     if not opts:
         return ("leave_room", {})
+    if FORCE_NEOW is not None and is_neow(st, opts):
+        pick = opts[min(FORCE_NEOW, len(opts) - 1)]
+        _remember_event(pick)
+        return ("choose_option", {"option_index": pick["index"]})
     hp = hp_ratio(st)
     neow = [o for o in opts if o.get("title") in NEOW]
     if len(neow) == len(opts) and not (EVENT_NET is not None and EVENT_NET_NEOW and sim is not None):

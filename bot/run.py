@@ -193,6 +193,7 @@ def main():
     ap.add_argument("--rest-smith-hp", type=float, default=None, help="rest net: smith whenever HP >= this share of max")
     ap.add_argument("--rest-smith-hp-boss", type=float, default=None, help="... when the boss is the next node")
     ap.add_argument("--map-node-bias", default=None, help='map net: JSON {room type: logit}, e.g. {"RestSite": 1}')
+    ap.add_argument("--force-neow", type=int, default=None, help="Neow lab: take option K of the opening choice")
     ap.add_argument("--card-lab-rule", action="store_true", help="act 2+: card lab values overrule the card net by a margin")
     ap.add_argument("--ancient-rule", action="store_true", help="Ancient relic choices by the relic lab's measured values")
     ap.add_argument("--shop-potions", action="store_true", help="with the shop net: leftover gold buys potions for free slots")
@@ -299,6 +300,7 @@ def main():
     policy.SHOP_POTIONS = args.shop_potions
     policy.ANCIENT_RULE = args.ancient_rule
     policy.CARD_LAB_RULE = args.card_lab_rule
+    policy.FORCE_NEOW = args.force_neow
     policy.REST_SMITH_HP = args.rest_smith_hp
     policy.REST_SMITH_HP_BOSS = args.rest_smith_hp_boss
     if args.deck_value:
