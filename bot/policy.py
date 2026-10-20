@@ -457,7 +457,46 @@ def deck_value_choice(st):
     return acts[i]
 
 
+DECK_ROLL = None          # optional deckroll.DeckRoller: card rewards by imagined futures in deck space
+DECK_ROLL_FROM_ACT = 1
+DECK_ROLL_MARGIN = None   # take the rollout pick only when it beats the card net's pick by this much
+DECK_ROLL_BETA = 0.0      # or add BETA x the card net's log-probability
+
+
+def deck_roll_choice(st):
+    act = (st.get("context") or {}).get("act") or 1
+    if DECK_ROLL is None or act < DECK_ROLL_FROM_ACT or not st.get("cards"):
+        return None
+    acts = legal_actions(st)
+    lp = None
+    if CARD_PRIOR is not None:
+        acts_, z = CARD_PRIOR.scores(st)
+        z = z - z.max()
+        lps = z - np.log(np.exp(z).sum())
+        lookup = {json.dumps(a, sort_keys=True): l for a, l in zip(acts_, lps)}
+        lp_all = {json.dumps(a, sort_keys=True): lookup.get(json.dumps(a, sort_keys=True), float(lps.min())) for a in acts}
+    best, vals = DECK_ROLL.choose(st, acts)
+    if best is None:
+        return None
+    if CARD_PRIOR is not None:
+        keys = list(vals)
+        if DECK_ROLL_BETA:
+            best = json.loads(max(keys, key=lambda k: vals[k] + DECK_ROLL_BETA * lp_all.get(k, 0.0)))
+            best = (best[0], best[1])
+        if DECK_ROLL_MARGIN is not None:
+            net = max(keys, key=lambda k: lp_all.get(k, -1e9))
+            b = json.dumps(best, sort_keys=True)
+            if vals.get(b, 0.0) - vals.get(net, 0.0) < DECK_ROLL_MARGIN:
+                n = json.loads(net)
+                best = (n[0], n[1])
+    _LAST_SCORES.v = {"roll": vals}
+    return best
+
+
 def choose_card_reward(st, sim=None):
+    dr = deck_roll_choice(st)
+    if dr is not None:
+        return dr
     dv = deck_value_choice(st)
     if dv is not None:
         return dv

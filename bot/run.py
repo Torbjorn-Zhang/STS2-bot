@@ -289,6 +289,11 @@ def main():
     ap.add_argument("--decktest-boss-only", action="store_true", help="deck test against the act boss only")
     ap.add_argument("--rest-smith-bias", type=float, default=0.0, help="rest network: logit added to smith options")
     ap.add_argument("--boss-value", default=None, help='JSON {act: bossvalue model} for value-guided card rewards')
+    ap.add_argument("--deck-roll", default=None, help="card rewards by imagined deck futures: comma-separated deck models (deckroll.py)")
+    ap.add_argument("--deck-roll-m", type=int, default=8, help="--deck-roll: futures per option")
+    ap.add_argument("--deck-roll-from-act", type=int, default=1)
+    ap.add_argument("--deck-roll-margin", type=float, default=None, help="--deck-roll: overrule the card net only by this margin")
+    ap.add_argument("--deck-roll-beta", type=float, default=0.0)
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
     ap.add_argument("--mc-boss-acts", default=None, help='--mc-boss only at these acts\' bosses, e.g. "3"')
     ap.add_argument("--mc-act", type=int, default=3, help="--mc-k: the act whose first map node the rollouts start from")
@@ -408,6 +413,14 @@ def main():
         if args.deck_value_beta is not None:
             policy.DECK_VALUE_BETA = args.deck_value_beta
     policy.REMOVE_FIRST = args.remove_first
+    if args.deck_roll:
+        import torch
+        torch.set_num_threads(1)
+        from deckroll import DeckRoller
+        policy.DECK_ROLL = DeckRoller(args.deck_roll.split(","), m=args.deck_roll_m)
+        policy.DECK_ROLL_FROM_ACT = args.deck_roll_from_act
+        policy.DECK_ROLL_MARGIN = args.deck_roll_margin
+        policy.DECK_ROLL_BETA = args.deck_roll_beta
     if args.decktest_pilot or args.decktest_nodes or args.decktest_reps or args.decktest_boss_only:
         import decktest   # card rewards only; upgrades, shops and events keep the defaults
         if args.decktest_pilot == "planner":
