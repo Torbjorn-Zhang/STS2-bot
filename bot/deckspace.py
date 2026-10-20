@@ -88,11 +88,17 @@ def guide_deck(pool, rng):
     return "guide_" + arch, sorted(c + "+" if rng.random() < up else c for c in d)
 
 
+USE_GUIDE = False
+
+
 def sample_deck(real, pool, rng):
     """One deck of a random shape. real: the save's deck (card tokens, "+" = upgraded)."""
     cards = list(pool)
     w = [pool[c] for c in cards]
-    fam = rng.choices(["local", "thin", "random", "theme", "big", "guide"], [0.25, 0.12, 0.2, 0.15, 0.1, 0.18])[0]
+    fams, wts = ["local", "thin", "random", "theme", "big"], [0.3, 0.15, 0.25, 0.2, 0.1]
+    if USE_GUIDE:   # human archetypes: off by default (no human knowledge in the data; a control only)
+        fams, wts = fams + ["guide"], [0.25, 0.12, 0.2, 0.15, 0.1, 0.18]
+    fam = rng.choices(fams, wts)[0]
     if fam == "guide":
         return guide_deck(pool, rng)
     if fam == "local":   # the bot's deck, a few edits away
@@ -394,6 +400,7 @@ def main():
     ap.add_argument("--saves", default="data/deckspace_saves")
     ap.add_argument("--shard", default="0/1")
     ap.add_argument("--only", default=None, help="explore: just this save (its seed name)")
+    ap.add_argument("--guide", action="store_true", help="explore: also sample human-archetype decks (a control)")
     ap.add_argument("--per-save", type=int, default=150)
     ap.add_argument("--out")
     ap.add_argument("--nodes", type=int, default=400)
@@ -410,6 +417,8 @@ def main():
     args = ap.parse_args()
     import engine
     engine.ENGINE_CONFIG = args.engine_config
+    global USE_GUIDE
+    USE_GUIDE = args.guide
     if args.cmd == "explore":
         cmd_explore(args)
     elif args.cmd == "fight":
