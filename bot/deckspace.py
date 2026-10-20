@@ -152,7 +152,9 @@ def fight_row(sim, meta, deck, rep, nodes, rollouts, extra):
     from policy import potion_id
     g, won, info = deckevo.fight(sim, meta, deck, rep, nodes, rollouts, detail=True)
     pl = info["player"]
-    return {"save": meta["seed"], "act": meta.get("act"), "boss": meta.get("boss"), "deck": info.get("deck") or deck,
+    room = meta.get("room", "Boss")
+    boss = meta.get("boss") if room == "Boss" else f"{room.upper()}_A{meta.get('act')}"   # hallways: generic per act
+    return {"save": meta["seed"], "act": meta.get("act"), "boss": boss, "room": room, "deck": info.get("deck") or deck,
             "relics": [r.get("name") for r in pl.get("relics") or []], "hp": pl.get("hp"), "mhp": pl.get("max_hp"),
             "potions": [potion_id(x) or x.get("name") for x in pl.get("potions") or [] if x],
             "won": won, "hp_after": info["hp_after"], "left_frac": info["left_frac"], "graded": round(g, 2),

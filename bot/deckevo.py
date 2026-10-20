@@ -64,7 +64,8 @@ def fight(sim, meta, deck, rep, nodes, rollouts, detail=False):
     # second boss (no heal in between); the save's fight is only won once both are dead
     import policy
     for _ in range(30):
-        if (meta.get("act") or 0) < 3 or end.get("victory") or end.get("decision") in ("game_over", "combat_play"):
+        if ((meta.get("act") or 0) < 3 or meta.get("room", "Boss") != "Boss" or end.get("victory")
+                or end.get("decision") in ("game_over", "combat_play")):
             break
         ctx = end.get("context") or {}
         if end.get("decision") == "card_select" and ctx.get("room_type") in ("Monster", "Elite", "Boss"):
@@ -85,7 +86,7 @@ def fight(sim, meta, deck, rep, nodes, rollouts, detail=False):
         a = policy.decide(sim, end, avoid=(), memo={})
         end = sim.act(a[0], **a[1])
     won = end.get("decision") not in ("game_over", "combat_play", "card_select") or bool(end.get("victory"))
-    if (meta.get("act") or 0) >= 3 and engine_double_boss():
+    if (meta.get("act") or 0) >= 3 and meta.get("room", "Boss") == "Boss" and engine_double_boss():
         won = bool(end.get("victory"))
     hp = (last["s"].get("player") or {}).get("hp") if won else 0
     left = 0 if won else sum((e.get("hp") or 0) for e in combat.alive(last["s"]))
@@ -94,7 +95,7 @@ def fight(sim, meta, deck, rep, nodes, rollouts, detail=False):
             "left_frac": 0.0 if won else left / max(1.0, last["dmg"] + left)}
     if won:
         g = decktest.graded(True, hp or 0, 0, 1)
-    elif (meta.get("act") or 0) >= 3 and engine_double_boss():   # two final bosses: 40 each
+    elif (meta.get("act") or 0) >= 3 and meta.get("room", "Boss") == "Boss" and engine_double_boss():   # two final bosses: 40 each
         if "dmg1" in last:
             d2 = last["dmg"] - last["dmg1"]
             g = 40.0 + 40.0 * d2 / max(1.0, d2 + left)
