@@ -2129,6 +2129,11 @@ public class RunSimulator
                 // Final act boss → victory (same rule as DetectPostCombatState, #81).
                 if (_runState != null && _runState.CurrentActIndex >= 2)
                 {
+                    if (AwaitingSecondBoss())
+                    {
+                        Log("First of the two final bosses defeated via Proceed (Double Boss); the second boss is next");
+                        return MapSelectState();
+                    }
                     Log($"Final boss defeated via Proceed (Act {_runState.CurrentActIndex + 1}), reporting victory");
                     return GameOverState(true);
                 }
@@ -2801,6 +2806,14 @@ public class RunSimulator
         {
             if (_runState != null && _runState.CurrentActIndex >= 2)
             {
+                if (AwaitingSecondBoss())
+                {
+                    // Ascension 10 (Double Boss): the game only reopens the map (RunManager.
+                    // ProceedFromTerminalRewardsScreen); the room stays the first boss's until you
+                    // travel to the second boss point, the boss point's only child. No heal in between
+                    Log("First of the two final bosses defeated (Double Boss); the second boss is next");
+                    return MapSelectState();
+                }
                 Log($"Final boss defeated (Act {_runState.CurrentActIndex + 1}), reporting victory");
                 return GameOverState(true);
             }
@@ -3247,6 +3260,17 @@ public class RunSimulator
 
         ForceToMap();
         return MapSelectState();
+    }
+
+    /// <summary>Ascension 10 (Double Boss): the final act has a second boss point and we stand on
+    /// the first boss point, i.e. the first of the two final bosses just died (the game's own rule,
+    /// CombatManager.EndCombatInternal / NRewardsScreen).</summary>
+    private bool AwaitingSecondBoss()
+    {
+        var map = _runState?.Map;
+        if (map?.SecondBossMapPoint == null || map.BossMapPoint == null || _runState == null)
+            return false;
+        return _runState.CurrentMapCoord == map.BossMapPoint.coord;
     }
 
     private Dictionary<string, object?> GameOverState(bool isVictory)

@@ -63,16 +63,55 @@ def fight(sim, meta, deck, rep, nodes, rollouts, detail=False):
 
     watch(st)
     end = planner.play_combat(st, on_state=watch)
+    # Ascension 10 (Double Boss, engine Fix2+): after the first act-3 boss the map offers the
+    # second boss (no heal in between); the save's fight is only won once both are dead
+    import policy
+    for _ in range(30):
+        if (meta.get("act") or 0) < 3 or end.get("victory") or end.get("decision") in ("game_over", "combat_play"):
+            break
+        ctx = end.get("context") or {}
+        if end.get("decision") == "card_select" and ctx.get("room_type") in ("Monster", "Elite", "Boss"):
+            end = planner.play_combat(end, on_state=watch)
+            continue
+        if end.get("decision") == "map_select":
+            boss = [c for c in end.get("choices") or [] if c.get("type") == "Boss"]
+            if not boss:
+                break
+            last["dmg1"] = last["dmg"]
+            last["e"] = {}
+            end = sim.act("select_map_node", col=boss[0]["col"], row=boss[0]["row"])
+            watch(end)
+            last["bosses"] = last.get("bosses", 1) + 1
+            if end.get("decision") in ("combat_play", "card_select"):
+                end = planner.play_combat(end, on_state=watch)
+            continue
+        a = policy.decide(sim, end, avoid=(), memo={})
+        end = sim.act(a[0], **a[1])
     won = end.get("decision") not in ("game_over", "combat_play", "card_select") or bool(end.get("victory"))
+    if (meta.get("act") or 0) >= 3 and engine_double_boss():
+        won = bool(end.get("victory"))
     hp = (last["s"].get("player") or {}).get("hp") if won else 0
     left = 0 if won else sum((e.get("hp") or 0) for e in combat.alive(last["s"]))
-    info = {"player": player, "hp_after": hp or 0, "rounds": last["s"].get("round"),
+    info = {"player": player, "hp_after": hp or 0, "rounds": last["s"].get("round"), "bosses": last.get("bosses", 1),
             "left_frac": 0.0 if won else left / max(1.0, last["dmg"] + left)}
     if won:
         g = decktest.graded(True, hp or 0, 0, 1)
+    elif (meta.get("act") or 0) >= 3 and engine_double_boss():   # two final bosses: 40 each
+        if "dmg1" in last:
+            d2 = last["dmg"] - last["dmg1"]
+            g = 40.0 + 40.0 * d2 / max(1.0, d2 + left)
+        else:
+            g = 40.0 * last["dmg"] / max(1.0, last["dmg"] + left)
+        info["left_frac"] = 1.0 - g / 80.0   # deckvalue.fight_score: a loss scores 0.8 x (1 - left_frac)
     else:
         g = 80.0 * last["dmg"] / max(1.0, last["dmg"] + left)
     return (g, won, info) if detail else (g, won)
+
+
+def engine_double_boss():
+    """Engines from Fix2 on play Ascension 10's second act-3 boss; older ones end the run early."""
+    import engine
+    return engine.ENGINE_CONFIG not in ("Release", "Debug", "Diag", "Fix1", "Exp", "ReleaseExp")
 
 
 def mutate(deck, pool, rng):
@@ -202,7 +241,7 @@ def main():
     ap.add_argument("--rollouts", default='{"k":4,"m":4,"turns":2}')
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--engine-config", default="Fix1", help="needs set_player upgrade (Fix1 or Diag)")
+    ap.add_argument("--engine-config", default="Fix2", help="needs set_player upgrade (Fix1+); Fix2+: A10 double boss")
     args = ap.parse_args()
     import engine
     engine.ENGINE_CONFIG = args.engine_config

@@ -287,8 +287,9 @@ $pids | ConvertTo-Json -Compress
 def code_sig():
     """Size and mtime of every Python/shell file the jobs run (cheap: stat only)."""
     hs = hashlib.sha1()
-    for d in (HERE, os.path.join(REPO, "harness"), os.path.join(REPO, "deploy")):
-        for p in sorted(glob.glob(os.path.join(d, "*.py")) + glob.glob(os.path.join(d, "*.sh")) + glob.glob(os.path.join(d, "*.json"))):
+    for d in (HERE, os.path.join(REPO, "harness"), os.path.join(REPO, "deploy"), os.path.join(REPO, "sts2-cli", "src", "Sts2Headless")):
+        for p in sorted(glob.glob(os.path.join(d, "*.py")) + glob.glob(os.path.join(d, "*.sh")) + glob.glob(os.path.join(d, "*.json"))
+                        + glob.glob(os.path.join(d, "*.cs"))):
             st = os.stat(p)
             hs.update(f"{p}:{st.st_size}:{int(st.st_mtime)}".encode())
     return hs.hexdigest()
@@ -1039,9 +1040,25 @@ class Fleet:
 
     # engine builds that jobs may ask for (run.py / bossbench.py --engine-config); Windows hosts
     # build missing ones after a code sync (the Linux hosts get theirs copied from lab0)
-    ENGINE_BUILDS = ("Fix1", "Diag")
+    # Fix2 (2026-10-20): Ascension 10's Double Boss (the sim used to report victory after the
+    # first act-3 boss). A new config name per engine change: running jobs keep their DLL
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2")
 
     def ensure_builds(self, h):
+        if linux(h):   # every Linux host has its own dotnet under the root
+            R = h["root"].rstrip("/")
+            cmd = " ; ".join(
+                f"[ -f {R}/sts2-cli/src/Sts2Headless/bin/{c}/net9.0/Sts2Headless.dll ] || "
+                f"( cd {R}/sts2-cli && DOTNET_CLI_TELEMETRY_OPTOUT=1 nice -n 19 ionice -c3 {R}/dotnet/dotnet build "
+                f"src/Sts2Headless/Sts2Headless.csproj -c {c} -p:Optimize=true --no-incremental 2>&1 | tail -2 && echo built {c} )"
+                for c in self.ENGINE_BUILDS)
+            try:
+                out = lx(h, cmd + " ; echo ok", timeout=1200)
+                if "built" in out:
+                    log(f"{h['name']}: engine builds: {' '.join(l for l in out.split() if l in self.ENGINE_BUILDS)}")
+            except Exception as e:
+                log(f"{h['name']}: engine build check failed ({str(e)[:100]})")
+            return
         R = wroot(h)
         script = "$env:DOTNET_CLI_TELEMETRY_OPTOUT='1'; Set-Location '" + R + "\\sts2-cli'\n" + "\n".join(
             f"if (-not (Test-Path '{R}\\sts2-cli\\src\\Sts2Headless\\bin\\{c}\\net9.0\\Sts2Headless.dll')) {{ "
@@ -1092,7 +1109,7 @@ class Fleet:
             ok, msg = self.sync_code(h)
             if ok:
                 h["code_sig"] = sig
-            if ok and not linux(h):
+            if ok:
                 self.ensure_builds(h)
             if not ok:
                 h["sync_fails"] = h.get("sync_fails", 0) + 1
@@ -1292,6 +1309,7 @@ class Fleet:
                     raise RuntimeError(f"code sync failed: {msg}")
                 h["code_sig"] = sig
                 log(f"{h['name']}: code changed, synced")
+                self.ensure_builds(h)   # a new engine config may be wanted by these jobs
             for j in js:
                 for rel in j["inputs"]:
                     loc = os.path.join(HERE, rel)

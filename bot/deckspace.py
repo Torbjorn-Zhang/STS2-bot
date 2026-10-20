@@ -111,7 +111,8 @@ def fight_row(sim, meta, deck, rep, nodes, rollouts, extra):
             "relics": [r.get("name") for r in pl.get("relics") or []], "hp": pl.get("hp"), "mhp": pl.get("max_hp"),
             "potions": [potion_id(x) or x.get("name") for x in pl.get("potions") or [] if x],
             "won": won, "hp_after": info["hp_after"], "left_frac": info["left_frac"], "graded": round(g, 2),
-            "rounds": info["rounds"], "rep": rep, "dk": deck_key(deck), **extra}
+            "rounds": info["rounds"], "rep": rep, "dk": deck_key(deck), "bosses": info.get("bosses", 1),
+            "engine": __import__("engine").ENGINE_CONFIG, **extra}
 
 
 def run_items(items, args, fn_extra):
@@ -311,7 +312,7 @@ def main():
     ap.add_argument("--rollouts", default='{"k":4,"m":4,"turns":2}')
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--engine-config", default="Fix1")
+    ap.add_argument("--engine-config", default="Fix2", help="Fix2+: act-3 saves fight both A10 final bosses")
     ap.add_argument("--data", nargs="*", default=[], help="propose: explore rows (the saves' contexts)")
     ap.add_argument("--pop", type=int, default=48)
     ap.add_argument("--gens", type=int, default=30)
