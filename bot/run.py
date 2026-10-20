@@ -295,6 +295,7 @@ def main():
     ap.add_argument("--deck-roll-margin", type=float, default=None, help="--deck-roll: overrule the card net only by this margin")
     ap.add_argument("--deck-roll-beta", type=float, default=0.0)
     ap.add_argument("--deck-roll-select", action="store_true", help="--deck-roll: also shop removals and smiths")
+    ap.add_argument("--deck-roll-hall", default=None, help="--deck-roll: comma-separated hallway models (deckvalue --target hpfrac)")
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
     ap.add_argument("--mc-boss-acts", default=None, help='--mc-boss only at these acts\' bosses, e.g. "3"')
     ap.add_argument("--mc-act", type=int, default=3, help="--mc-k: the act whose first map node the rollouts start from")
@@ -418,7 +419,8 @@ def main():
         import torch
         torch.set_num_threads(1)
         from deckroll import DeckRoller
-        policy.DECK_ROLL = DeckRoller(args.deck_roll.split(","), m=args.deck_roll_m)
+        policy.DECK_ROLL = DeckRoller(args.deck_roll.split(","), m=args.deck_roll_m,
+                                      hall_paths=args.deck_roll_hall.split(",") if args.deck_roll_hall else None)
         policy.DECK_ROLL_FROM_ACT = args.deck_roll_from_act
         policy.DECK_ROLL_MARGIN = args.deck_roll_margin
         policy.DECK_ROLL_BETA = args.deck_roll_beta

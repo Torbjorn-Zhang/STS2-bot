@@ -26,13 +26,16 @@ BOSSES = {1: ("CEREMONIAL_BEAST_BOSS", "THE_KIN_BOSS", "SOUL_FYSH_BOSS", "VANTOM
           2: ("KAISER_CRAB_BOSS", "THE_INSATIABLE_BOSS", "KNOWLEDGE_DEMON_BOSS"), 3: ACT3_BOSSES}
 REWARDS_PER_ACT = 7     # card rewards per act (hallway fights, elites, the boss)
 REMOVES_PER_ACT = 1     # shop removals
-UPGRADES_PER_ACT = 2    # rest-site smiths
+UPGRADES_PER_ACT = 2    # rest-site smiths (or heals when HP is low)
+ELITE_SHARE = 0.15      # hallway fights that are elites
 
 
 class DeckRoller:
-    def __init__(self, model_paths, m=8, device="cpu", seed=0, inner=1):
+    def __init__(self, model_paths, m=8, device="cpu", seed=0, inner=1, hall_paths=None):
         from deckvalue import DeckValue
         self.models = [DeckValue(os.path.join(HERE, p), device=device) for p in model_paths]
+        # hallway models (deckvalue.py --target hpfrac on hallway/elite fights): survival and HP left
+        self.hall = [DeckValue(os.path.join(HERE, p), device=device) for p in (hall_paths or [])]
         self.inner = self.models[:max(1, inner)]   # the greedy steps use a cheaper subset
         self.m = m
         self.seed = seed
@@ -67,20 +70,33 @@ class DeckRoller:
         p = np.mean([m.win(states) for m in models], axis=0)
         return np.log(np.clip(p, 1e-6, 1.0 - 1e-6))
 
-    def futures(self, decks, ctx, act, floor, key, boss_now=None):
+    def _hall(self, states):
+        """-> (log P(survive), expected HP left as a share of max HP) for hallway fight states."""
+        self.stats["evals"] += len(states) * len(self.hall)
+        w = np.mean([m.win(states) for m in self.hall], axis=0)
+        h = np.mean([m.score(states) for m in self.hall], axis=0)
+        return np.log(np.clip(w, 1e-6, 1.0 - 1e-6)), np.clip(h, 0.0, 1.0)
+
+    def futures(self, decks, ctx, act, floor, key, boss_now=None, hp=None):
         """decks: the option decks. -> (values per option, per-future values). A future's value is
-        the sum over the acts left of log P(win that act's boss) with the deck it holds there
-        (Ascension 10's act 3 = both final bosses, as the model was trained): surviving now and
-        winning later both count, so a pick that only pays off later must not cost the early acts."""
+        log P(it wins every boss left): each act boss scores the deck it holds there (act 3 = both
+        final bosses, as the model was trained). With hallway models, every card reward is preceded
+        by a hallway fight (an elite now and then) played by the deck of that moment: it can kill
+        the future and costs HP the next boss fight sees (A10 act starts heal 80% of missing HP,
+        rest sites heal below half HP). So a pick that pays off late must not cost the early acts."""
         rng = random.Random(f"{key}/{self.seed}")
         steps = self.schedule(act, floor)
         acts = list(range(act, 4))
+        mhp = float(ctx.get("mhp") or 80)
+        hp0 = float(hp if hp is not None else mhp)
         bosses = []   # per future: the boss of each act left (the current one when known)
+        elites = []
         for j in range(self.m):
             b = {a: rng.choice(BOSSES[a]) for a in acts}
             if boss_now:
                 b[act] = boss_now
             bosses.append(b)
+            elites.append([rng.random() < ELITE_SHARE for _ in steps])
         draws = []
         for j in range(self.m):
             r = random.Random(f"{key}/{self.seed}/{j}")
@@ -94,14 +110,30 @@ class DeckRoller:
                     d.append(None)
             draws.append(d)
         threads = [(o, j, list(decks[o])) for o in range(len(decks)) for j in range(self.m)]
-        at_boss = [dict() for _ in threads]
+        T = len(threads)
+        hpv = np.full(T, hp0)
+        logp = np.zeros(T)
         cur_act = act
+        hall = bool(self.hall)
         for si, s in enumerate(steps):
             if s[0] == "boss":
-                for t, (o, j, d) in enumerate(threads):
-                    at_boss[t][s[1]] = list(d)
+                st_ = [dict(ctx, deck=d, boss=bosses[j][s[1]], act=s[1], hp=int(max(1, hpv[t])), mhp=int(mhp))
+                       for t, (o, j, d) in enumerate(threads)]
+                logp += self._logp(self.models, st_)
                 cur_act = s[1] + 1
+                hpv = hpv + 0.8 * (mhp - hpv)   # Ascension 2: the next act's Ancient heals 80% of missing HP
                 continue
+            if s[0] == "reward" and hall:   # the fight before this reward, with the deck of this moment
+                st_ = [dict(ctx, deck=d, boss=("ELITE" if elites[j][si] else "MONSTER") + f"_A{s[1]}", act=s[1],
+                            hp=int(max(1, hpv[t])), mhp=int(mhp)) for t, (o, j, d) in enumerate(threads)]
+                lw, hf = self._hall(st_)
+                logp += lw
+                hpv = np.minimum(hpv, np.maximum(1.0, hf * mhp))
+            if s[0] == "upgrade" and hall:   # rest site: heal when low, else smith
+                low = hpv < 0.5 * mhp
+                hpv = np.where(low, np.minimum(mhp, hpv + 0.3 * mhp), hpv)
+            else:
+                low = np.zeros(T, dtype=bool)
             cand, owner = [], []
             for t, (o, j, d) in enumerate(threads):
                 if s[0] == "reward":
@@ -111,34 +143,35 @@ class DeckRoller:
                     opts = [d] + [_without(d, c) for c in uniq] if len(d) > 5 else [d]
                 else:
                     ups = sorted({c for c in d if not c.endswith("+") and not c.startswith(("ASCENDERS_BANE", "CURSE"))})
-                    opts = [d] + [_upgraded(d, c) for c in ups]
+                    opts = [d] + ([] if low[t] else [_upgraded(d, c) for c in ups])
                 for x in opts:
                     cand.append((t, x))
-            # greedy step: the candidate's value against every boss still ahead, as if frozen now
+            if all(len([1 for c in cand if c[0] == t]) == 1 for t in range(T)):
+                continue
+            # greedy step: the candidate deck against every boss still ahead (the current act's at
+            # this HP, later ones at full HP), plus surviving the next hallway fight
             ahead = [a for a in acts if a >= cur_act] or [3]
             states, idx = [], []
             for i, (t, x) in enumerate(cand):
                 j = threads[t][1]
                 for a in ahead:
-                    states.append(dict(ctx, deck=x, boss=bosses[j][a], act=a))
+                    states.append(dict(ctx, deck=x, boss=bosses[j][a], act=a,
+                                       hp=int(max(1, hpv[t])) if a == cur_act else int(mhp), mhp=int(mhp)))
                     idx.append(i)
             lp = self._logp(self.inner, states)
             tot = np.zeros(len(cand))
             np.add.at(tot, idx, lp)
+            if hall and cur_act <= 3:
+                hs = [dict(ctx, deck=x, boss=f"MONSTER_A{min(cur_act, 3)}", act=min(cur_act, 3), hp=int(max(1, hpv[t])), mhp=int(mhp))
+                      for t, x in cand]
+                lw, _ = self._hall(hs)
+                tot += lw
             best = {}
             for i, (t, x) in enumerate(cand):
                 if t not in best or tot[i] > best[t][0]:
                     best[t] = (tot[i], x)
             threads = [(o, j, best[t][1]) for t, (o, j, d) in enumerate(threads)]
-        states, idx = [], []
-        for t, (o, j, d) in enumerate(threads):
-            for a in acts:
-                states.append(dict(ctx, deck=at_boss[t].get(a, d), boss=bosses[j][a], act=a))
-                idx.append(t)
-        lp = self._logp(self.models, states)
-        v = np.zeros(len(threads))
-        np.add.at(v, idx, lp)
-        per = v.reshape(len(decks), self.m)
+        per = logp.reshape(len(decks), self.m)
         return per.mean(1), per
 
     def choose(self, st, legal, prior_lp=None, beta=0.0):
@@ -164,7 +197,7 @@ class DeckRoller:
             return None, {}
         key = f"{ctx_.get('act')}/{ctx_.get('floor')}/{len(deck)}/{','.join(sorted(deck))[:200]}"
         val, _ = self.futures(decks, ctx, ctx_.get("act") or 1, ctx_.get("floor") or 0, key,
-                              boss_now=(ctx_.get("boss") or {}).get("id"))
+                              boss_now=(ctx_.get("boss") or {}).get("id"), hp=p.get("hp"))
         tot = val + (beta * np.asarray(prior_lp) if prior_lp is not None else 0.0)
         self.stats["decisions"] += 1
         i = int(np.argmax(tot))
@@ -185,7 +218,7 @@ def choose_deck(roller, st, options):
     decks = [d for _, d in options]
     key = f"sel/{ctx_.get('act')}/{ctx_.get('floor')}/{','.join(sorted(decks[0]))[:200]}"
     val, _ = roller.futures(decks, ctx, ctx_.get("act") or 1, ctx_.get("floor") or 0, key,
-                            boss_now=(ctx_.get("boss") or {}).get("id"))
+                            boss_now=(ctx_.get("boss") or {}).get("id"), hp=p.get("hp"))
     roller.stats["decisions"] += 1
     i = int(np.argmax(val))
     return options[i][0], {json.dumps(a, sort_keys=True): round(float(x), 4) for (a, _), x in zip(options, val)}

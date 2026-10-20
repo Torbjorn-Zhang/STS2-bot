@@ -24,7 +24,12 @@ import torch.nn as nn
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+TARGET = "fight"   # --target hpfrac: the score head predicts HP left / max HP (0 if lost), for hallway models
+
+
 def fight_score(r):
+    if TARGET == "hpfrac":
+        return (r.get("hp_after") or 0) / max(1, r.get("mhp") or 1) if r["won"] else 0.0
     if r["won"]:
         return 1.0 + 0.25 * (r.get("hp_after") or 0) / max(1, r.get("mhp") or 1)
     return 0.8 * (1.0 - min(1.0, max(0.0, r.get("left_frac") or 0.0)))
@@ -381,11 +386,13 @@ def main():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--pair-weight", type=float, default=0.0, help="within-save loss weight")
     ap.add_argument("--arch", default="sets", choices=["sets", "attn"])
+    ap.add_argument("--target", default="fight", choices=["fight", "hpfrac"])
     ap.add_argument("--seed", type=int, default=0, help="train: network seed (ensembles)")
     args = ap.parse_args()
-    global PAIR_WEIGHT, ARCH
+    global PAIR_WEIGHT, ARCH, TARGET
     PAIR_WEIGHT = args.pair_weight
     ARCH = args.arch
+    TARGET = args.target
     # a fleet job is budgeted as 2 threads (the lab machines' rule: at most half of what others leave idle)
     torch.set_num_threads(int(os.environ.get("DV_THREADS", "2")))
     device = args.device if args.device != "cuda" or torch.cuda.is_available() else "cpu"
@@ -422,7 +429,7 @@ def main():
         fit(tr, enc, args.epochs, device, val=va)
     net = fit(rows, enc, args.epochs, device, seed=args.seed, log=False)   # then train on everything
     if args.out:
-        torch.save({"enc": enc.to_json(), "state": net.state_dict(), "dims": {"arch": ARCH}, "rows": len(rows)},
+        torch.save({"enc": enc.to_json(), "state": net.state_dict(), "dims": {"arch": ARCH}, "target": TARGET, "rows": len(rows)},
                    os.path.join(HERE, args.out))
         print(json.dumps({"saved": args.out}))
 
