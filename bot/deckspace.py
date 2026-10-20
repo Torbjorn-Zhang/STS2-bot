@@ -253,6 +253,35 @@ def mutate(d, pool, rng):
     return sorted(d)
 
 
+def edits(real, d):
+    """(cards added, cards removed, upgrades) turning `real` into `d` (an upgrade is not an add)."""
+    from collections import Counter
+    rb, db = Counter(c.rstrip("+") for c in real), Counter(c.rstrip("+") for c in d)
+    adds = sum((db - rb).values())
+    rems = sum((rb - db).values())
+    ups = max(0, sum(c.endswith("+") for c in d) - sum(c.endswith("+") for c in real))
+    return adds, rems, ups
+
+
+def feasible(real, d, mode):
+    """budget: what one act can do (<= 4 cards added, <= 3 removed, <= 4 upgrades);
+    sized: any composition, but within 3 cards of the real deck's size (composition, not size)."""
+    if mode == "budget":
+        a, r, u = edits(real, d)
+        return a <= 4 and r <= 3 and u <= 4
+    if mode == "sized":
+        return abs(len(d) - len(real)) <= 3
+    return True
+
+
+def edit_summary(real, d):
+    from collections import Counter
+    rc, dc = Counter(real), Counter(d)
+    plus = sorted((dc - rc).elements())
+    minus = sorted((rc - dc).elements())
+    return f"+[{' '.join(plus)}] -[{' '.join(minus)}]"[:300]
+
+
 def cmd_propose(args):
     """Model-guided deck search per save: evolve decks under an ensemble of deck models,
     score = mean + beta * spread (optimism where the models disagree: that is where the engine
@@ -276,27 +305,43 @@ def cmd_propose(args):
             p = np.stack([m.score(st) for m in models])
             return p.mean(0), p.std(0)
 
-        popn = [base["real"]] + [sample_deck(base["real"], pool, rng)[1] for _ in range(args.pop - 1)]
-        seen = {}
-        for gen in range(args.gens):
-            kids = [mutate(rng.choice(popn), pool, rng) for _ in range(args.pop * 2)]
-            cand = {",".join(d): d for d in popn + kids}
-            keys = [k for k in cand if k not in seen]
-            if keys:
-                mu, sd = score([cand[k] for k in keys])
-                for k, a, b in zip(keys, mu, sd):
-                    seen[k] = (float(a), float(b))
-            ranked = sorted(cand, key=lambda k: -(seen[k][0] + args.beta * seen[k][1]))
-            popn = [cand[k] for k in ranked[:args.pop]]
-        mu_real = seen[",".join(base["real"])][0]
-        best = sorted(seen, key=lambda k: -(seen[k][0] + args.beta * seen[k][1]))[:args.per_save]
-        greedy = [k for k in sorted(seen, key=lambda k: -seen[k][0]) if k not in best][:args.per_save // 4]
-        for k in best + greedy:
-            for rep in (0, 1):
-                out.append({"save": save, "deck": k.split(","), "rep": rep, "family": "proposed",
-                            "pred": [round(seen[k][0], 3), round(seen[k][1], 3), round(mu_real, 3)]})
-        print(f"{save}: real {mu_real:.3f}  best {seen[best[0]][0]:.3f}±{seen[best[0]][1]:.3f} "
-              f"size {len(best[0].split(','))}", flush=True)
+        real = base["real"]
+        for mode in args.modes.split(","):
+            ok = lambda d, mode=mode: feasible(real, d, mode)
+            popn = [real]
+            while len(popn) < args.pop:
+                d = mutate(rng.choice(popn), pool, rng)
+                if ok(d):
+                    popn.append(d)
+            seen = {}
+            for gen in range(args.gens):
+                kids = []
+                for _ in range(args.pop * 6):
+                    d = mutate(rng.choice(popn), pool, rng)
+                    if ok(d):
+                        kids.append(d)
+                    if len(kids) >= args.pop * 2:
+                        break
+                cand = {",".join(d): d for d in popn + kids}
+                keys = [k for k in cand if k not in seen]
+                if keys:
+                    mu, sd = score([cand[k] for k in keys])
+                    for k, a, b in zip(keys, mu, sd):
+                        seen[k] = (float(a), float(b))
+                ranked = sorted(cand, key=lambda k: -(seen[k][0] + args.beta * seen[k][1]))
+                popn = [cand[k] for k in ranked[:args.pop]]
+            mu_real = seen[",".join(real)][0]
+            best = [k for k in sorted(seen, key=lambda k: -(seen[k][0] + args.beta * seen[k][1])) if k != ",".join(real)][:args.per_save]
+            greedy = [k for k in sorted(seen, key=lambda k: -seen[k][0]) if k not in best and k != ",".join(real)][:max(1, args.per_save // 4)]
+            for k in best + greedy:
+                for rep in (0, 1):
+                    out.append({"save": save, "deck": k.split(","), "rep": rep, "family": f"prop_{mode}",
+                                "pred": [round(seen[k][0], 3), round(seen[k][1], 3), round(mu_real, 3)]})
+            b0 = best[0].split(",")
+            print(f"{save} {mode}: real {mu_real:.3f}  best {seen[best[0]][0]:.3f}±{seen[best[0]][1]:.3f} size {len(real)}->{len(b0)} "
+                  f"{edit_summary(real, b0)}", flush=True)
+        for rep in (0, 1):   # the real deck on the same futures, as the reference
+            out.append({"save": save, "deck": real, "rep": rep, "family": "real"})
     with open(args.out, "w") as fh:
         json.dump(out, fh)
     print(f"{len(out)} fights proposed -> {args.out}")
@@ -361,6 +406,7 @@ def main():
     ap.add_argument("--gens", type=int, default=30)
     ap.add_argument("--beta", type=float, default=1.0)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--modes", default="budget,sized", help="propose: budget, sized and/or free (see feasible())")
     args = ap.parse_args()
     import engine
     engine.ENGINE_CONFIG = args.engine_config
