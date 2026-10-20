@@ -51,11 +51,50 @@ def pool_weights():
     return {c: n for c, n in tot.items() if n >= 300}
 
 
+# Human archetypes (Chinese and English high-ascension guides, 2026; see the research notes):
+# a starting point for exploration, not an answer; the engine judges them like any other deck
+GUIDE = {
+    "loop": ["POMMEL_STRIKE", "SHRUG_IT_OFF", "BURNING_PACT", "BATTLE_TRANCE", "OFFERING", "PILLAGE", "BLOODLETTING",
+             "FORGOTTEN_RITUAL", "EXPECT_A_FIGHT", "PYRE", "TRUE_GRIT", "THRASH", "SECOND_WIND", "ASHEN_STRIKE", "PACTS_END"],
+    "selfdmg": ["RUPTURE", "TEAR_ASUNDER", "INFERNO", "CRIMSON_MANTLE", "BLOODLETTING", "OFFERING", "BRAND", "SPITE",
+                "BREAKTHROUGH", "BLOOD_WALL", "HEMOKINESIS"],
+    "exhaust": ["ASHEN_STRIKE", "DARK_EMBRACE", "FEEL_NO_PAIN", "TRUE_GRIT", "BURNING_PACT", "SECOND_WIND", "FIEND_FIRE",
+                "STOKE", "HAVOC", "PACTS_END", "BRAND"],
+    "vuln": ["VICIOUS", "TAUNT", "THUNDERCLAP", "UPPERCUT", "COLOSSUS", "DOMINATE", "BASH", "OFFERING", "PYRE"],
+    "strike": ["HELLRAISER", "POMMEL_STRIKE", "PERFECTED_STRIKE", "PILLAGE", "TWIN_STRIKE", "SETUP_STRIKE", "ASHEN_STRIKE"],
+    "thrash": ["THRASH", "SHRUG_IT_OFF", "TAUNT", "COLOSSUS", "IMPERVIOUS", "FLAME_BARRIER", "BASH", "BURNING_PACT"],
+    "strength": ["DEMON_FORM", "INFLAME", "BRAND", "FIGHT_ME", "TWIN_STRIKE", "SWORD_BOOMERANG", "WHIRLWIND", "RUPTURE"],
+}
+GUIDE_BLOCK = ["UNMOVABLE", "CRIMSON_MANTLE", "COLOSSUS", "RAGE", "IMPERVIOUS", "FLAME_BARRIER", "FEEL_NO_PAIN", "TAUNT",
+               "SHRUG_IT_OFF", "EVIL_EYE", "SECOND_WIND", "ARMAMENTS", "TRUE_GRIT"]
+GUIDE_AOE = ["INFERNO", "CONFLAGRATION", "BREAKTHROUGH", "WHIRLWIND", "THUNDERCLAP", "STOMP"]
+
+
+def guide_deck(pool, rng):
+    arch = rng.choice(sorted(GUIDE))
+    ok = lambda c: c in pool or c == "BASH"
+    d = [STRIKE] * rng.randint(0, 5 if arch != "strike" else 5) + [DEFEND] * rng.randint(0, 4) + ([BASH] if rng.random() < 0.7 else [])
+    for c in GUIDE[arch]:
+        if ok(c) and rng.random() < 0.75:
+            d += [c] * rng.choice((1, 1, 2))
+    d += [c for c in rng.sample(GUIDE_BLOCK, rng.randint(2, 4)) if ok(c)]
+    d += [c for c in rng.sample(GUIDE_AOE, rng.randint(1, 2)) if ok(c)]
+    cards = list(pool)
+    w = [pool[c] for c in cards]
+    size = rng.randint(15, 32)
+    while len(d) < size:
+        d.append(rng.choices(cards, w)[0])
+    up = rng.uniform(0.2, 1.0)
+    return "guide_" + arch, sorted(c + "+" if rng.random() < up else c for c in d)
+
+
 def sample_deck(real, pool, rng):
     """One deck of a random shape. real: the save's deck (card tokens, "+" = upgraded)."""
     cards = list(pool)
     w = [pool[c] for c in cards]
-    fam = rng.choices(["local", "thin", "random", "theme", "big"], [0.3, 0.15, 0.25, 0.2, 0.1])[0]
+    fam = rng.choices(["local", "thin", "random", "theme", "big", "guide"], [0.25, 0.12, 0.2, 0.15, 0.1, 0.18])[0]
+    if fam == "guide":
+        return guide_deck(pool, rng)
     if fam == "local":   # the bot's deck, a few edits away
         d = list(real)
         for _ in range(rng.randint(1, 8)):
@@ -107,7 +146,7 @@ def fight_row(sim, meta, deck, rep, nodes, rollouts, extra):
     from policy import potion_id
     g, won, info = deckevo.fight(sim, meta, deck, rep, nodes, rollouts, detail=True)
     pl = info["player"]
-    return {"save": meta["seed"], "act": meta.get("act"), "boss": meta.get("boss"), "deck": deck,
+    return {"save": meta["seed"], "act": meta.get("act"), "boss": meta.get("boss"), "deck": info.get("deck") or deck,
             "relics": [r.get("name") for r in pl.get("relics") or []], "hp": pl.get("hp"), "mhp": pl.get("max_hp"),
             "potions": [potion_id(x) or x.get("name") for x in pl.get("potions") or [] if x],
             "won": won, "hp_after": info["hp_after"], "left_frac": info["left_frac"], "graded": round(g, 2),

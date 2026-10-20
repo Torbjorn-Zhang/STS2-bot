@@ -42,10 +42,7 @@ def fight(sim, meta, deck, rep, nodes, rollouts, detail=False):
     ups = [c.rstrip("+") for c in deck if c.endswith("+")]
     if ups:
         r = sim.send({"cmd": "set_player", "upgrade": ups})
-        got = sum(1 for c in (r.get("player") or {}).get("deck") or [] if c.get("upgraded"))
-        if got < len(ups):
-            raise RuntimeError(f"upgrades not applied ({got}/{len(ups)})")
-    player = r.get("player") or {}
+    player = r.get("player") or {}   # (curses and statuses stay unupgraded: the row records the real deck)
     col, row = meta["node"]
     st = sim.act("select_map_node", col=col, row=row)
     sim.send({"cmd": "determinize", "seed": zlib.crc32(f"{meta['seed']}/evo/{rep}".encode())})
@@ -92,7 +89,8 @@ def fight(sim, meta, deck, rep, nodes, rollouts, detail=False):
         won = bool(end.get("victory"))
     hp = (last["s"].get("player") or {}).get("hp") if won else 0
     left = 0 if won else sum((e.get("hp") or 0) for e in combat.alive(last["s"]))
-    info = {"player": player, "hp_after": hp or 0, "rounds": last["s"].get("round"), "bosses": last.get("bosses", 1),
+    from record import card_tok
+    info = {"player": player, "deck": sorted(card_tok(c) for c in player.get("deck") or []), "hp_after": hp or 0, "rounds": last["s"].get("round"), "bosses": last.get("bosses", 1),
             "left_frac": 0.0 if won else left / max(1.0, last["dmg"] + left)}
     if won:
         g = decktest.graded(True, hp or 0, 0, 1)
