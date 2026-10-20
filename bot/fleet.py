@@ -1045,17 +1045,36 @@ class Fleet:
     ENGINE_BUILDS = ("Fix1", "Diag", "Fix2")
 
     def ensure_builds(self, h):
-        if linux(h):   # every Linux host has its own dotnet under the root
+        if linux(h):
             R = h["root"].rstrip("/")
-            cmd = " ; ".join(
-                f"[ -f {R}/sts2-cli/src/Sts2Headless/bin/{c}/net9.0/Sts2Headless.dll ] || "
-                f"( cd {R}/sts2-cli && DOTNET_CLI_TELEMETRY_OPTOUT=1 nice -n 19 ionice -c3 {R}/dotnet/dotnet build "
-                f"src/Sts2Headless/Sts2Headless.csproj -c {c} -p:Optimize=true --no-incremental 2>&1 | tail -2 && echo built {c} )"
-                for c in self.ENGINE_BUILDS)
+            dll = "sts2-cli/src/Sts2Headless/bin/{c}/net9.0/Sts2Headless.dll"
             try:
+                have = lx(h, "; ".join(f"[ -f {R}/{dll.format(c=c)} ] && echo have:{c}" for c in self.ENGINE_BUILDS) + "; echo ok")
+                missing = [c for c in self.ENGINE_BUILDS if f"have:{c}" not in have]
+                if not missing:
+                    return
+                if h.get("via"):   # lab2/lab3 have the .NET runtime only: copy lab0's builds through the jump
+                    J = self.hosts[h["via"]]
+                    JR = J["root"].rstrip("/")
+                    got = []
+                    for c in missing:
+                        cmd = (f"[ -f {JR}/{dll.format(c=c)} ] && tar -cf - -C {JR}/sts2-cli/src/Sts2Headless/bin {c} | "
+                               f"ssh -o BatchMode=yes -p {h.get('port', 22)} {h['target']} "
+                               f"{shlex.quote(f'tar -xf - -C {R}/sts2-cli/src/Sts2Headless/bin && echo copied')}")
+                        res = subprocess.run(SSH + [h["via"], cmd], capture_output=True, text=True, timeout=600)
+                        if "copied" in res.stdout:
+                            got.append(c)
+                    log(f"{h['name']}: engine builds copied from {h['via']}: {' '.join(got) or 'none'}"
+                        f"{'' if len(got) == len(missing) else ' (missing there: ' + ' '.join(sorted(set(missing) - set(got))) + ')'}")
+                    return
+                cmd = " ; ".join(
+                    f"( cd {R}/sts2-cli && DOTNET_CLI_TELEMETRY_OPTOUT=1 nice -n 19 ionice -c3 {R}/dotnet/dotnet build "
+                    f"src/Sts2Headless/Sts2Headless.csproj -c {c} -p:Optimize=true --no-incremental > /dev/null 2>&1 ; "
+                    f"[ -f {R}/{dll.format(c=c)} ] && echo built:{c} )" for c in missing)
                 out = lx(h, cmd + " ; echo ok", timeout=1200)
-                if "built" in out:
-                    log(f"{h['name']}: engine builds: {' '.join(l for l in out.split() if l in self.ENGINE_BUILDS)}")
+                built = [c for c in missing if f"built:{c}" in out]
+                log(f"{h['name']}: engine builds: {' '.join(built) or 'none'}"
+                    f"{'' if len(built) == len(missing) else ' (FAILED: ' + ' '.join(sorted(set(missing) - set(built))) + ')'}")
             except Exception as e:
                 log(f"{h['name']}: engine build check failed ({str(e)[:100]})")
             return
