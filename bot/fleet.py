@@ -682,7 +682,8 @@ class XDeckRL:
                         argv += [f"--{k}", st["cur"][k]]
                 outs = [f"models/{self.name}_{k}{it}.pt" for k in self.KINDS if st["cur"].get(k)]
                 st["train"] = fl.add_job(self.name, f"{self.name}{it}_train", "train", 0, argv,
-                                         [m for m in st["cur"].values() if m] + data + [listing], outs, gpu=True)
+                                         [m for m in st["cur"].values() if m] + data + [listing] + list(sp.get("reward_inputs", [])),
+                                         outs, gpu=True)
                 st["phase"] = "train"
                 log(f"{self.name}: iteration {it} expert self-play done {json.dumps(summary)}; training on {len(data)} files")
         elif st["phase"] == "train":
@@ -1526,6 +1527,7 @@ def main():
     ap.add_argument("--inputs", default=None, help='task: JSON list of bot/-relative files to push')
     ap.add_argument("--outputs", default=None, help='task: JSON list of bot/-relative files to fetch')
     ap.add_argument("--gpu", action="store_true", help="task: run on a GPU machine with CUDA")
+    ap.add_argument("--reward", default=None, help='xdeckrl: JSON env overrides of the RL return (fleetjob.py --reward)')
     args = ap.parse_args()
     if args.cmd == "run":
         lock = os.path.join(FLEET, "coordinator.pid")
@@ -1583,11 +1585,15 @@ def main():
         with open(os.path.join(HERE, args.deck_nets)) as fh:
             cfg = json.load(fh)
         init = {k: cfg[k] for k in ("card", "rest", "event", "map", "shop") if cfg.get(k)}
-        submit("xdeckrl", {"tag": args.tag, "start": args.start, "iters": args.iters, "runs": args.runs,
-                           "chunk": args.expert_chunk, "eval_runs": args.n, "eval_chunk": args.expert_chunk,
-                           "temperature": args.temperature, "rollouts": args.rollouts, "init": init,
-                           "eval_init": args.eval_init, "kinds": ["card", "rest", "event", "map", "shop"],
-                           "extra": json.loads(args.extra or "[]")})
+        spec = {"tag": args.tag, "start": args.start, "iters": args.iters, "runs": args.runs,
+                "chunk": args.expert_chunk, "eval_runs": args.n, "eval_chunk": args.expert_chunk,
+                "temperature": args.temperature, "rollouts": args.rollouts, "init": init,
+                "eval_init": args.eval_init, "kinds": ["card", "rest", "event", "map", "shop"],
+                "extra": json.loads(args.extra or "[]")}
+        if args.reward:   # env overrides of the RL return, e.g. {"STS2_RETURN": "dv", "STS2_RETURN_MODELS": "..."}
+            spec["reward"] = json.loads(args.reward)
+            spec["reward_inputs"] = json.loads(args.inputs or "[]")
+        submit("xdeckrl", spec)
     elif args.cmd == "task":
         submit("task", {"tag": args.tag, "argv": json.loads(args.argv), "inputs": json.loads(args.inputs or "[]"),
                         "outputs": json.loads(args.outputs or "[]"), "gpu": args.gpu,

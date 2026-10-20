@@ -79,6 +79,32 @@ def win_estimate(o):
     return (bool(o.get("victory")) + sum(w)) / (1 + len(w))
 
 
+RETURN_MODELS = os.environ.get("STS2_RETURN_MODELS", "")   # STS2_RETURN=dv: the deck models (comma-separated)
+_DV = []
+
+
+def dv_return(o):
+    """STS2_RETURN=dv: 100 x the deck models' P(beat both A10 final bosses) for the deck, HP,
+    relics and potions the run brought to act 3 (run.py act_states), 200 for a real win, 0 for
+    runs that died earlier. A value network in place of floors: surviving to act 3 is required,
+    and how good the deck is there is what counts (win-aligned, far denser than wins)."""
+    if o.get("victory"):
+        return 200.0
+    st = (o.get("act_states") or {}).get("3")
+    if not st:
+        return 0.0
+    if not _DV:
+        from deckvalue import DeckValue
+        _DV.extend(DeckValue(os.path.join(HERE, p)) for p in RETURN_MODELS.split(",") if p)
+    import policy
+    names = {v: k for k, v in policy.RELIC_IDS.items()}   # act_states keep relic ids, the models names
+    state = {"deck": st.get("deck") or [], "relics": [names.get(r, r) for r in st.get("relics") or []],
+             "potions": st.get("potions") or [], "hp": st.get("hp"), "mhp": st.get("max_hp"), "act": 3,
+             "boss": st.get("boss")}
+    p = float(np.mean([m.win([state])[0] for m in _DV]))
+    return 100.0 * p
+
+
 def final_progress(o):
     """RL return of a run: floors climbed plus ACT_CLEAR_BONUS per act cleared. Floors
     alone paid almost nothing for beating a boss (dying at the act-2 boss = 33, beating
@@ -87,6 +113,8 @@ def final_progress(o):
     healing, hoarding potions and dodging elites go far without winning; only wins count."""
     if RETURN == "win":
         return 100.0 * win_estimate(o)
+    if RETURN == "dv":
+        return dv_return(o)
     acts = 3 if o.get("victory") else max(0, (o.get("act") or 1) - 1)
     base = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
     # boss damage: a denser signal than boss wins (a lost boss fight still shows how close

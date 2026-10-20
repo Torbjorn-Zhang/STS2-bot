@@ -117,7 +117,7 @@ class GameRecorder:
 
     def finish(self, result):
         out = {k: result.get(k) for k in ("cleared_acts", "victory", "died", "act", "floor", "room", "hp", "max_hp", "boss_dmg",
-                                          "boss_mc", "error", "stuck", "mc")}
+                                          "boss_mc", "error", "stuck", "mc", "act_states")}
         self._add({"k": "o", **out, **self.meta})
         with self.lock:
             with open(self.path, "a") as fh:
