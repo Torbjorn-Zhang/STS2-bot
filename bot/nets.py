@@ -1123,15 +1123,16 @@ def train_expert_value(paths, out, init_enc, epochs=6, hidden=128, lr=3e-4, batc
     print("expert value states", len(Wtr), len(Wva), "win rate", round(float(Wtr.mean()), 3), "encoded",
           round(time.time() - t0), "s", flush=True)
     torch.manual_seed(0)
-    model = ExpertValueNet(enc.state_dim, hidden)
+    dev = torch.device(os.environ.get("NETS_DEVICE", "cpu") if torch.cuda.is_available() or os.environ.get("NETS_DEVICE") != "cuda" else "cpu")
+    model = ExpertValueNet(enc.state_dim, hidden).to(dev)
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     best = (1e9, None)
     for ep in range(epochs):
         model.train()
         for sel in _batches(np.random.RandomState(ep).permutation(len(Wtr)), batch):
-            pw, pd = model(_dense(Ctr, sel))
-            loss = F.binary_cross_entropy_with_logits(pw, torch.from_numpy(Wtr[sel])) + \
-                F.mse_loss(pd, torch.from_numpy(Dtr[sel]))
+            pw, pd = model(_dense(Ctr, sel).to(dev))
+            loss = F.binary_cross_entropy_with_logits(pw, torch.from_numpy(Wtr[sel]).to(dev)) + \
+                F.mse_loss(pd, torch.from_numpy(Dtr[sel]).to(dev))
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -1140,9 +1141,9 @@ def train_expert_value(paths, out, init_enc, epochs=6, hidden=128, lr=3e-4, batc
         with torch.no_grad():
             pw, pd = [], []
             for sel in _batches(np.arange(len(Wva)), 4096):
-                a, b = model(_dense(Cva, sel))
-                pw.append(a)
-                pd.append(b)
+                a, b = model(_dense(Cva, sel).to(dev))
+                pw.append(a.cpu())
+                pd.append(b.cpu())
             pw, pd = torch.cat(pw), torch.cat(pd)
             bce = F.binary_cross_entropy_with_logits(pw, torch.from_numpy(Wva)).item()
             mse = F.mse_loss(pd, torch.from_numpy(Dva)).item()
@@ -1150,7 +1151,8 @@ def train_expert_value(paths, out, init_enc, epochs=6, hidden=128, lr=3e-4, batc
         print(json.dumps({"epoch": ep, "val_win_bce": round(bce, 4), "base_bce": round(base_bce, 4), "val_dhp_mse": round(mse, 4),
                           "dhp_var": round(float(Dva.var()), 4)}), flush=True)
         if bce + mse < best[0]:
-            best = (bce + mse, {k: v.clone() for k, v in model.state_dict().items()})
+            best = (bce + mse, {k: v.detach().cpu().clone() for k, v in model.state_dict().items()})
+    model = model.cpu()
     model.load_state_dict(best[1])
     torch.save({"kind": "expert_value", "enc": enc.to_json(), "hidden": hidden, "state": model.state_dict(),
                 "sources": paths}, out)

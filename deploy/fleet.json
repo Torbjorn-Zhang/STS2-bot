@@ -26,8 +26,10 @@
    "workers": 2,
    "dynamic": true,
    "share": 0.5,
-   "gpu": false,
-   "order": 3
+   "gpu": true,
+   "order": 3,
+   "gpu_avoid": "A6000",
+   "gpu_order": 0
   },
   "lab3": {
    "ssh": "lab3",

@@ -292,9 +292,21 @@ def job_sh(host, job):
     env = {"HOME": f"{R}/home", "DOTNET": f"{R}/dotnet/dotnet", "DOTNET_ROOT": f"{R}/dotnet", "DOTNET_CLI_HOME": f"{R}/cache/dotnethome",
            "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "OMP_NUM_THREADS": "1", "XDG_CACHE_HOME": f"{R}/cache", "NETS_DEVICE": "cpu",
            "PYTHONUNBUFFERED": "1"}
+    py = f"{R}/.venv/bin/python"
+    gpu = []
+    if job.get("gpu_now"):
+        # lab rule: only a fully idle card (memory ~0), never the avoided one (lab0's A6000);
+        # none idle or no CUDA venv: run on the CPU instead
+        avoid = host.get("gpu_avoid", "^$")
+        gpu = [f"G=$(nvidia-smi --query-gpu=index,name,memory.used --format=csv,noheader,nounits 2>/dev/null | "
+               f"awk -F', ' '$2 !~ /{avoid}/ && $3 < 100 {{print $1; exit}}')",
+               f'PY={py}',
+               f'if [ -n "$G" ] && [ -x {R}/.venv-cu/bin/python ]; then export CUDA_VISIBLE_DEVICES=$G NETS_DEVICE=cuda; PY={R}/.venv-cu/bin/python; fi',
+               f'echo "gpu=${{G:-none}}" > fleet/jobs/{jid}.gpu']
+        py = "$PY"
     lines = ["#!/bin/bash"] + [f"export {k}={shlex.quote(v)}" for k, v in env.items()] + [f"mkdir -p {R}/home", f"cd {R}/bot"] + \
-        [f"rm -f {shlex.quote(o)}" for o in job["outputs"]] + \
-        [f"{R}/.venv/bin/python {' '.join(shlex.quote(a) for a in argv)} > fleet/jobs/{jid}.out 2> fleet/jobs/{jid}.err",
+        [f"rm -f {shlex.quote(o)}" for o in job["outputs"]] + gpu + \
+        [f"{py} {' '.join(shlex.quote(a) for a in argv)} > fleet/jobs/{jid}.out 2> fleet/jobs/{jid}.err",
          f"echo $? > fleet/jobs/{jid}.rc"]
     return "\n".join(lines) + "\n"
 
@@ -1217,7 +1229,7 @@ class Fleet:
             gpu = [h for h in hosts if h.get("gpu") and self.free_slots(h) > 0
                    and not any(j.get("gpu_now") for j in self.running_on(h))]
             if gpu:
-                return sorted(gpu, key=lambda h: h.get("order", 9))[0], True
+                return sorted(gpu, key=lambda h: h.get("gpu_order", h.get("order", 9)))[0], True
             # a GPU machine in the fleet frees a slot soon: wait for it (10 min at most)
             if any(h.get("gpu") for h in hosts) and time.time() - job.get("queued_since", time.time()) < 600:
                 return None, False
