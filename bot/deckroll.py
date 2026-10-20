@@ -21,6 +21,9 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACT3_BOSSES = ("AEONGLASS_BOSS", "QUEEN_BOSS", "TEST_SUBJECT_BOSS")
+BOSSES = {1: ("CEREMONIAL_BEAST_BOSS", "THE_KIN_BOSS", "SOUL_FYSH_BOSS", "VANTOM_BOSS", "WATERFALL_GIANT_BOSS",
+              "LAGAVULIN_MATRIARCH_BOSS"),
+          2: ("KAISER_CRAB_BOSS", "THE_INSATIABLE_BOSS", "KNOWLEDGE_DEMON_BOSS"), 3: ACT3_BOSSES}
 REWARDS_PER_ACT = 7     # card rewards per act (hallway fights, elites, the boss)
 REMOVES_PER_ACT = 1     # shop removals
 UPGRADES_PER_ACT = 2    # rest-site smiths
@@ -46,7 +49,7 @@ class DeckRoller:
         return np.mean([m.score(states) for m in models], axis=0)
 
     def schedule(self, act, floor):
-        """The rest of the run as steps: ("reward", act) / ("remove",) / ("upgrade",)."""
+        """The rest of the run as steps: ("reward", act) / ("remove",) / ("upgrade",) / ("boss", act)."""
         steps = []
         for a in range(act, 4):
             left = 1.0 if a > act else max(0.0, 1.0 - (floor or 0) / 17.0)
@@ -55,15 +58,29 @@ class DeckRoller:
             if left > 0.3:
                 per.insert(len(per) // 2, ("remove",))
             per += [("upgrade",)] * int(round(UPGRADES_PER_ACT * left))
-            steps += per
+            steps += per + [("boss", a)]
         return steps
 
-    def futures(self, decks, ctx, act, floor, key):
-        """decks: the option decks. -> (values per option, per-future values)."""
+    def _logp(self, models, states):
+        """log win probability (the deck model's win head), clipped."""
+        self.stats["evals"] += len(states) * len(models)
+        p = np.mean([m.win(states) for m in models], axis=0)
+        return np.log(np.clip(p, 1e-6, 1.0 - 1e-6))
+
+    def futures(self, decks, ctx, act, floor, key, boss_now=None):
+        """decks: the option decks. -> (values per option, per-future values). A future's value is
+        the sum over the acts left of log P(win that act's boss) with the deck it holds there
+        (Ascension 10's act 3 = both final bosses, as the model was trained): surviving now and
+        winning later both count, so a pick that only pays off later must not cost the early acts."""
         rng = random.Random(f"{key}/{self.seed}")
         steps = self.schedule(act, floor)
-        # thread t = option o, future j; the random draws depend on j only (common random numbers)
-        bosses = [rng.sample(ACT3_BOSSES, 2) for _ in range(self.m)]
+        acts = list(range(act, 4))
+        bosses = []   # per future: the boss of each act left (the current one when known)
+        for j in range(self.m):
+            b = {a: rng.choice(BOSSES[a]) for a in acts}
+            if boss_now:
+                b[act] = boss_now
+            bosses.append(b)
         draws = []
         for j in range(self.m):
             r = random.Random(f"{key}/{self.seed}/{j}")
@@ -77,7 +94,14 @@ class DeckRoller:
                     d.append(None)
             draws.append(d)
         threads = [(o, j, list(decks[o])) for o in range(len(decks)) for j in range(self.m)]
+        at_boss = [dict() for _ in threads]
+        cur_act = act
         for si, s in enumerate(steps):
+            if s[0] == "boss":
+                for t, (o, j, d) in enumerate(threads):
+                    at_boss[t][s[1]] = list(d)
+                cur_act = s[1] + 1
+                continue
             cand, owner = [], []
             for t, (o, j, d) in enumerate(threads):
                 if s[0] == "reward":
@@ -89,19 +113,31 @@ class DeckRoller:
                     ups = sorted({c for c in d if not c.endswith("+") and not c.startswith(("ASCENDERS_BANE", "CURSE"))})
                     opts = [d] + [_upgraded(d, c) for c in ups]
                 for x in opts:
-                    cand.append(dict(ctx, deck=x, boss=bosses[j][0], act=3))
-                    owner.append(t)
-            v = self._score(self.inner, cand)
+                    cand.append((t, x))
+            # greedy step: the candidate's value against every boss still ahead, as if frozen now
+            ahead = [a for a in acts if a >= cur_act] or [3]
+            states, idx = [], []
+            for i, (t, x) in enumerate(cand):
+                j = threads[t][1]
+                for a in ahead:
+                    states.append(dict(ctx, deck=x, boss=bosses[j][a], act=a))
+                    idx.append(i)
+            lp = self._logp(self.inner, states)
+            tot = np.zeros(len(cand))
+            np.add.at(tot, idx, lp)
             best = {}
-            for i, t in enumerate(owner):
-                if t not in best or v[i] > best[t][0]:
-                    best[t] = (v[i], cand[i]["deck"])
+            for i, (t, x) in enumerate(cand):
+                if t not in best or tot[i] > best[t][0]:
+                    best[t] = (tot[i], x)
             threads = [(o, j, best[t][1]) for t, (o, j, d) in enumerate(threads)]
-        final = []
-        for o, j, d in threads:
-            for b in bosses[j]:
-                final.append(dict(ctx, deck=d, boss=b, act=3))
-        v = self._score(self.models, final).reshape(len(threads), 2).mean(1)
+        states, idx = [], []
+        for t, (o, j, d) in enumerate(threads):
+            for a in acts:
+                states.append(dict(ctx, deck=at_boss[t].get(a, d), boss=bosses[j][a], act=a))
+                idx.append(t)
+        lp = self._logp(self.models, states)
+        v = np.zeros(len(threads))
+        np.add.at(v, idx, lp)
         per = v.reshape(len(decks), self.m)
         return per.mean(1), per
 
@@ -127,7 +163,8 @@ class DeckRoller:
         if len(opts) < 2:
             return None, {}
         key = f"{ctx_.get('act')}/{ctx_.get('floor')}/{len(deck)}/{','.join(sorted(deck))[:200]}"
-        val, _ = self.futures(decks, ctx, ctx_.get("act") or 1, ctx_.get("floor") or 0, key)
+        val, _ = self.futures(decks, ctx, ctx_.get("act") or 1, ctx_.get("floor") or 0, key,
+                              boss_now=(ctx_.get("boss") or {}).get("id"))
         tot = val + (beta * np.asarray(prior_lp) if prior_lp is not None else 0.0)
         self.stats["decisions"] += 1
         i = int(np.argmax(tot))
@@ -147,7 +184,8 @@ def choose_deck(roller, st, options):
         return None, {}
     decks = [d for _, d in options]
     key = f"sel/{ctx_.get('act')}/{ctx_.get('floor')}/{','.join(sorted(decks[0]))[:200]}"
-    val, _ = roller.futures(decks, ctx, ctx_.get("act") or 1, ctx_.get("floor") or 0, key)
+    val, _ = roller.futures(decks, ctx, ctx_.get("act") or 1, ctx_.get("floor") or 0, key,
+                            boss_now=(ctx_.get("boss") or {}).get("id"))
     roller.stats["decisions"] += 1
     i = int(np.argmax(val))
     return options[i][0], {json.dumps(a, sort_keys=True): round(float(x), 4) for (a, _), x in zip(options, val)}
