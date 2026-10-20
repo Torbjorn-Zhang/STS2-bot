@@ -284,6 +284,16 @@ $pids | ConvertTo-Json -Compress
 """
 
 
+def code_sig():
+    """Size and mtime of every Python/shell file the jobs run (cheap: stat only)."""
+    hs = hashlib.sha1()
+    for d in (HERE, os.path.join(REPO, "harness"), os.path.join(REPO, "deploy")):
+        for p in sorted(glob.glob(os.path.join(d, "*.py")) + glob.glob(os.path.join(d, "*.sh")) + glob.glob(os.path.join(d, "*.json"))):
+            st = os.stat(p)
+            hs.update(f"{p}:{st.st_size}:{int(st.st_mtime)}".encode())
+    return hs.hexdigest()
+
+
 def job_sh(host, job):
     """Linux job script: env on the data disk (HOME too), below-normal CPU and idle IO come from the launcher."""
     R = host["root"].rstrip("/")
@@ -1078,7 +1088,10 @@ class Fleet:
                 self.kill(h)          # leftovers of jobs that were moved elsewhere
                 self.requeue(h, "rejoin")
             # the code may have changed while it was away: same code everywhere before any job
+            sig = code_sig()
             ok, msg = self.sync_code(h)
+            if ok:
+                h["code_sig"] = sig
             if ok and not linux(h):
                 self.ensure_builds(h)
             if not ok:
@@ -1270,6 +1283,15 @@ class Fleet:
     def launch(self, h, js, backup=False):
         lines, made = [], set()
         try:
+            # the code changed since this host's last sync (e.g. new run.py flags): sync first, or
+            # the jobs fail on the old code (hosts used to sync only when they joined)
+            sig = code_sig()
+            if h.get("code_sig") != sig:
+                ok, msg = self.sync_code(h)
+                if not ok:
+                    raise RuntimeError(f"code sync failed: {msg}")
+                h["code_sig"] = sig
+                log(f"{h['name']}: code changed, synced")
             for j in js:
                 for rel in j["inputs"]:
                     loc = os.path.join(HERE, rel)

@@ -24,6 +24,80 @@ def _key(st):
 
 
 MC_BOSS = 0   # run.py --mc-boss K: K extra determinized plays of every boss fight (lower-variance RL return)
+MC_BOSS_ACTS = None   # --mc-boss-acts: replay only these acts' bosses (the record's boss_mc then covers only them)
+# --mc-act A --mc-k K: save at act A's first map node; after the run, play the rest of the run K more
+# times from that save, each with a fresh hidden future (determinize_run). The share of wins estimates
+# P(win | the state the bot brought to act A): an unbiased, much less noisy win measure than the one
+# real outcome, and a "future value" label for that deck (cmpwin.py)
+MC_ACT, MC_K, MC_DIR = 0, 0, None
+
+
+def act_state(st):
+    """Compact run state at an act's first map node (future-value training data)."""
+    from record import card_tok, pot_tok
+    p = st.get("player") or {}
+    ctx = st.get("context") or {}
+    return {"act": ctx.get("act"), "floor": ctx.get("floor"), "hp": p.get("hp"), "max_hp": p.get("max_hp"),
+            "gold": p.get("gold"), "deck": [card_tok(c) for c in p.get("deck") or []],
+            "relics": [policy.relic_id(r) or (r.get("name") if isinstance(r, dict) else r) for r in p.get("relics") or []],
+            "potions": [pot_tok(x) for x in p.get("potions") or [] if x], "boss": (ctx.get("boss") or {}).get("id")}
+
+
+def continue_run(sim, st, planner, acts, max_steps=4000):
+    """Play on from st with the bot (as play_run, without records) until the run ends."""
+    dead_ends, memo, steps = {}, {}, 0
+    while steps < max_steps:
+        d = st.get("decision")
+        ctx = st.get("context") or {}
+        if d == "game_over" or (ctx.get("act") or 1) > acts or st.get("type") == "error":
+            break
+        if d == "combat_play" or (d == "card_select" and ctx.get("room_type") in ("Monster", "Elite", "Boss")):
+            st = planner.play_combat(st)
+            if st.get("decision") == "combat_play":
+                break   # the planner's action cap: counts as a loss
+            continue
+        a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
+        policy.pop_last_scores()
+        nxt = sim.act(a[0], **a[1])
+        steps += 1
+        if nxt.get("type") == "error" or _key(nxt) == _key(st):
+            dead_ends.setdefault(_key(st), set()).add(json.dumps(a, sort_keys=True))
+            if nxt.get("type") == "error":
+                continue
+        st = nxt
+    return st
+
+
+def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None, rollouts=None):
+    """MC_K plays of the rest of the run from the save at act MC_ACT's first map node.
+    Returns (sim, {"win": [...], "prog": [...], ...}); the engine may be recycled or replaced."""
+    import zlib
+    out = {"act": MC_ACT, "k": MC_K, "win": [], "prog": [], "secs": [], "err": 0}
+    for j in range(MC_K):
+        sim = maybe_recycle(sim)
+        t0 = time.perf_counter()
+        try:
+            st = sim.send({"cmd": "load_save", "path": path})
+            if st.get("type") == "error":
+                raise RuntimeError(st.get("message"))
+            sim.send({"cmd": "determinize_run", "seed": zlib.crc32(f"{seed}/mc{MC_ACT}/{j}".encode()) * 2654435761 % (2 ** 62)})
+            planner = TurnPlanner(sim, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
+            end = continue_run(sim, st, planner, acts)
+        except Exception as e:
+            out["err"] += 1
+            out.setdefault("errors", []).append(f"{type(e).__name__}: {e}"[:200])
+            try:
+                sim.close()
+            except Exception:
+                pass
+            sim = fresh_sim()
+            continue
+        ctx = end.get("context") or {}
+        win = bool(end.get("victory"))
+        out["win"].append(int(win))
+        out["prog"].append(53 if win else ((ctx.get("act") or 1) - 1) * 17 + (ctx.get("floor") or 0))
+        out["secs"].append(round(time.perf_counter() - t0, 1))
+    return sim, out
 
 
 def boss_mc(sim, st, planner, seed, enemy_max):
@@ -68,11 +142,19 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
     dead_ends, loops, memo, stuck = {}, 0, {}, False
     boss_dmg = 0.0   # sum over boss fights of the share of boss HP removed (a win = 1), as selfplay.py
     mc_boss = []     # per boss fight: the MC_BOSS replay shares
+    mc_boss_acts = []
+    act_states, mc_save = {}, None
     while steps < 5000:
         d = st.get("decision")
         act = (st.get("context") or {}).get("act") or 1
         if d == "game_over" or act > acts or st.get("type") == "error":
             break
+        if d == "map_select" and act not in act_states:
+            act_states[act] = act_state(st)
+            if MC_K and act == MC_ACT and MC_DIR:
+                path = os.path.join(MC_DIR, f"{seed}_a{act}.save")
+                if sim.send({"cmd": "write_continue_save", "path": path}).get("success"):
+                    mc_save = path
         room = (st.get("context") or {}).get("room_type")
         if d == "combat_play" or (d == "card_select" and room in ("Monster", "Elite", "Boss")):
             hp0 = (st.get("player") or {}).get("hp")
@@ -101,8 +183,9 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                         extra = {k: {kk: round(v, 2) for kk, v in d.items()} for k, d in planner.last_first.items()}
                     rec.combat_step(s, legal_actions(s) + potion_actions(s) if s.get("decision") == "combat_play"
                                     else legal_actions(s), a, extra)
-            if room == "Boss" and MC_BOSS:
+            if room == "Boss" and MC_BOSS and (MC_BOSS_ACTS is None or act in MC_BOSS_ACTS):
                 mc_boss.append(boss_mc(sim, st, planner, seed, enemy_max))
+                mc_boss_acts.append(act)
             st = planner.play_combat(st, on_state=watch, on_step=on_step)
             if rec:
                 rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"),
@@ -153,6 +236,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         "hp": p.get("hp"), "max_hp": p.get("max_hp"), "deck_size": p.get("deck_size"),
         "fights": fights, "seconds": round(time.perf_counter() - t0, 1),
         "boss_dmg": round(boss_dmg, 3), "boss_mc": [[round(x, 3) for x in m] for m in mc_boss] if MC_BOSS else None,
+        **({"boss_mc_acts": mc_boss_acts} if MC_BOSS_ACTS is not None else {}),
+        "act_states": act_states, **({"mc_save": mc_save} if mc_save else {}),
         "planner": dict(planner.stats), "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
     }
     if rec:
@@ -205,6 +290,10 @@ def main():
     ap.add_argument("--rest-smith-bias", type=float, default=0.0, help="rest network: logit added to smith options")
     ap.add_argument("--boss-value", default=None, help='JSON {act: bossvalue model} for value-guided card rewards')
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
+    ap.add_argument("--mc-boss-acts", default=None, help='--mc-boss only at these acts\' bosses, e.g. "3"')
+    ap.add_argument("--mc-act", type=int, default=3, help="--mc-k: the act whose first map node the rollouts start from")
+    ap.add_argument("--mc-k", type=int, default=0, help="K plays of the rest of the run from act --mc-act's start (cmpwin.py)")
+    ap.add_argument("--mc-dir", default=None, help="--mc-k: where the act-start saves go (default runs/mcsaves/<tag>)")
     ap.add_argument("--boss-beta", type=float, default=0.0, help="weight of the boss-win logit gain on card rewards")
     ap.add_argument("--map-elite-bias", type=float, default=0.0, help="map network: logit added to elite rooms")
     ap.add_argument("--explore", type=float, default=0.0, help="chance of a random card reward pick (data collection)")
@@ -288,9 +377,15 @@ def main():
         import nets
         nets.SKIP_BIAS = args.skip_bias
         nets.SKIP_BIAS_MIN_ACT = args.skip_bias_from_act
+    global MC_BOSS, MC_BOSS_ACTS, MC_ACT, MC_K, MC_DIR
     if args.mc_boss:
-        global MC_BOSS
         MC_BOSS = args.mc_boss
+    if args.mc_boss_acts:
+        MC_BOSS_ACTS = {int(a) for a in args.mc_boss_acts.split(",")}
+    if args.mc_k:
+        MC_ACT, MC_K = args.mc_act, args.mc_k
+        MC_DIR = args.mc_dir or os.path.join(HERE, "runs", "mcsaves", args.tag)
+        os.makedirs(MC_DIR, exist_ok=True)
     if args.boss_value and args.boss_beta:
         import nets
         from bossvalue import BossValue
@@ -377,6 +472,9 @@ def main():
                     r = play_run(sim, s, args.character, args.acts, args.nodes, model, args.value_weight, args.ascension,
                                  json.loads(args.rollouts) if args.rollouts else None, rec=rec,
                                  explore=args.explore, decknets=dn, combat_records=not args.no_combat_records)
+                    if MC_K and r.get("mc_save") and not r.get("error"):
+                        sim, r["mc"] = mc_rollouts(sim, r["mc_save"], s, args.acts, args.nodes, model, args.value_weight,
+                                                   json.loads(args.rollouts) if args.rollouts else None)
                 except Exception as e:  # engine hang/crash: record it, restart the engine, go on
                     r = {"seed": s, "character": args.character, "ascension": args.ascension, "cleared_acts": 0,
                          "victory": False, "died": False, "act": None, "floor": None, "room": None, "hp": None,
