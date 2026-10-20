@@ -1093,6 +1093,9 @@ class Fleet:
     def undrain(self, h, why):
         if h["drain"]:
             ok, msg = self.sync_code(h)   # the code may have changed while it was drained
+            if ok:
+                h["code_sig"] = code_sig()
+                self.ensure_builds(h)
             log(f"{h['name']}: back in the fleet ({why}){'' if ok else ' (code sync failed: ' + msg + ')'}")
             h["drain"] = None
 
@@ -1123,6 +1126,13 @@ class Fleet:
             if h["state"] == "down":
                 self.kill(h)          # leftovers of jobs that were moved elsewhere
                 self.requeue(h, "rejoin")
+            if os.path.exists(os.path.join(FLEET, "drain", h["name"])):
+                # drained (the owner is using the machine): no sync or build now, undrain does it
+                log(f"{h['name']}: up (drained: no code sync or build until undrain)")
+                h["state"] = "up"
+                h["drain"] = h.get("drain") or "fleet.py drain"
+                h["code_sig"] = None
+                return
             # the code may have changed while it was away: same code everywhere before any job
             sig = code_sig()
             ok, msg = self.sync_code(h)
