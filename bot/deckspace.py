@@ -219,7 +219,11 @@ def cmd_fight(args):
         sets = json.load(fh)
     metas = {m["seed"]: m for m in load_saves(args.saves)}
     k, n = map(int, args.shard.split("/"))
-    items = [(metas[s["save"]], s["deck"], s.get("rep", 0), {"family": s.get("family", "proposed"),
+    real = {}
+    for s_ in sets:   # deck "real": the save's own deck
+        if s_["deck"] == "real" and s_["save"] in metas and s_["save"] not in real:
+            real[s_["save"]] = real_deck(metas[s_["save"]])
+    items = [(metas[s["save"]], real[s["save"]] if s["deck"] == "real" else s["deck"], s.get("rep", 0), {"family": s.get("family", "proposed"),
              **({"pred": s["pred"]} if "pred" in s else {})})
              for i, s in enumerate(sets) if s["save"] in metas and i % n == k]
     run_items(items, args, None)

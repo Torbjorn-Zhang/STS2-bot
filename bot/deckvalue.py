@@ -46,7 +46,7 @@ def load_rows(paths):
     for p in expand(paths):
         with open(os.path.join(HERE, p)) as fh:
             rows += [json.loads(l) for l in fh if l.strip()]
-    return [r for r in rows if r.get("deck")]
+    return [r for r in rows if r.get("deck") and "won" in r]   # (error rows have no outcome)
 
 
 class Vocab:
@@ -255,7 +255,7 @@ def variant_means(rows, pred=None):
     """(save, variant) -> [mean observed score, mean prediction, n]."""
     g = defaultdict(lambda: [0.0, 0.0, 0])
     for i, r in enumerate(rows):
-        k = (r["save"], r["variant"])
+        k = (r["save"], r.get("variant", r.get("dk")))   # bossbench vary rows / deckspace rows
         g[k][0] += fight_score(r)
         g[k][1] += 0.0 if pred is None else float(pred[i])
         g[k][2] += 1
@@ -338,7 +338,10 @@ def evaluate(net, enc, rows, device="cpu"):
 def hp_baseline_rank(rows):
     """Reference: rank variants by HP alone (hp/mhp) and by deck size (fewer cards better)."""
     hp = np.array([(r.get("hp") or 0) / max(1, r.get("mhp") or 1) for r in rows])
-    return {"rank_by_hp": within_save_ranking(rows, hp)[0], "rank_by_small_deck": within_save_ranking(rows, -np.array([len(r["deck"]) for r in rows]))[0]}
+    size = np.array([len(r["deck"]) for r in rows], dtype=float)
+    ups = np.array([sum(c.endswith("+") for c in r["deck"]) for r in rows], dtype=float)
+    return {"rank_by_hp": within_save_ranking(rows, hp)[0], "rank_by_small_deck": within_save_ranking(rows, -size)[0],
+            "rank_by_big_deck": within_save_ranking(rows, size)[0], "rank_by_upgrades": within_save_ranking(rows, ups)[0]}
 
 
 def split_by_save(rows, k, folds, seed=0):
