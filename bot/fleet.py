@@ -1030,13 +1030,19 @@ class Fleet:
             files = subprocess.run("git ls-files -co --exclude-standard bot deploy harness sts2-cli/src sts2-cli/localization_eng "
                                    "sts2-cli/localization_zhs | grep -v '\\.pt$'", shell=True, cwd=REPO,
                                    capture_output=True, text=True).stdout
-            tar = subprocess.run(["tar", "--no-mac-metadata", "--no-xattrs", "-cf", "-", "-T", "-"], cwd=REPO, input=files.encode(),
-                                 capture_output=True, env={**os.environ, "COPYFILE_DISABLE": "1"}, timeout=300)
-            res = subprocess.run(remote_argv(h, f"tar -xf - -C {shlex.quote(h['root'])}"), input=tar.stdout,
-                                 capture_output=True, timeout=600)
+            try:
+                tar = subprocess.run(["tar", "--no-mac-metadata", "--no-xattrs", "-cf", "-", "-T", "-"], cwd=REPO, input=files.encode(),
+                                     capture_output=True, env={**os.environ, "COPYFILE_DISABLE": "1"}, timeout=300)
+                res = subprocess.run(remote_argv(h, f"tar -xf - -C {shlex.quote(h['root'])}"), input=tar.stdout,
+                                     capture_output=True, timeout=600)
+            except subprocess.TimeoutExpired:
+                return False, "code sync timed out"
             return res.returncode == 0 and tar.returncode == 0, (res.stderr or tar.stderr).decode(errors="replace")[-200:]
-        res = subprocess.run([os.path.join(REPO, "deploy", "winsync.sh"), h["ssh"], h["root"]],
-                             capture_output=True, text=True, timeout=600)
+        try:
+            res = subprocess.run([os.path.join(REPO, "deploy", "winsync.sh"), h["ssh"], h["root"]],
+                                 capture_output=True, text=True, timeout=600)
+        except subprocess.TimeoutExpired:   # a slow link must not kill the coordinator (it did, 2026-10-21)
+            return False, "winsync timed out after 600 s"
         return res.returncode == 0, (res.stderr or res.stdout)[-200:]
 
     # engine builds that jobs may ask for (run.py / bossbench.py --engine-config); Windows hosts
@@ -1445,12 +1451,22 @@ class Fleet:
                 return
             with ThreadPoolExecutor(len(self.hosts)) as ex:
                 polls = dict(zip(self.hosts, ex.map(self.poll, self.hosts.values())))
+            # one host's or pipeline's error must not stop the fleet (a sync timeout once did)
             for name, r in polls.items():
-                self.handle_poll(self.hosts[name], r)
+                try:
+                    self.handle_poll(self.hosts[name], r)
+                except Exception as e:
+                    log(f"{name}: poll handling failed ({type(e).__name__}: {str(e)[:150]})")
             for p in self.pipes:
                 if not p.finished():
-                    p.step(self)
-            self.schedule()
+                    try:
+                        p.step(self)
+                    except Exception as e:
+                        log(f"{p.name}: step failed ({type(e).__name__}: {str(e)[:150]})")
+            try:
+                self.schedule()
+            except Exception as e:
+                log(f"schedule failed ({type(e).__name__}: {str(e)[:150]})")
             self.save()
             if self.until_done and self.pipes and all(p.finished() for p in self.pipes) \
                     and not any(j["state"] in ("running", "queued") for j in self.jobs.values()):
