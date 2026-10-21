@@ -27,6 +27,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 MIN_DECK, MAX_DECK = 8, 40
 
 
+FULL_HP = False   # attribution arm: start the fight at full HP (deckspace.py --full-hp)
+
+
 def fight(sim, meta, deck, rep, nodes, rollouts, detail=False):
     """deck: card ids, "ID+" upgraded. -> (graded score, won[, info]) (needs the Fix1 or Diag engine)."""
     import combat
@@ -43,6 +46,8 @@ def fight(sim, meta, deck, rep, nodes, rollouts, detail=False):
     if ups:
         r = sim.send({"cmd": "set_player", "upgrade": ups})
     player = r.get("player") or {}   # (curses and statuses stay unupgraded: the row records the real deck)
+    if FULL_HP and player.get("max_hp"):
+        player = sim.send({"cmd": "set_player", "hp": player["max_hp"]}).get("player") or player
     col, row = meta["node"]
     st = sim.act("select_map_node", col=col, row=row)
     sim.send({"cmd": "determinize", "seed": zlib.crc32(f"{meta['seed']}/evo/{rep}".encode())})

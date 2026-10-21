@@ -416,11 +416,19 @@ def main():
     ap.add_argument("--beta", type=float, default=1.0)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--modes", default="budget,sized", help="propose: budget, sized and/or free (see feasible())")
+    ap.add_argument("--weights", default=None, help="fight/explore: JSON overrides for combat.W (e.g. {\"determinize\": 0} = clairvoyant)")
+    ap.add_argument("--full-hp", action="store_true", help="fight/explore: start every fight at full HP (attribution)")
     args = ap.parse_args()
     import engine
     engine.ENGINE_CONFIG = args.engine_config
     global USE_GUIDE
     USE_GUIDE = args.guide
+    if args.weights:
+        import combat
+        combat.W.update(json.loads(args.weights))
+    if args.full_hp:
+        import deckevo
+        deckevo.FULL_HP = True
     if args.cmd == "explore":
         cmd_explore(args)
     elif args.cmd == "fight":
