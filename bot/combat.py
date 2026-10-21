@@ -27,6 +27,8 @@ W = {
     # drank both potions in the elite before the act-2 boss and met the boss with none (a filled
     # potion slot is worth +6% act-2 / +11% act-1 boss wins on the bench)
     "potion_near_boss": 0.0,
+    "potion_act3_hall": 0.0,   # extra cost of a potion in act-3 hallway/elite fights (keep them for the double boss)
+    "potion_act3_boss": 0.0,   # added to the cost in act-3 boss fights (negative: drink them there)
     "potion_near_boss_floor": 11,
     "win": 300.0,
     "fight_model": 0.0,     # 0..1: replace fixed damage weights by -future_loss (turns to kill x threat)
@@ -307,7 +309,9 @@ def evaluate(root, st):
     if drunk:
         ctx = root.get("context") or {}
         late = W["potion_near_boss"] and ctx.get("room_type") != "Boss" and (ctx.get("floor") or 0) >= W["potion_near_boss_floor"]
-        score -= (W["potion"] + (W["potion_near_boss"] if late else 0.0)) * drunk
+        a3 = (ctx.get("act") or 1) >= 3
+        extra = (W["potion_act3_boss"] if ctx.get("room_type") == "Boss" else W["potion_act3_hall"]) if a3 else 0.0
+        score -= (W["potion"] + (W["potion_near_boss"] if late else 0.0) + extra) * drunk
     if W["steam_lethal"]:
         blast = steam_threat(root, st)
         if blast:
