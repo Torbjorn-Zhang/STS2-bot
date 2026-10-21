@@ -584,6 +584,7 @@ def upgrade_priority(c):
     return 3 + TIER.get(base_key(c), RARITY.get(c.get("rarity"), 1.0)) + 0.5 * stat_value(c)
 
 
+REMOVE_DEFEND_FIRST = False   # shop/event removals: Defends before Strikes (run.py --remove-defend-first)
 DECK_ROLL_SELECT = False   # also shop removals and rest-site smiths by imagined deck futures
 
 
@@ -657,8 +658,9 @@ def choose_card_select(st, sim=None):
     else:                                        # shop removal / event remove-transform: Strikes, then Defends
         def rank(c):
             k = card_key(c)
-            first = (-1 if c.get("type") in ("Curse", "Status") else 0 if k.startswith("STRIKE_")
-                     else 1 if k.startswith("DEFEND_") else 2)
+            s_, d_ = (1, 0) if REMOVE_DEFEND_FIRST else (0, 1)
+            first = (-1 if c.get("type") in ("Curse", "Status") else s_ if k.startswith("STRIKE_")
+                     else d_ if k.startswith("DEFEND_") else 2)
             return (first, TIER.get(base_key(c), RARITY.get(c.get("rarity"), 1.0)))
         order = sorted(cards, key=rank)
     n = max(1, lo) if hi >= 1 else lo

@@ -30,6 +30,7 @@ MC_BOSS_ACTS = None   # --mc-boss-acts: replay only these acts' bosses (the reco
 # P(win | the state the bot brought to act A): an unbiased, much less noisy win measure than the one
 # real outcome, and a "future value" label for that deck (cmpwin.py)
 MC_ACT, MC_K, MC_DIR = 0, 0, None
+STOP_AT_ACT = 0   # --stop-at-act A: end the run at act A's first map node (after recording act_states)
 
 
 def act_state(st):
@@ -155,6 +156,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 path = os.path.join(MC_DIR, f"{seed}_a{act}.save")
                 if sim.send({"cmd": "write_continue_save", "path": path}).get("success"):
                     mc_save = path
+            if STOP_AT_ACT and act >= STOP_AT_ACT:
+                break   # deck-building benches: the run's act-STOP_AT_ACT state is all they need
         room = (st.get("context") or {}).get("room_type")
         if d == "combat_play" or (d == "card_select" and room in ("Monster", "Elite", "Boss")):
             hp0 = (st.get("player") or {}).get("hp")
@@ -299,6 +302,8 @@ def main():
     ap.add_argument("--deck-roll-hall", default=None, help="--deck-roll: comma-separated hallway models (deckvalue --target hpfrac)")
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
     ap.add_argument("--mc-boss-acts", default=None, help='--mc-boss only at these acts\' bosses, e.g. "3"')
+    ap.add_argument("--remove-defend-first", action="store_true", help="removals take Defends before Strikes")
+    ap.add_argument("--stop-at-act", type=int, default=0, help="end runs at this act's first map node (deck-building benches)")
     ap.add_argument("--mc-act", type=int, default=3, help="--mc-k: the act whose first map node the rollouts start from")
     ap.add_argument("--mc-k", type=int, default=0, help="K plays of the rest of the run from act --mc-act's start (cmpwin.py)")
     ap.add_argument("--mc-dir", default=None, help="--mc-k: where the act-start saves go (default runs/mcsaves/<tag>)")
@@ -385,7 +390,8 @@ def main():
         import nets
         nets.SKIP_BIAS = args.skip_bias
         nets.SKIP_BIAS_MIN_ACT = args.skip_bias_from_act
-    global MC_BOSS, MC_BOSS_ACTS, MC_ACT, MC_K, MC_DIR
+    global MC_BOSS, MC_BOSS_ACTS, MC_ACT, MC_K, MC_DIR, STOP_AT_ACT
+    STOP_AT_ACT = args.stop_at_act
     if args.mc_boss:
         MC_BOSS = args.mc_boss
     if args.mc_boss_acts:
@@ -416,6 +422,7 @@ def main():
         if args.deck_value_beta is not None:
             policy.DECK_VALUE_BETA = args.deck_value_beta
     policy.REMOVE_FIRST = args.remove_first
+    policy.REMOVE_DEFEND_FIRST = args.remove_defend_first
     if args.deck_roll:
         import torch
         torch.set_num_threads(1)
