@@ -48,6 +48,7 @@ def option_vec(desc, hp_frac, gold):
 
 ELITE_BIAS = 0.0   # logit added to elite rooms (run.py --map-elite-bias)
 NODE_BIAS = {}     # room type -> logit added (run.py --map-node-bias '{"RestSite": 1, "Shop": 1}')
+ELITE_BIAS_ACT = {}   # act -> logit added to elite rooms in that act (run.py --map-elite-bias-act '{"3": -3}')
 
 
 class MapPolicy:
@@ -73,6 +74,9 @@ class MapPolicy:
                            torch.zeros(len(chs), dtype=torch.long)).numpy()
         if ELITE_BIAS:   # experiments (run.py --map-elite-bias): humans path to elites 13%, the nets 6.5%
             z = z + np.asarray([ELITE_BIAS if d[0] == "Elite" else 0.0 for d in descs], dtype=z.dtype)
+        eb = ELITE_BIAS_ACT.get((st.get("context") or {}).get("act") or 1)
+        if eb:   # act-3 elites killed 52 of the 242 runs that reached act 3 (v46db, A10 double boss)
+            z = z + np.asarray([eb if d[0] == "Elite" else 0.0 for d in descs], dtype=z.dtype)
         if NODE_BIAS:    # rest sites (now smiths when healthy) and shops (potions, removals) feed deck power
             z = z + np.asarray([NODE_BIAS.get(d[0], 0.0) for d in descs], dtype=z.dtype)
         return chs, descs, z

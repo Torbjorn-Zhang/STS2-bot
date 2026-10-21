@@ -289,6 +289,7 @@ def main():
     ap.add_argument("--decktest-boss-only", action="store_true", help="deck test against the act boss only")
     ap.add_argument("--rest-smith-bias", type=float, default=0.0, help="rest network: logit added to smith options")
     ap.add_argument("--boss-value", default=None, help='JSON {act: bossvalue model} for value-guided card rewards')
+    ap.add_argument("--map-elite-bias-act", default=None, help='JSON {act: logit} added to elite rooms, e.g. {"3": -3}')
     ap.add_argument("--deck-roll", default=None, help="card rewards by imagined deck futures: comma-separated deck models (deckroll.py)")
     ap.add_argument("--deck-roll-m", type=int, default=8, help="--deck-roll: futures per option")
     ap.add_argument("--deck-roll-from-act", type=int, default=1)
@@ -438,6 +439,9 @@ def main():
     if args.map_elite_bias:
         import mapnet
         mapnet.ELITE_BIAS = args.map_elite_bias
+    if args.map_elite_bias_act:
+        import mapnet
+        mapnet.ELITE_BIAS_ACT = {int(k): float(v) for k, v in json.loads(args.map_elite_bias_act).items()}
     if args.map_node_bias:
         import mapnet
         mapnet.NODE_BIAS = json.loads(args.map_node_bias)
