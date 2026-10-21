@@ -629,8 +629,10 @@ class XDeckRL:
         jobs = []
         for k, s0 in enumerate(range(0, sp["runs"], sp["chunk"])):
             rec, rows = f"fleetdata/{self.name}_it{it}_c{k}.jsonl", f"runs/{self.name}{it}_sp{k}.jsonl"
+            # sp_extra: self-play only (argparse keeps the last value: e.g. a cheaper planner, which
+            # barely changes boss outcomes (act-3 attribution) but buys ~2-3x the games)
             argv = self.run_args(min(sp["runs"], s0 + sp["chunk"]), s0, f"{self.name}{it}", cfg, f"{self.name}{it}_sp{k}",
-                                 ["--deck-sample", sp["temperature"], "--record", rec, "--no-combat-records"])
+                                 ["--deck-sample", sp["temperature"], "--record", rec, "--no-combat-records"] + list(sp.get("sp_extra", [])))
             jobs.append(fl.add_job(self.name, f"{self.name}{it}_sp{k}", "xselfplay", 1, argv,
                                    self.inputs(self.st["cur"], cfg), [rec, rows]))
         self.st["sp"][str(it)] = {"jobs": jobs, "t0": time.time()}
