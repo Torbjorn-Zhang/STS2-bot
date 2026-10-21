@@ -493,7 +493,43 @@ def deck_roll_choice(st):
     return best
 
 
+RS_VALUE = None     # optional rsvalue.RSValue: card rewards by the run-state value of each option's next state
+RS_BETA = 0.0       # + RS_BETA x the card net's log-probability (keeps the net's sense of the near term)
+RS_FROM_ACT = 1
+
+
+def rs_value_choice(st):
+    """Each option's resulting run state (deck + the card, or unchanged when skipping) scored by
+    the run-state value net (what this deck grows into by act 3), plus RS_BETA x the card net's
+    log-probability."""
+    act = (st.get("context") or {}).get("act") or 1
+    if RS_VALUE is None or act < RS_FROM_ACT or not st.get("cards"):
+        return None
+    from record import card_tok, run_state
+    acts = [a for a in legal_actions(st) if a[0] in ("select_card_reward", "skip_card_reward")]
+    if len(acts) < 2:
+        return None
+    rs = run_state(st)
+    by_index = {c["index"]: c for c in st["cards"]}
+    states = [dict(rs, deck=rs["deck"] + [card_tok(by_index[a[1]["card_index"]])]) if a[0] == "select_card_reward" else rs
+              for a in acts]
+    v = np.asarray(RS_VALUE.value(states), dtype=float)
+    lp = np.zeros(len(acts))
+    if CARD_PRIOR is not None and RS_BETA:
+        acts_, z = CARD_PRIOR.scores(st)
+        z = z - z.max()
+        lps = z - np.log(np.exp(z).sum())
+        lookup = {json.dumps(a, sort_keys=True): l for a, l in zip(acts_, lps)}
+        lp = np.array([lookup.get(json.dumps(a, sort_keys=True), float(lps.min())) for a in acts])
+    i = int(np.argmax(v + RS_BETA * lp))
+    _LAST_SCORES.v = {"rsv": {json.dumps(a, sort_keys=True): round(float(x), 3) for a, x in zip(acts, v)}}
+    return acts[i]
+
+
 def choose_card_reward(st, sim=None):
+    rv = rs_value_choice(st)
+    if rv is not None:
+        return rv
     dr = deck_roll_choice(st)
     if dr is not None:
         return dr

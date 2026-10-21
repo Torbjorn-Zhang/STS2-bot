@@ -308,6 +308,9 @@ def main():
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
     ap.add_argument("--mc-boss-acts", default=None, help='--mc-boss only at these acts\' bosses, e.g. "3"')
     ap.add_argument("--remove-defend-first", action="store_true", help="removals take Defends before Strikes")
+    ap.add_argument("--rs-value", default=None, help="card rewards by the run-state value net (rsvalue.py model)")
+    ap.add_argument("--rs-beta", type=float, default=0.0, help="--rs-value: + beta x the card net's log-probability")
+    ap.add_argument("--rs-from-act", type=int, default=1)
     ap.add_argument("--vine-out", default=None, help="vine.py: value sampled card rewards by real futures, rows to this file")
     ap.add_argument("--vine-p", type=float, default=0.25)
     ap.add_argument("--vine-k", type=int, default=3)
@@ -435,6 +438,13 @@ def main():
             policy.DECK_VALUE_BETA = args.deck_value_beta
     policy.REMOVE_FIRST = args.remove_first
     policy.REMOVE_DEFEND_FIRST = args.remove_defend_first
+    if args.rs_value:
+        import torch
+        torch.set_num_threads(1)
+        from rsvalue import RSValue
+        policy.RS_VALUE = RSValue(args.rs_value)
+        policy.RS_BETA = args.rs_beta
+        policy.RS_FROM_ACT = args.rs_from_act
     if args.vine_out:
         import torch
         torch.set_num_threads(1)
