@@ -136,6 +136,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
     needs decks the policy would not build; such decisions are flagged in the record)."""
     import random
     rng = random.Random(f"explore/{seed}")
+    vine_rng = random.Random(f"vine/{seed}")
     policy.ASCENSION = ascension
     planner = TurnPlanner(sim, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
     st = sim.send({"cmd": "start_run", "character": character, "seed": seed, "ascension": ascension})
@@ -208,6 +209,10 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 stuck = True   # play_combat hit its action cap: give up on the run
                 break
             continue
+        if d == "card_reward":
+            import vine
+            if vine.CFG is not None:
+                vine.maybe_vine(sim, st, seed, vine_rng)
         a, extra = (decknets.decide(sim, st) if decknets is not None else (None, None))
         if a is None or json.dumps(a, sort_keys=True) in dead_ends.get(_key(st), ()):
             a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
@@ -303,6 +308,13 @@ def main():
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
     ap.add_argument("--mc-boss-acts", default=None, help='--mc-boss only at these acts\' bosses, e.g. "3"')
     ap.add_argument("--remove-defend-first", action="store_true", help="removals take Defends before Strikes")
+    ap.add_argument("--vine-out", default=None, help="vine.py: value sampled card rewards by real futures, rows to this file")
+    ap.add_argument("--vine-p", type=float, default=0.25)
+    ap.add_argument("--vine-k", type=int, default=3)
+    ap.add_argument("--vine-acts", default="1,2")
+    ap.add_argument("--vine-nodes", type=int, default=400)
+    ap.add_argument("--vine-rollouts", default='{"k":4,"m":4,"turns":2}')
+    ap.add_argument("--vine-models", default="models/dz_boss_s0.pt,models/dz_boss_s1.pt,models/dz_boss_s2.pt,models/dz_boss_s3.pt")
     ap.add_argument("--stop-at-act", type=int, default=0, help="end runs at this act's first map node (deck-building benches)")
     ap.add_argument("--mc-act", type=int, default=3, help="--mc-k: the act whose first map node the rollouts start from")
     ap.add_argument("--mc-k", type=int, default=0, help="K plays of the rest of the run from act --mc-act's start (cmpwin.py)")
@@ -423,6 +435,14 @@ def main():
             policy.DECK_VALUE_BETA = args.deck_value_beta
     policy.REMOVE_FIRST = args.remove_first
     policy.REMOVE_DEFEND_FIRST = args.remove_defend_first
+    if args.vine_out:
+        import torch
+        torch.set_num_threads(1)
+        import vine
+        vine.CFG = {"out": os.path.join(HERE, args.vine_out), "p": args.vine_p, "k": args.vine_k,
+                    "acts": {int(a) for a in args.vine_acts.split(",")}, "nodes": args.vine_nodes,
+                    "rollouts": json.loads(args.vine_rollouts), "models": args.vine_models.split(",")}
+        os.makedirs(os.path.dirname(vine.CFG["out"]), exist_ok=True)
     if args.deck_roll:
         import torch
         torch.set_num_threads(1)
