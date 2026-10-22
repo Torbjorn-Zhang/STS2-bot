@@ -931,7 +931,27 @@ class Fleet:
                 if j["state"] == "fetch":
                     j["state"] = "running"
 
-    def save(self):
+    def compact(self):
+        """Move finished pipelines and their jobs to fleet/archive.jsonl: the state file had grown to
+        21 MB (13.6k jobs) and rewriting it every poll cost the Mac ~70% of a core plus antivirus scans."""
+        done = [p for p in self.pipes if p.finished()]
+        if not done:
+            return
+        names = {p.name for p in done}
+        with open(os.path.join(FLEET, "archive.jsonl"), "a") as fh:
+            for p in done:
+                fh.write(json.dumps({"pipe": {"type": next(k for k, v in PIPES.items() if isinstance(p, v)), "spec": p.spec,
+                                              "st": p.st},
+                                     "jobs": [j for j in self.jobs.values() if j.get("pipe") == p.name]}) + "\n")
+        self.jobs = {k: j for k, j in self.jobs.items() if j.get("pipe") not in names or j["state"] in ("queued", "running")}
+        self.pipes = [p for p in self.pipes if p.name not in names]
+        log(f"compacted: archived {len(done)} finished pipelines")
+
+    def save(self, force=False):
+        now = time.time()
+        if not force and now - getattr(self, "_saved_at", 0) < 30:   # at most every 30 s
+            return
+        self._saved_at = now
         s = {"jobs": self.jobs, "seq": self.seq, "hosts": self.hosts,
              "pipes": [{"type": next(k for k, v in PIPES.items() if isinstance(p, v)), "spec": p.spec, "st": p.st}
                        for p in self.pipes]}
@@ -1431,6 +1451,8 @@ class Fleet:
 
     def loop(self):
         log("coordinator started: " + ", ".join(self.hosts))
+        self.compact()
+        last_compact = time.time()
         import signal
         term = []
         # `kill` (SIGTERM): finish this round, save the state, exit; dying mid-round lost
@@ -1438,7 +1460,7 @@ class Fleet:
         signal.signal(signal.SIGTERM, lambda *_: term.append(1))
         while True:
             if term:
-                self.save()
+                self.save(force=True)
                 log("coordinator stopped (SIGTERM; state saved)")
                 return
             self.inbox()
@@ -1448,7 +1470,7 @@ class Fleet:
                     if h["state"] == "up":
                         self.kill(h)
                     self.requeue(h, "stop")
-                self.save()
+                self.save(force=True)
                 log("stopped (jobs requeued; `fleet.py run` resumes)")
                 return
             with ThreadPoolExecutor(len(self.hosts)) as ex:
@@ -1469,6 +1491,9 @@ class Fleet:
                 self.schedule()
             except Exception as e:
                 log(f"schedule failed ({type(e).__name__}: {str(e)[:150]})")
+            if time.time() - last_compact > 3600:
+                self.compact()
+                last_compact = time.time()
             self.save()
             if self.until_done and self.pipes and all(p.finished() for p in self.pipes) \
                     and not any(j["state"] in ("running", "queued") for j in self.jobs.values()):
