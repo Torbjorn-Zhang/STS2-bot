@@ -202,7 +202,7 @@ def train_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, clip=0.2, ent
         for r in rows:
             x = r.get("x") or {}
             if r["k"] == "d" and r["dec"] == "rest_site" and x.get("rlp") is not None and len(x.get("rkeys") or []) > 1:
-                key = (r["s"]["act"], r["s"]["floor"])
+                key = (r["s"].get("asc"), r["s"]["act"], r["s"]["floor"])
                 items.append((r, fin, key))
                 by_bucket[key].append(fin)
     if not items:

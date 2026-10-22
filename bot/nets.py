@@ -115,6 +115,9 @@ def final_progress(o):
         return 100.0 * win_estimate(o)
     if RETURN == "dv":
         return dv_return(o)
+    if RETURN == "sm":   # spire-mentor's return: 0.5 x share of the run's floors + 0.5 x won (scaled x100)
+        prog = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
+        return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * bool(o.get("victory")))
     acts = 3 if o.get("victory") else max(0, (o.get("act") or 1) - 1)
     base = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
     # boss damage: a denser signal than boss wins (a lost boss fight still shows how close
@@ -1046,7 +1049,7 @@ def train_card_rl(paths, init, out, temperature=1.0, epochs=3, lr=1e-4, batch=25
         fin = final_progress(rows[-1])
         for r in rows:
             if r["k"] == "d" and r["dec"] == "card_reward" and (r.get("x") or {}).get("lp") is not None and len(r["A"]) > 1:
-                key = (r["s"]["act"], r["s"]["floor"])
+                key = (r["s"].get("asc"), r["s"]["act"], r["s"]["floor"])
                 items.append((r, fin, key))
                 by_bucket[key].append(fin)
     base = {k: float(np.mean(v)) for k, v in by_bucket.items()}
@@ -1242,11 +1245,11 @@ def add_value_baseline(path, epochs=4, hidden=64):
     for f in (0, 1):
         by = defaultdict(list)
         for s_, fin in rows_of[f]:
-            by[(s_["act"], s_["floor"])].append(fin)
+            by[(s_.get("asc"), s_["act"], s_["floor"])].append(fin)
         buckets[f] = ({k: float(np.mean(v)) for k, v in by.items()}, float(np.mean([y for _, y in rows_of[f]])))
         bmean, gmean = buckets[f]
         X = torch.from_numpy(np.stack([enc.encode(s_) for s_, _ in rows_of[f]]))
-        Y = torch.from_numpy(np.asarray([fin - bmean.get((s_["act"], s_["floor"]), gmean) for s_, fin in rows_of[f]],
+        Y = torch.from_numpy(np.asarray([fin - bmean.get((s_.get("asc"), s_["act"], s_["floor"]), gmean) for s_, fin in rows_of[f]],
                                         dtype=np.float32)) / FLOORS_PER_ACT
         torch.manual_seed(f)
         m = nn.Sequential(nn.Dropout(0.2), nn.Linear(enc.dim, hidden), nn.ReLU(), nn.Linear(hidden, 1))
@@ -1272,7 +1275,7 @@ def add_value_baseline(path, epochs=4, hidden=64):
             if r.get("k") == "d" and r.get("s") and r["s"].get("act") is not None and k in fold:
                 g = 1 - fold[k]
                 bmean, gmean = buckets[g]
-                b = bmean.get((r["s"]["act"], r["s"]["floor"]), gmean)
+                b = bmean.get((r["s"].get("asc"), r["s"]["act"], r["s"]["floor"]), gmean)
                 with torch.no_grad():
                     v = b + float(models[g](torch.from_numpy(enc.encode(r["s"])[None]))[0, 0]) * FLOORS_PER_ACT
                 r["V"] = round(v, 3)

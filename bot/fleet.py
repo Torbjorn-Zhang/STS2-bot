@@ -615,8 +615,8 @@ class XDeckRL:
             json.dump({**models, "card_decides": True, "neow": True}, fh)
         return rel
 
-    def run_args(self, end, start, prefix, cfg, tag, extra=()):
-        return ["run.py", end, "--seed-start", start, "--acts", 3, "--ascension", 10, "--seed-prefix", prefix,
+    def run_args(self, end, start, prefix, cfg, tag, extra=(), asc=10):
+        return ["run.py", end, "--seed-start", start, "--acts", 3, "--ascension", asc, "--seed-prefix", prefix,
                 "--workers", "%W%", "--rollouts", self.spec["rollouts"], "--deck-nets", cfg, "--tag", tag] + \
             list(self.spec.get("extra", [])) + list(extra)
 
@@ -631,8 +631,12 @@ class XDeckRL:
             rec, rows = f"fleetdata/{self.name}_it{it}_c{k}.jsonl", f"runs/{self.name}{it}_sp{k}.jsonl"
             # sp_extra: self-play only (argparse keeps the last value: e.g. a cheaper planner, which
             # barely changes boss outcomes (act-3 attribution) but buys ~2-3x the games)
+            # asc_mix: self-play chunk k plays ascension asc_mix[k % len] (spire-mentor: a uniform A0-A10 mix,
+            # so real wins exist to learn from; the evaluation stays at A10)
+            mix = sp.get("asc_mix") or [10]
             argv = self.run_args(min(sp["runs"], s0 + sp["chunk"]), s0, f"{self.name}{it}", cfg, f"{self.name}{it}_sp{k}",
-                                 ["--deck-sample", sp["temperature"], "--record", rec, "--no-combat-records"] + list(sp.get("sp_extra", [])))
+                                 ["--deck-sample", sp["temperature"], "--record", rec, "--no-combat-records"] + list(sp.get("sp_extra", [])),
+                                 asc=mix[k % len(mix)])
             jobs.append(fl.add_job(self.name, f"{self.name}{it}_sp{k}", "xselfplay", 1, argv,
                                    self.inputs(self.st["cur"], cfg), [rec, rows]))
         self.st["sp"][str(it)] = {"jobs": jobs, "t0": time.time()}
