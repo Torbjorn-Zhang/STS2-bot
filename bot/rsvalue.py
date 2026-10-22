@@ -62,7 +62,8 @@ def outcome_targets(outcomes, model_paths):
 class Net(nn.Module):
     def __init__(self, dim, h=256):
         super().__init__()
-        self.f = nn.Sequential(nn.Linear(dim, h), nn.ReLU(), nn.Dropout(0.1), nn.Linear(h, h // 2), nn.ReLU(), nn.Linear(h // 2, 1))
+        self.f = nn.Sequential(nn.Linear(dim, h), nn.ReLU(), nn.Dropout(0.3), nn.Linear(h, h // 2), nn.ReLU(), nn.Dropout(0.3),
+                               nn.Linear(h // 2, 1))
 
     def forward(self, x):
         return self.f(x).squeeze(-1)
@@ -109,7 +110,8 @@ def train(args):
                       "z_mean": round(float(Ytr.mean()), 3)}), flush=True)
     torch.manual_seed(args.seed)
     net = Net(Xtr.shape[1])
-    opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-4)
+    opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-2)
+    best = (float("inf"), None, None)   # (val mse, state, metrics): early stopping on held-out runs
     for ep in range(args.epochs):
         net.train()
         perm = torch.randperm(len(Ytr))
@@ -119,7 +121,7 @@ def train(args):
             opt.zero_grad()
             loss.backward()
             opt.step()
-        if ep % 5 == 4 or ep == args.epochs - 1:
+        if ep % 2 == 1 or ep == args.epochs - 1:
             net.eval()
             with torch.no_grad():
                 p = net(Xva).numpy()
@@ -132,8 +134,11 @@ def train(args):
                 if m.sum() > 10:
                     res[f"corr_act{a}"] = round(float(np.corrcoef(p[m], y[m])[0, 1]), 3)
             print(json.dumps(res), flush=True)
+            if res["val_mse"] < best[0]:
+                best = (res["val_mse"], {k: v.clone() for k, v in net.state_dict().items()}, res)
+    res = best[2]
     if args.out:
-        torch.save({"enc": blob["enc"], "state": net.state_dict(), "dim": Xtr.shape[1]}, os.path.join(HERE, args.out))
+        torch.save({"enc": blob["enc"], "state": best[1], "dim": Xtr.shape[1]}, os.path.join(HERE, args.out))
     print(json.dumps({"saved": args.out, "runs": len(keys), "reach_act3": round(float(reach), 3), **res}))   # fleet logs this line
 
 
