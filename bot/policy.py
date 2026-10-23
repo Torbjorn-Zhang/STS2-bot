@@ -1032,7 +1032,10 @@ def load_deck_nets(cfg):
     import torch
     torch.set_num_threads(1)
     global CARD_PRIOR, REST_NET, EVENT_NET, MAP_NET, SHOP_NET, CARD_NET_DECIDES, EVENT_NET_NEOW
-    if cfg.get("card"):
+    if cfg.get("card_t"):   # the transformer card policy (tcard.py) in place of the MLP card net
+        from tcard import TCardPolicy
+        CARD_PRIOR = TCardPolicy(cfg["card_t"])
+    elif cfg.get("card"):
         import nets
         CARD_PRIOR = nets.CardPolicy(cfg["card"])
     if cfg.get("rest"):
