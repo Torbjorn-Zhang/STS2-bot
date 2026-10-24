@@ -373,7 +373,8 @@ def rl(args):
     """PPO on every decision kind at once. The self-play records were played with this network at
     temperature T (run.py --deck-sample T, deck-nets "unified"), so their behaviour log-probs are
     its own. Return: the run's final return (STS2_RETURN), baseline: its mean over the runs at the
-    same (ascension, act, floor) in this data; the value head keeps fitting the return."""
+    same (ascension, act, floor) in this data (--baseline: or the value head); the value head keeps
+    fitting the return."""
     from nets import final_progress
     blob = torch.load(os.path.join(HERE, args.init), map_location="cpu", weights_only=False)
     enc = Enc(blob=blob["enc"])
@@ -384,10 +385,8 @@ def rl(args):
     for d in decs:
         by[(d[1].get("asc"), d[1].get("act"), d[1].get("floor"))].append(ret[d[6]])
     base_ = {k: float(np.mean(v)) for k, v in by.items()}
-    adv = np.array([ret[d[6]] - base_[(d[1].get("asc"), d[1].get("act"), d[1].get("floor"))] for d in decs], np.float32)
-    print(json.dumps({"decisions": len(decs), "by_kind": dict(Counter(d[0] for d in decs)), "runs": len({d[6] for d in decs}),
-                      "adv_std": round(float(adv.std()), 3)}), flush=True)
-    adv = (adv - adv.mean()) / (adv.std() + 1e-6)
+    G = np.array([ret[d[6]] for d in decs], np.float32)
+    b_bucket = np.array([base_[(d[1].get("asc"), d[1].get("act"), d[1].get("floor"))] for d in decs], np.float32)
     items = [enc.encode(d[0], d[1], d[2], d[4]) for d in decs]
     dev = torch.device(os.environ.get("NETS_DEVICE", "cpu"))
     if dev.type == "cuda" and not torch.cuda.is_available():
@@ -396,6 +395,21 @@ def rl(args):
     net.load_state_dict(blob["state"])
     net.to(dev)
     net.eval()   # no dropout: the behaviour log-probs were computed without it
+    with torch.no_grad():   # the value head's baseline (it fits return / 100)
+        b_value = np.concatenate([100.0 * net(collate([items[j] for j in range(i, min(len(decs), i + 512))], dev), with_value=True)[1].cpu().numpy()
+                                  for i in range(0, len(decs), 512)]).astype(np.float32)
+    ev = lambda b, m=slice(None): round(float(1 - np.var(G[m] - b[m]) / (np.var(G[m]) + 1e-9)), 3)
+    acts = np.array([d[1].get("act") or 1 for d in decs])
+    print(json.dumps({"decisions": len(decs), "by_kind": dict(Counter(d[0] for d in decs)), "runs": len({d[6] for d in decs}),
+                      "ret_std": round(float(G.std()), 3), "ev_bucket": ev(b_bucket), "ev_value": ev(b_value),
+                      **{f"ev_value_act{a}": ev(b_value, acts == a) for a in (1, 2, 3) if (acts == a).sum() > 10},
+                      **{f"ev_bucket_act{a}": ev(b_bucket, acts == a) for a in (1, 2, 3) if (acts == a).sum() > 10},
+                      "baseline": args.baseline}), flush=True)
+    if args.baseline == "auto":   # any state-only baseline leaves the gradient unbiased: take the lower-variance one
+        args.baseline = "value" if ev(b_value) > ev(b_bucket) else "bucket"
+        print(json.dumps({"baseline_chosen": args.baseline}), flush=True)
+    adv = G - {"bucket": b_bucket, "value": b_value, "mix": 0.5 * (b_bucket + b_value)}[args.baseline]
+    adv = (adv - adv.mean()) / (adv.std() + 1e-6)
     A = torch.tensor([d[3] for d in decs], device=dev)
     LP0 = torch.tensor([d[5] for d in decs], dtype=torch.float32, device=dev)
     ADV = torch.from_numpy(adv).to(dev)
@@ -474,6 +488,9 @@ def main():
     ap.add_argument("--ent", type=float, default=0.01)
     ap.add_argument("--vcoef", type=float, default=0.25)
     ap.add_argument("--target-kl", type=float, default=0.03, help="rl: stop the epochs once the mean KL passes this")
+    ap.add_argument("--baseline", default="auto", choices=["auto", "bucket", "value", "mix"],
+                    help="rl: mean return at the same (asc, act, floor), the value head, their mean, or (auto) whichever "
+                         "explains more of the return's variance in this data")
     ap.add_argument("--awr", action="store_true")
     ap.add_argument("--beta", type=float, default=1.0)
     ap.add_argument("--wmax", type=float, default=20.0)
