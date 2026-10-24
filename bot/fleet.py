@@ -1446,6 +1446,14 @@ class Fleet:
                 log(f"pipeline {tag} cancelled ({n} queued jobs dropped, {k} running ones stopped)")
                 os.remove(p)
                 continue
+            if spec["type"] == "set":   # change a live pipeline's spec (e.g. xdeckrl lr_scale from its next update)
+                tag, kv = spec["spec"]["tag"], spec["spec"]["set"]
+                for x in self.pipes:
+                    if x.name == tag and not x.finished():
+                        x.spec.update(kv)
+                log(f"pipeline {tag}: spec set {json.dumps(kv)}")
+                os.remove(p)
+                continue
             if any(x.name == spec["spec"]["tag"] for x in self.pipes):
                 log(f"pipeline {spec['spec']['tag']} exists; ignored")
             else:
@@ -1540,7 +1548,7 @@ def main():
     os.makedirs(os.path.join(HERE, "fleetdata"), exist_ok=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["run", "status", "drain", "undrain", "stop", "deckrl", "xdeckrl", "expert", "bench",
-                                    "cancel", "task"])
+                                    "cancel", "task", "set"])
     ap.add_argument("host", nargs="?")
     ap.add_argument("--until-done", action="store_true", help="run: exit once every pipeline has finished")
     ap.add_argument("--tag")
@@ -1575,6 +1583,7 @@ def main():
     ap.add_argument("--outputs", default=None, help='task: JSON list of bot/-relative files to fetch')
     ap.add_argument("--gpu", action="store_true", help="task: run on a GPU machine with CUDA")
     ap.add_argument("--reward", default=None, help='xdeckrl: JSON env overrides of the RL return (fleetjob.py --reward)')
+    ap.add_argument("--set", default=None, help='set: JSON {spec key: value} for the live pipeline --tag')
     args = ap.parse_args()
     if args.cmd == "run":
         lock = os.path.join(FLEET, "coordinator.pid")
@@ -1647,6 +1656,8 @@ def main():
                         "prio": 0.5 if args.prio is None else args.prio})
     elif args.cmd == "cancel":
         submit("cancel", {"tag": args.tag})
+    elif args.cmd == "set":
+        submit("set", {"tag": args.tag, "set": json.loads(args.set)})
     elif args.cmd == "bench":
         spec = {"tag": args.tag, "bench": args.bench, "configs": json.loads(args.configs), "room": args.room,
                 "reps": args.reps, "shards": args.shards, "prio": 0.8 if args.prio is None else args.prio,
