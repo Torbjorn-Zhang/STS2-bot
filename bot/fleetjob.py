@@ -17,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 
 TRAINERS = {"card": ["nets.py", "cardrl"], "rest": ["restnet.py", "rl"], "event": ["eventnet.py", "rl"],
-            "map": ["mapnet.py", "rl"], "shop": ["shopnet.py", "rl"]}
+            "map": ["mapnet.py", "rl"], "shop": ["shopnet.py", "rl"], "unified": ["upolicy.py", "rl"]}
 
 
 def expand(paths):

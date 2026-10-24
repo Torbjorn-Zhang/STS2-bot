@@ -10,6 +10,8 @@ attends to every other; a head scores the option tokens; a softmax over one deci
 
   upolicy.py train FILES... --out models/up1.pt [--awr] [--device cuda]   imitation (optionally
       advantage-weighted) on self-play records: every decision type at once
+  upolicy.py rl FILES... --init models/up1_bc.pt --out M --temperature 1   one PPO update on
+      self-play played with this network (fleet xdeckrl kind "unified", fleetjob.py --unified)
 Records are run.py --record rows written with DeckNets (the extras carry the option lists).
 """
 import argparse
@@ -367,6 +369,80 @@ def train(args):
     print(json.dumps({"saved": args.out, "decisions": len(decs), **best[2]}))
 
 
+def rl(args):
+    """PPO on every decision kind at once. The self-play records were played with this network at
+    temperature T (run.py --deck-sample T, deck-nets "unified"), so their behaviour log-probs are
+    its own. Return: the run's final return (STS2_RETURN), baseline: its mean over the runs at the
+    same (ascension, act, floor) in this data; the value head keeps fitting the return."""
+    from nets import final_progress
+    blob = torch.load(os.path.join(HERE, args.init), map_location="cpu", weights_only=False)
+    enc = Enc(blob=blob["enc"])
+    decs, outcome = load_records(expand(args.files))
+    decs = [d for d in decs if d[6] in outcome and d[5] is not None]
+    ret = {k: final_progress(o) for k, o in outcome.items()}
+    by = defaultdict(list)
+    for d in decs:
+        by[(d[1].get("asc"), d[1].get("act"), d[1].get("floor"))].append(ret[d[6]])
+    base_ = {k: float(np.mean(v)) for k, v in by.items()}
+    adv = np.array([ret[d[6]] - base_[(d[1].get("asc"), d[1].get("act"), d[1].get("floor"))] for d in decs], np.float32)
+    print(json.dumps({"decisions": len(decs), "by_kind": dict(Counter(d[0] for d in decs)), "runs": len({d[6] for d in decs}),
+                      "adv_std": round(float(adv.std()), 3)}), flush=True)
+    adv = (adv - adv.mean()) / (adv.std() + 1e-6)
+    items = [enc.encode(d[0], d[1], d[2], d[4]) for d in decs]
+    dev = torch.device(os.environ.get("NETS_DEVICE", "cpu"))
+    if dev.type == "cuda" and not torch.cuda.is_available():
+        dev = torch.device("cpu")
+    net = Net(enc)
+    net.load_state_dict(blob["state"])
+    net.to(dev)
+    net.eval()   # no dropout: the behaviour log-probs were computed without it
+    A = torch.tensor([d[3] for d in decs], device=dev)
+    LP0 = torch.tensor([d[5] for d in decs], dtype=torch.float32, device=dev)
+    ADV = torch.from_numpy(adv).to(dev)
+    R = torch.tensor([ret[d[6]] / 100.0 for d in decs], dtype=torch.float32, device=dev)
+    T = args.temperature
+    lr = args.lr * float(os.environ.get("NETS_LR_SCALE", "1"))
+    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
+    with torch.no_grad():   # the records' log-probs should be this network's own (ratio 1 before the update)
+        idx = list(range(min(len(decs), 2048)))
+        z = net(collate([items[j] for j in idx], dev))
+        lp = torch.log_softmax(z / T, -1).gather(1, A[idx][:, None]).squeeze(1)
+        print(json.dumps({"init_lp_gap": round(float((lp - LP0[idx]).abs().mean()), 4)}), flush=True)
+    order = list(range(len(decs)))
+    for ep in range(args.epochs):
+        random.Random(ep).shuffle(order)
+        stats, nb = defaultdict(float), 0
+        for i in range(0, len(order), args.batch):
+            b = order[i:i + args.batch]
+            z, v = net(collate([items[j] for j in b], dev), with_value=True)
+            logp = torch.log_softmax(z / T, -1)
+            lp_new = logp.gather(1, A[b][:, None]).squeeze(1)
+            ratio = torch.exp(lp_new - LP0[b])
+            ad = ADV[b]
+            pg = -torch.min(ratio * ad, ratio.clamp(1 - args.clip, 1 + args.clip) * ad).mean()
+            p = logp.exp()
+            entropy = -(p * logp.clamp(min=-30)).sum(1).mean()
+            vl = ((v - R[b]) ** 2).mean()
+            loss = pg - args.ent * entropy + args.vcoef * vl
+            opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+            opt.step()
+            stats["pg"] += pg.item()
+            stats["ent"] += entropy.item()
+            stats["v"] += vl.item()
+            stats["clipfrac"] += ((ratio - 1).abs() > args.clip).float().mean().item()
+            stats["kl"] += (LP0[b] - lp_new).mean().item()
+            nb += 1
+        res = {"epoch": ep, **{k: round(v / nb, 4) for k, v in stats.items()}}
+        print(json.dumps(res), flush=True)
+        if res["kl"] > args.target_kl:
+            break
+    net.to("cpu")
+    torch.save({"enc": blob["enc"], "state": net.state_dict(), "rl_from": args.init}, os.path.join(HERE, args.out))
+    print(json.dumps({"saved": args.out, "decisions": len(decs)}))
+
+
 class UPolicy:
     """Scores one decision's options (record-format descriptors) with the unified network."""
 
@@ -385,13 +461,19 @@ class UPolicy:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["train"])
+    ap.add_argument("cmd", choices=["train", "rl"])
     ap.add_argument("files", nargs="+")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--epochs", type=int, default=6)
+    ap.add_argument("--epochs", type=int, default=None, help="train: 6, rl: 3")
     ap.add_argument("--batch", type=int, default=256)
-    ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--lr", type=float, default=None, help="train: 3e-4, rl: 1e-4 (times NETS_LR_SCALE)")
+    ap.add_argument("--init", help="rl: the network to update (the self-play policy)")
+    ap.add_argument("--temperature", type=float, default=1.0, help="rl: the self-play sampling temperature")
+    ap.add_argument("--clip", type=float, default=0.2)
+    ap.add_argument("--ent", type=float, default=0.01)
+    ap.add_argument("--vcoef", type=float, default=0.25)
+    ap.add_argument("--target-kl", type=float, default=0.03, help="rl: stop the epochs once the mean KL passes this")
     ap.add_argument("--awr", action="store_true")
     ap.add_argument("--beta", type=float, default=1.0)
     ap.add_argument("--wmax", type=float, default=20.0)
@@ -401,7 +483,12 @@ def main():
     import nets
     nets.RETURN = os.environ["STS2_RETURN"]
     torch.set_num_threads(int(os.environ.get("NETS_THREADS", "2")))
-    train(args)
+    if args.cmd == "rl":
+        args.epochs, args.lr = args.epochs or 3, args.lr or 1e-4
+        rl(args)
+    else:
+        args.epochs, args.lr = args.epochs or 6, args.lr or 3e-4
+        train(args)
 
 
 if __name__ == "__main__":

@@ -518,12 +518,14 @@ def main():
                     if args.deck_sample is not None:
                         from decknets import DeckNets
                         paths, shop = (args.card_prior, args.rest_net, args.event_net, args.map_net), args.shop_net
+                        unified = args.unified
                         if args.deck_nets and not any(paths):   # sample the deck networks the bot plays with
                             with open(args.deck_nets) as fh:
                                 cfg = json.load(fh)
                             paths = (cfg.get("card"), cfg.get("rest"), cfg.get("event"), cfg.get("map"))
                             shop = cfg.get("shop")
-                        dn = DeckNets(*paths, args.deck_sample, seed=s, shop=shop, unified=args.unified)
+                            unified = unified or cfg.get("unified")   # xdeckrl kind "unified": the network being trained
+                        dn = DeckNets(*paths, args.deck_sample, seed=s, shop=shop, unified=unified)
                     rec = None
                     if args.record:
                         from record import GameRecorder
