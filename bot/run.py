@@ -308,6 +308,7 @@ def main():
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
     ap.add_argument("--mc-boss-acts", default=None, help='--mc-boss only at these acts\' bosses, e.g. "3"')
     ap.add_argument("--remove-defend-first", action="store_true", help="removals take Defends before Strikes")
+    ap.add_argument("--unified", default=None, help="with --deck-sample: the unified transformer policy (upolicy.py) scores every deck decision")
     ap.add_argument("--rs-value", default=None, help="card rewards by the run-state value net (rsvalue.py model)")
     ap.add_argument("--rs-beta", type=float, default=0.0, help="--rs-value: + beta x the card net's log-probability")
     ap.add_argument("--rs-from-act", type=int, default=1)
@@ -522,7 +523,7 @@ def main():
                                 cfg = json.load(fh)
                             paths = (cfg.get("card"), cfg.get("rest"), cfg.get("event"), cfg.get("map"))
                             shop = cfg.get("shop")
-                        dn = DeckNets(*paths, args.deck_sample, seed=s, shop=shop)
+                        dn = DeckNets(*paths, args.deck_sample, seed=s, shop=shop, unified=args.unified)
                     rec = None
                     if args.record:
                         from record import GameRecorder

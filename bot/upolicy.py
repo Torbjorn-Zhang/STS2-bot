@@ -367,6 +367,22 @@ def train(args):
     print(json.dumps({"saved": args.out, "decisions": len(decs), **best[2]}))
 
 
+class UPolicy:
+    """Scores one decision's options (record-format descriptors) with the unified network."""
+
+    def __init__(self, path):
+        blob = torch.load(os.path.join(HERE, path) if not os.path.isabs(path) else path, map_location="cpu", weights_only=False)
+        self.enc = Enc(blob=blob["enc"])
+        self.net = Net(self.enc)
+        self.net.load_state_dict(blob["state"])
+        self.net.eval()
+
+    def score(self, dec, st, opts, route=None):
+        from record import run_state
+        with torch.no_grad():
+            return self.net(collate([self.enc.encode(dec, run_state(st), opts, route)], "cpu"))[0].numpy()[:len(opts)]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["train"])
