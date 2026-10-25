@@ -666,14 +666,17 @@ class TurnPlanner:
             nonlocal nodes
             if st.get("decision") == "combat_play":
                 leaves.append(("end", path + [("end_turn", {})], st, snap_id, ("end_turn", {})))
+            moved = False   # the engine is at st on entry (just reached, or the root): the first child needs no restore
             for a in legal_actions(st) + potion_actions(st):
                 if a[0] == "end_turn":
                     continue
                 if nodes >= self.max_nodes:
                     self.stats["node_cap"] += 1
                     return
-                self._restore(snap_id)
+                if moved:
+                    self._restore(snap_id)
                 s2 = self.sim.act(a[0], **a[1])
+                moved = True
                 nodes += 1
                 if s2.get("type") == "error":
                     continue

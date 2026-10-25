@@ -9,6 +9,7 @@ still match.
 """
 
 import json
+import os
 import random
 import statistics
 import sys
@@ -37,7 +38,7 @@ def main():
     runs_per_char = int(argv[0]) if len(argv) > 0 else 2
     k_follow = int(argv[1]) if len(argv) > 1 else 8
     snap_prob = float(argv[2]) if len(argv) > 2 else 0.08
-    sim = Sim("Release", timeout=60, capture_stderr=True)
+    sim = Sim(os.environ.get("STS2_ENGINE_CONFIG", "Release"), timeout=60, capture_stderr=True)
     stats = Counter()
     restore_ms, replay_len, by_decision = [], [], Counter()
     failures = []

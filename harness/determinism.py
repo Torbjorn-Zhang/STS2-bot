@@ -23,7 +23,7 @@ def canon(state):
 
 def record_run(character, seed, rng, save_dir=None, max_steps=3000):
     """Random run; returns (actions, states, checkpoints{step: save_path})."""
-    sim = Sim("Release")
+    sim = Sim(os.environ.get("STS2_ENGINE_CONFIG", "Release"))
     states = [sim.send({"cmd": "start_run", "character": character, "seed": seed})]
     actions, checkpoints = [], {}
     for step in range(max_steps):
@@ -46,7 +46,7 @@ def record_run(character, seed, rng, save_dir=None, max_steps=3000):
 
 
 def replay(first_cmd, actions):
-    sim = Sim("Release")
+    sim = Sim(os.environ.get("STS2_ENGINE_CONFIG", "Release"))
     states = [sim.send(first_cmd)]
     for a in actions:
         states.append(sim.act(a[0], **a[1]))

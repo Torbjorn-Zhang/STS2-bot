@@ -1077,7 +1077,9 @@ class Fleet:
     # first act-3 boss). A new config name per engine change: running jobs keep their DLL
     # Fix3 (2026-10-25): shop potion prices roll the Shops rng as in the real game (TestMode
     # skipped the roll, so every shop after the first was stocked from a shifted rng)
-    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3")
+    # Fix4 (2026-10-26): restore replays build no combat state for the discarded intermediate
+    # results (restore -35..45%; same states, runs identical to Fix3)
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4")
 
     def ensure_builds(self, h):
         if linux(h):

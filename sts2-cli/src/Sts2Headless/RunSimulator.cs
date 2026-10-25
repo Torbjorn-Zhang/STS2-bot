@@ -2460,6 +2460,14 @@ public class RunSimulator
 
     private Dictionary<string, object?> CombatPlayState(Player player)
     {
+        if (_replayQuiet)
+        {
+            // restore replays logged commands whose results are discarded: skip the card
+            // previews, descriptions and per-target damage (most of a replayed command's cost)
+            if (player.Creature != null && player.Creature.CurrentHp > 0)
+                _lastKnownHp = player.Creature.CurrentHp;
+            return new Dictionary<string, object?> { ["type"] = "decision", ["decision"] = "combat_play" };
+        }
         var pcs = player.PlayerCombatState;
         var combatState = CombatManager.Instance.DebugOnlyGetState();
 
@@ -4618,6 +4626,7 @@ public class RunSimulator
     private int _nextCheckpointId = 1, _nextSnapshotId = 1, _currentCheckpoint;
     private List<string> _commandLog = new();
     private bool _replaying;
+    private bool _replayQuiet;   // a restore's intermediate results are not built (see CombatPlayState)
 
     /// <summary>Program's command dispatcher, used to replay logged commands.</summary>
     public Func<System.Text.Json.JsonElement, Dictionary<string, object?>?>? CommandHandler { get; set; }
@@ -4703,6 +4712,7 @@ public class RunSimulator
             return Error("Restore needs a command handler");
 
         _replaying = true;
+        _replayQuiet = snap.commands.Count > 0;   // only the last result is returned
         try
         {
             Dictionary<string, object?>? result;
@@ -4730,6 +4740,8 @@ public class RunSimulator
 
             for (int i = 0; i < snap.commands.Count; i++)
             {
+                if (i == snap.commands.Count - 1)
+                    _replayQuiet = false;
                 using var doc = System.Text.Json.JsonDocument.Parse(snap.commands[i]);
                 result = CommandHandler(doc.RootElement.Clone());
                 if (IsError(result))
@@ -4743,6 +4755,7 @@ public class RunSimulator
         finally
         {
             _replaying = false;
+            _replayQuiet = false;
         }
     }
 
