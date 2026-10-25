@@ -7,6 +7,7 @@ Writes one JSON line per run to bot/runs/<tag>.jsonl and prints a summary.
 import argparse
 import json
 import os
+import random
 import statistics
 import threading
 import time
@@ -45,8 +46,9 @@ def act_state(st):
             "potions": [pot_tok(x) for x in p.get("potions") or [] if x], "boss": (ctx.get("boss") or {}).get("id")}
 
 
-def continue_run(sim, st, planner, acts, max_steps=4000):
-    """Play on from st with the bot (as play_run, without records) until the run ends."""
+def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None):
+    """Play on from st with the bot (as play_run, without records) until the run ends.
+    decknets: the deck networks the run itself played with (else the --deck-nets rules)."""
     dead_ends, memo, steps = {}, {}, 0
     while steps < max_steps:
         d = st.get("decision")
@@ -58,7 +60,9 @@ def continue_run(sim, st, planner, acts, max_steps=4000):
             if st.get("decision") == "combat_play":
                 break   # the planner's action cap: counts as a loss
             continue
-        a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
+        a = decknets.decide(sim, st)[0] if decknets is not None else None
+        if a is None or json.dumps(a, sort_keys=True) in dead_ends.get(_key(st), ()):
+            a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
         policy.pop_last_scores()
         nxt = sim.act(a[0], **a[1])
         steps += 1
@@ -70,9 +74,11 @@ def continue_run(sim, st, planner, acts, max_steps=4000):
     return st
 
 
-def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None, rollouts=None):
+def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None, rollouts=None, decknets=None):
     """MC_K plays of the rest of the run from the save at act MC_ACT's first map node.
-    Returns (sim, {"win": [...], "prog": [...], ...}); the engine may be recycled or replaced."""
+    decknets: the run's own deck networks (reseeded per play), so the plays estimate the
+    policy being trained. Returns (sim, {"win": [...], "prog": [...], ...}); the engine may
+    be recycled or replaced."""
     import zlib
     out = {"act": MC_ACT, "k": MC_K, "win": [], "prog": [], "secs": [], "err": 0}
     for j in range(MC_K):
@@ -84,7 +90,9 @@ def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None,
                 raise RuntimeError(st.get("message"))
             sim.send({"cmd": "determinize_run", "seed": zlib.crc32(f"{seed}/mc{MC_ACT}/{j}".encode()) * 2654435761 % (2 ** 62)})
             planner = TurnPlanner(sim, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
-            end = continue_run(sim, st, planner, acts)
+            if decknets is not None:
+                decknets.rng, decknets.visits = random.Random(f"{seed}/mc{MC_ACT}/{j}"), {}
+            end = continue_run(sim, st, planner, acts, decknets=decknets)
         except Exception as e:
             out["err"] += 1
             out.setdefault("errors", []).append(f"{type(e).__name__}: {e}"[:200])
@@ -328,6 +336,7 @@ def main():
     ap.add_argument("--stop-at-act", type=int, default=0, help="end runs at this act's first map node (deck-building benches)")
     ap.add_argument("--mc-act", type=int, default=3, help="--mc-k: the act whose first map node the rollouts start from")
     ap.add_argument("--mc-k", type=int, default=0, help="K plays of the rest of the run from act --mc-act's start (cmpwin.py)")
+    ap.add_argument("--mc-drop-saves", action="store_true", help="--mc-k: delete each act-start save after its plays (self-play)")
     ap.add_argument("--mc-dir", default=None, help="--mc-k: where the act-start saves go (default runs/mcsaves/<tag>)")
     ap.add_argument("--boss-beta", type=float, default=0.0, help="weight of the boss-win logit gain on card rewards")
     ap.add_argument("--map-elite-bias", type=float, default=0.0, help="map network: logit added to elite rooms")
@@ -543,7 +552,12 @@ def main():
                                  explore=args.explore, decknets=dn, combat_records=not args.no_combat_records)
                     if MC_K and r.get("mc_save") and not r.get("error"):
                         sim, r["mc"] = mc_rollouts(sim, r["mc_save"], s, args.acts, args.nodes, model, args.value_weight,
-                                                   json.loads(args.rollouts) if args.rollouts else None)
+                                                   json.loads(args.rollouts) if args.rollouts else None, decknets=dn)
+                        if args.mc_drop_saves:
+                            try:
+                                os.remove(r["mc_save"])
+                            except OSError:
+                                pass
                     if rec and MC_K and r.get("mc_save"):
                         rec.finish(r)
                 except Exception as e:  # engine hang/crash: record it, restart the engine, go on

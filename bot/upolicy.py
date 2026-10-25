@@ -375,17 +375,16 @@ def rl(args):
     its own. Return: the run's final return (STS2_RETURN), baseline: its mean over the runs at the
     same (ascension, act, floor) in this data (--baseline: or the value head); the value head keeps
     fitting the return."""
-    from nets import final_progress
+    from nets import decision_return
     blob = torch.load(os.path.join(HERE, args.init), map_location="cpu", weights_only=False)
     enc = Enc(blob=blob["enc"])
     decs, outcome = load_records(expand(args.files))
     decs = [d for d in decs if d[6] in outcome and d[5] is not None]
-    ret = {k: final_progress(o) for k, o in outcome.items()}
+    G = np.array([decision_return(outcome[d[6]], d[1].get("act")) for d in decs], np.float32)
     by = defaultdict(list)
-    for d in decs:
-        by[(d[1].get("asc"), d[1].get("act"), d[1].get("floor"))].append(ret[d[6]])
+    for d, g in zip(decs, G):
+        by[(d[1].get("asc"), d[1].get("act"), d[1].get("floor"))].append(g)
     base_ = {k: float(np.mean(v)) for k, v in by.items()}
-    G = np.array([ret[d[6]] for d in decs], np.float32)
     b_bucket = np.array([base_[(d[1].get("asc"), d[1].get("act"), d[1].get("floor"))] for d in decs], np.float32)
     items = [enc.encode(d[0], d[1], d[2], d[4]) for d in decs]
     dev = torch.device(os.environ.get("NETS_DEVICE", "cpu"))
@@ -413,7 +412,7 @@ def rl(args):
     A = torch.tensor([d[3] for d in decs], device=dev)
     LP0 = torch.tensor([d[5] for d in decs], dtype=torch.float32, device=dev)
     ADV = torch.from_numpy(adv).to(dev)
-    R = torch.tensor([ret[d[6]] / 100.0 for d in decs], dtype=torch.float32, device=dev)
+    R = torch.from_numpy(G / 100.0).to(dev)
     T = args.temperature
     lr = args.lr * float(os.environ.get("NETS_LR_SCALE", "1"))
     opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)

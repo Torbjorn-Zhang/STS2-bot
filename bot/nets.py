@@ -105,6 +105,17 @@ def dv_return(o):
     return 100.0 * p
 
 
+def decision_return(o, act):
+    """The return a decision taken in act `act` is credited with. STS2_RETURN=smc: decisions
+    before the act the --mc-k plays start from get the plays' win estimate (they shaped that
+    act-start state); decisions from that act on get the run's own outcome (sm), because the
+    plays did not make them."""
+    if RETURN == "smc" and (act or 1) >= ((o.get("mc") or {}).get("act") or 3):
+        prog = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
+        return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * bool(o.get("victory")))
+    return final_progress(o)
+
+
 def final_progress(o):
     """RL return of a run: floors climbed plus ACT_CLEAR_BONUS per act cleared. Floors
     alone paid almost nothing for beating a boss (dying at the act-2 boss = 33, beating
@@ -115,6 +126,9 @@ def final_progress(o):
         return 100.0 * win_estimate(o)
     if RETURN == "dv":
         return dv_return(o)
+    if RETURN == "smc":   # sm with the win share from the act-3-start plays (run.py --mc-k): same mean, far less noise
+        prog = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
+        return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * win_estimate(o))
     if RETURN == "sm":   # spire-mentor's return: 0.5 x share of the run's floors + 0.5 x won (scaled x100)
         prog = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
         return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * bool(o.get("victory")))
