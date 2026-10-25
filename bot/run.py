@@ -23,6 +23,7 @@ def _key(st):
     return json.dumps(st, sort_keys=True)
 
 
+ROOM_PLANNER = {}   # run.py --room-planner: {room type: {"nodes": N, "rollouts": {...}}} overrides per fight
 MC_BOSS = 0   # run.py --mc-boss K: K extra determinized plays of every boss fight (lower-variance RL return)
 MC_BOSS_ACTS = None   # --mc-boss-acts: replay only these acts' bosses (the record's boss_mc then covers only them)
 # --mc-act A --mc-k K: save at act A's first map node; after the run, play the rest of the run K more
@@ -190,6 +191,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
             if room == "Boss" and MC_BOSS and (MC_BOSS_ACTS is None or act in MC_BOSS_ACTS):
                 mc_boss.append(boss_mc(sim, st, planner, seed, enemy_max))
                 mc_boss_acts.append(act)
+            rp = ROOM_PLANNER.get(room) or {}   # e.g. a deeper search for boss fights only
+            planner.max_nodes, planner.rollouts = rp.get("nodes", max_nodes), rp.get("rollouts", rollouts)
             st = planner.play_combat(st, on_state=watch, on_step=on_step)
             if rec:
                 rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"),
@@ -261,6 +264,9 @@ def main():
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--character", default="Ironclad")
     ap.add_argument("--nodes", type=int, default=400)
+    ap.add_argument("--room-planner", default=None,
+                    help='JSON {room type: {"nodes": N, "rollouts": {"k":..,"m":..,"turns":..}}}: per-room planner budget, '
+                         'e.g. {"Boss": {"nodes": 4000, "rollouts": {"k":12,"m":16,"turns":5}}}')
     ap.add_argument("--tag", default="act1")
     ap.add_argument("--seed-prefix", default="bot")
     ap.add_argument("--seed-start", type=int, default=0, help="run seeds prefix_start .. prefix_(n-1) (split work across machines)")
@@ -406,8 +412,10 @@ def main():
         import nets
         nets.SKIP_BIAS = args.skip_bias
         nets.SKIP_BIAS_MIN_ACT = args.skip_bias_from_act
-    global MC_BOSS, MC_BOSS_ACTS, MC_ACT, MC_K, MC_DIR, STOP_AT_ACT
+    global MC_BOSS, MC_BOSS_ACTS, MC_ACT, MC_K, MC_DIR, STOP_AT_ACT, ROOM_PLANNER
     STOP_AT_ACT = args.stop_at_act
+    if args.room_planner:
+        ROOM_PLANNER = json.loads(args.room_planner)
     if args.mc_boss:
         MC_BOSS = args.mc_boss
     if args.mc_boss_acts:
