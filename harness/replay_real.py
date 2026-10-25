@@ -17,6 +17,7 @@ stops instead of playing on in a different game.
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 import urllib.request
@@ -24,6 +25,7 @@ import urllib.request
 API = "http://localhost:15526/api/v1/singleplayer"
 COMBAT = ("monster", "elite", "boss")
 CKPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "local", "replay_real.ckpt")
+REAL_SAVE = os.path.expanduser("~/Library/Application Support/SlayTheSpire2/default/1/modded/profile1/saves/current_run.save")
 LOG = None
 TRIED = set()   # rewards already claimed once (a claim the game ignores must not loop)
 
@@ -342,6 +344,7 @@ def main():
     ap.add_argument("--seed", default=None, help="embark from character select with this seed first")
     ap.add_argument("--to", type=int, default=None)
     ap.add_argument("--log", default=None)
+    ap.add_argument("--save-dir", default=None, help="copy the real save written on entering each room here")
     args = ap.parse_args()
     LOG = open(args.log, "a") if args.log else None
     steps = [json.loads(l) for l in open(args.states)]
@@ -371,9 +374,17 @@ def main():
         if diffs:
             log("DIFF", json.dumps(diffs, ensure_ascii=False)[:1500])
             sys.exit(f"stopped at step {i}: the real game differs from the engine")
+        before = os.path.getmtime(REAL_SAVE) if os.path.exists(REAL_SAVE) else 0
         res = act(d, S, R, a, kw)
         if res.get("status") == "error":
             sys.exit(f"stopped at step {i}: the real game refused {a}: {res}")
+        if args.save_dir and a == "select_map_node":   # the game saves on entering a room: keep each one
+            for _ in range(40):
+                if os.path.exists(REAL_SAVE) and os.path.getmtime(REAL_SAVE) > before:
+                    time.sleep(0.5)
+                    shutil.copy(REAL_SAVE, os.path.join(args.save_dir, f"step{i}.save"))
+                    break
+                time.sleep(0.5)
         with open(CKPT, "w") as fh:
             fh.write(str(i + 1))
         time.sleep(0.3)

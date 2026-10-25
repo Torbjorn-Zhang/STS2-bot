@@ -1075,7 +1075,9 @@ class Fleet:
     # build missing ones after a code sync (the Linux hosts get theirs copied from lab0)
     # Fix2 (2026-10-20): Ascension 10's Double Boss (the sim used to report victory after the
     # first act-3 boss). A new config name per engine change: running jobs keep their DLL
-    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2")
+    # Fix3 (2026-10-25): shop potion prices roll the Shops rng as in the real game (TestMode
+    # skipped the roll, so every shop after the first was stocked from a shifted rng)
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3")
 
     def ensure_builds(self, h):
         if linux(h):

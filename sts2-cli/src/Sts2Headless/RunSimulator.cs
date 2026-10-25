@@ -3542,6 +3542,7 @@ public class RunSimulator
         PatchPresentationHooks();
         PatchNGameCalls();
         PatchCrystalSphere();
+        PatchShopPotionPrices();
 
         // Initialize localization system (needed for events, cards, etc.)
         InitLocManager();
@@ -3835,6 +3836,36 @@ public class RunSimulator
                 BindingFlags.Static | BindingFlags.NonPublic)));
         }
         catch (Exception ex) { Console.Error.WriteLine($"[WARN] Patching Crystal Sphere: {ex.Message}"); }
+    }
+
+    // Shop potion prices: MerchantPotionEntry.CalcCost rolls its price (x0.95-1.05, one Shops-rng
+    // float per potion) only when TestMode is off, and the headless runs with TestMode on. So the
+    // engine drew 3 fewer Shops-rng values per shop than the real game, and every later shop was
+    // stocked from a shifted rng (a real-game replay of seed full_145 diverged at its second shop).
+    // The postfix makes the game's roll.
+    private static void PatchShopPotionPrices()
+    {
+        try
+        {
+            var harmony = new Harmony("sts2headless.potionprice");
+            var m = typeof(MerchantPotionEntry).GetMethod("CalcCost", BindingFlags.Instance | BindingFlags.Public);
+            if (m == null) { Console.Error.WriteLine("[WARN] MerchantPotionEntry.CalcCost not found"); return; }
+            harmony.Patch(m, postfix: new HarmonyMethod(typeof(RunSimulator).GetMethod(nameof(PotionCostPostfix),
+                BindingFlags.Static | BindingFlags.NonPublic)));
+        }
+        catch (Exception ex) { Console.Error.WriteLine($"[WARN] Patching shop potion prices: {ex.Message}"); }
+    }
+
+    private static readonly FieldInfo? MerchantCostField = typeof(MerchantEntry).GetField("_cost", BindingFlags.Instance | BindingFlags.NonPublic);
+    private static readonly FieldInfo? MerchantPlayerField = typeof(MerchantEntry).GetField("_player", BindingFlags.Instance | BindingFlags.NonPublic);
+
+    private static void PotionCostPostfix(MerchantPotionEntry __instance)
+    {
+        if (TestMode.IsOff || MerchantCostField == null || MerchantPlayerField == null)
+            return;
+        var player = (Player)MerchantPlayerField.GetValue(__instance)!;
+        var cost = (int)MerchantCostField.GetValue(__instance)!;
+        MerchantCostField.SetValue(__instance, (int)Godot.Mathf.Round((float)cost * player.PlayerRng.Shops.NextFloat(0.95f, 1.05f)));
     }
 
     private static bool CrystalSpherePrefix(object __instance, ref Task __result)
