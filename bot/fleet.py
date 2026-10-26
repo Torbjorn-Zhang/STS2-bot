@@ -703,7 +703,11 @@ class XDeckRL:
                 new.update({k: f"models/{self.name}_{k}{it}.pt" for k in j["result"]["models"]})
                 log(f"{self.name}: iteration {it} trained on {j['host']} ({j['result'].get('device')}, "
                     f"{j['result']['timing'].get('total')} s)")
-                self.start_eval(fl, it, new, st["sp"][str(it)].get("summary"))
+                # eval_every: the A10 benchmark costs about as much as an iteration's self-play, and
+                # one iteration's change is far below its noise, so it can run every few iterations
+                last = it + 1 >= sp["start"] + sp["iters"]
+                if it % sp.get("eval_every", 1) == 0 or last:
+                    self.start_eval(fl, it, new, st["sp"][str(it)].get("summary"))
                 fl.cleanup(f"fleetdata/{self.name}_it{it}_c*.jsonl", keep=f"data/xdarchive/{self.name}_it{it}")
                 st["cur"] = new
                 if it + 1 < sp["start"] + sp["iters"]:

@@ -494,11 +494,12 @@ def main():
     ap.add_argument("--beta", type=float, default=1.0)
     ap.add_argument("--wmax", type=float, default=20.0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--threads", type=int, default=None, help="torch CPU threads (default: NETS_THREADS or 2)")
     args = ap.parse_args()
     os.environ.setdefault("STS2_RETURN", "sm")
     import nets
     nets.RETURN = os.environ["STS2_RETURN"]
-    torch.set_num_threads(int(os.environ.get("NETS_THREADS", "2")))
+    torch.set_num_threads(args.threads or int(os.environ.get("NETS_THREADS", "2")))
     if args.cmd == "rl":
         args.epochs, args.lr = args.epochs or 3, args.lr or 1e-4
         rl(args)

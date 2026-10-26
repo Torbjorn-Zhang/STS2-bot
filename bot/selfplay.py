@@ -260,7 +260,11 @@ def main():
     ap.add_argument("--seed-start", type=int, default=0, help="first seed index (runs split across machines)")
     ap.add_argument("--no-combat-records", action="store_true", help="skip combat-step records (deck RL needs none)")
     ap.add_argument("--no-record", action="store_true", help="record nothing (evaluation)")
+    ap.add_argument("--engine-config", default=None, help="engine build (Fix6 ...), as run.py")
     args = ap.parse_args()
+    if args.engine_config:
+        import engine
+        engine.ENGINE_CONFIG = args.engine_config
     import random
     import torch
     torch.set_num_threads(1)
