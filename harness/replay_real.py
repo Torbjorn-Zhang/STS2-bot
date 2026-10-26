@@ -349,6 +349,8 @@ def main():
     ap.add_argument("--to", type=int, default=None)
     ap.add_argument("--log", default=None)
     ap.add_argument("--save-dir", default=None, help="copy the real save written on entering each room here")
+    ap.add_argument("--timeline", default=None, help="JSON lines: the game's frame number when each step is played "
+                                                     "(with --write-movie, frame / fps is the time in the recording)")
     args = ap.parse_args()
     LOG = open(args.log, "a") if args.log else None
     steps = [json.loads(l) for l in open(args.states)]
@@ -379,6 +381,10 @@ def main():
             log("DIFF", json.dumps(diffs, ensure_ascii=False)[:1500])
             sys.exit(f"stopped at step {i}: the real game differs from the engine")
         before = os.path.getmtime(REAL_SAVE) if os.path.exists(REAL_SAVE) else 0
+        if args.timeline:
+            with open(args.timeline, "a") as fh:
+                fh.write(json.dumps({"i": i, "frame": R.get("frame"), "wall": round(time.time(), 2), "decision": d,
+                                     "action": [a, kw], "state_type": R.get("state_type")}) + "\n")
         res = act(d, S, R, a, kw)
         if res.get("status") == "error":
             sys.exit(f"stopped at step {i}: the real game refused {a}: {res}")
