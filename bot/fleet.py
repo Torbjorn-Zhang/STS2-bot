@@ -1081,7 +1081,9 @@ class Fleet:
     # results (restore -35..45%; same states, runs identical to Fix3)
     # Fix5: a restore rebuilds its checkpoint without re-validating its save or re-parsing its
     # map flags (restore ~-20%; same states as Fix4)
-    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5")
+    # Fix6: no extra heal between acts (the act's Ancient event already heals missing HP x0.8;
+    # the engine healed twice, ~5 extra HP at acts 2 and 3). Found by the real-game replay
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6")
 
     def ensure_builds(self, h):
         if linux(h):

@@ -2107,6 +2107,7 @@ public class RunSimulator
     /// future engine path that does fire the callback.
     /// Adapted from PR #83 commit cf75bec by @tianyumyum.
     /// </summary>
+    // Unused since Fix6 (the game heals at the act's Ancient event); kept for reference.
     private void HealBetweenActs()
     {
         if (_runState == null) return;
@@ -2151,7 +2152,8 @@ public class RunSimulator
                 }
                 RunManager.Instance.EnterNextAct().GetAwaiter().GetResult();
                 WaitForActionExecutor();
-                HealBetweenActs();
+                // no heal here: each act opens with an Ancient event, whose BeforeEventStarted heals
+                // (missing HP, x0.8 from Ascension 2); healing here too gave ~5 extra HP per act (Fix6)
                 return DetectDecisionPoint();
             }
         }
@@ -2843,7 +2845,8 @@ public class RunSimulator
                 RunManager.Instance.EnterNextAct().GetAwaiter().GetResult();
                 _syncCtx.Pump();
                 WaitForActionExecutor();
-                HealBetweenActs();
+                // no heal here: each act opens with an Ancient event, whose BeforeEventStarted heals
+                // (missing HP, x0.8 from Ascension 2); healing here too gave ~5 extra HP per act (Fix6)
             }
             catch (Exception ex) { Log($"EnterNextAct: {ex.Message}"); }
             return DetectDecisionPoint();
