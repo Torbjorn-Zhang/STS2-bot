@@ -137,6 +137,8 @@ def claim_rewards(d, R):
     for it in items:
         if it.get("type") == "potion" and belt_full:
             continue   # the engine leaves a potion it has no slot for (the mod still answers "ok")
+        if it.get("type") == "special_card":
+            continue   # the engine never takes a special card reward (e.g. a card a Thieving Hopper stole)
         key = (R.get("run") or {}).get("floor"), it.get("type"), it.get("description")
         if it.get("type") in ("gold", "relic", "potion") and key not in TRIED:
             TRIED.add(key)
@@ -148,7 +150,7 @@ def claim_rewards(d, R):
                 raise RuntimeError(f"could not claim {it}")
     # nothing else to take: the card reward when the engine offers one, else leave
     if d == "card_reward":
-        card = next((it for it in items if it.get("type") in ("card", "special_card")), None)
+        card = next((it for it in items if it.get("type") == "card"), None)
         if card is None:
             raise RuntimeError("engine offers a card reward, real rewards have none")
         post("claim_reward", index=card["index"])
@@ -199,7 +201,9 @@ def reach(d, S, R, limit=25):
 def compare(d, S, R):
     diffs = []
     sp, rp = S.get("player") or {}, R.get("player") or {}
-    for k in ("hp", "max_hp", "gold"):
+    # gold: the engine credits some combat gold (a stolen-gold return) after the card reward,
+    # the game before it; the totals agree once the rewards are left, so it is not compared there
+    for k in ("hp", "max_hp") + (() if d == "card_reward" else ("gold",)):
         if sp.get(k) is not None and rp.get(k) is not None and sp.get(k) != rp.get(k):
             diffs.append((k, sp.get(k), rp.get(k)))
     if d == "combat_play":   # card ids only: the engine's hand cards carry no upgrade flag

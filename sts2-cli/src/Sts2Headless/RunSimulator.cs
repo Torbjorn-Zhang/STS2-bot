@@ -2791,8 +2791,10 @@ public class RunSimulator
                 var cardRewards = new List<CardReward>();
                 foreach (var reward in rewards)
                 {
+                    // SpecialCardReward: a card the fight took (a Thieving Hopper's steal) comes back
+                    // (Fix7; before, the engine left it and the card was lost for the run)
                     if (reward is GoldReward || reward is MegaCrit.Sts2.Core.Rewards.RelicReward
-                        || reward is MegaCrit.Sts2.Core.Rewards.PotionReward)
+                        || reward is MegaCrit.Sts2.Core.Rewards.PotionReward || reward is SpecialCardReward)
                     {
                         try { reward.SelectUnsynchronized().GetAwaiter().GetResult(); _syncCtx.Pump(); }
                         catch (Exception ex) { Log($"Auto-collect reward: {ex.Message}"); }
