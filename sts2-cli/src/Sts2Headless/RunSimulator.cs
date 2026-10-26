@@ -752,24 +752,36 @@ public class RunSimulator
         {
             var map = _runState?.Map;
             if (map == null) return;
-            using var doc = System.Text.Json.JsonDocument.Parse(saveJson);
-            var savedMap = doc.RootElement.GetProperty("acts")[actIndex].GetProperty("saved_map");
+            // a restore rebuilds the same checkpoint many times: parse its flags once
+            var flags = _rebuilding?.MapFlags ?? ParseMapPointFlags(saveJson, actIndex);
+            if (_rebuilding != null) _rebuilding.MapFlags = flags;
             int restored = 0;
-            void Apply(System.Text.Json.JsonElement p)
+            foreach (var (coord, canModify) in flags)
             {
-                var c = p.GetProperty("coord");
-                var coord = new MapCoord((byte)c.GetProperty("col").GetInt32(), (byte)c.GetProperty("row").GetInt32());
-                if (!map.HasPoint(coord)) return;
-                var canModify = p.TryGetProperty("can_modify", out var cm) && cm.ValueKind == System.Text.Json.JsonValueKind.True;
+                if (!map.HasPoint(coord)) continue;
                 var point = map.GetPoint(coord);
                 if (point.CanBeModified != canModify) { point.CanBeModified = canModify; restored++; }
             }
-            foreach (var p in savedMap.GetProperty("points").EnumerateArray()) Apply(p);
-            foreach (var key in new[] { "start", "boss" })
-                if (savedMap.TryGetProperty(key, out var single) && single.ValueKind == System.Text.Json.JsonValueKind.Object) Apply(single);
             Log($"Restored can_modify on {restored} map points");
         }
         catch (Exception ex) { Log($"RestoreMapPointFlags: {ex.Message}"); }
+    }
+
+    private static List<(MapCoord coord, bool canModify)> ParseMapPointFlags(string saveJson, int actIndex)
+    {
+        var flags = new List<(MapCoord, bool)>();
+        using var doc = System.Text.Json.JsonDocument.Parse(saveJson);
+        var savedMap = doc.RootElement.GetProperty("acts")[actIndex].GetProperty("saved_map");
+        void Add(System.Text.Json.JsonElement p)
+        {
+            var c = p.GetProperty("coord");
+            flags.Add((new MapCoord((byte)c.GetProperty("col").GetInt32(), (byte)c.GetProperty("row").GetInt32()),
+                       p.TryGetProperty("can_modify", out var cm) && cm.ValueKind == System.Text.Json.JsonValueKind.True));
+        }
+        foreach (var p in savedMap.GetProperty("points").EnumerateArray()) Add(p);
+        foreach (var key in new[] { "start", "boss" })
+            if (savedMap.TryGetProperty(key, out var single) && single.ValueKind == System.Text.Json.JsonValueKind.Object) Add(single);
+        return flags;
     }
 
     public Dictionary<string, object?> LoadSave(string saveJson, string lang = "en")
@@ -783,7 +795,7 @@ public class RunSimulator
 
             Log("Loading save file...");
 
-            if (!ValidateSaveSchemaVersion(saveJson, out var schemaError))
+            if (_rebuilding == null && !ValidateSaveSchemaVersion(saveJson, out var schemaError))
                 return Error($"Save schema mismatch: {schemaError}");
 
             var readResult = SaveManager.FromJson<SerializableRun>(saveJson);
@@ -4617,7 +4629,10 @@ public class RunSimulator
         public string? CommandJson;     // start: the start_run command
         public string? SaveJson;        // load / node: SerializableRun JSON
         public MapCoord Coord;          // node: the coordinate entered
+        public List<(MapCoord coord, bool canModify)>? MapFlags;   // RestoreMapPointFlags, parsed once
     }
+
+    private Checkpoint? _rebuilding;   // the checkpoint a restore is rebuilding (its save is our own: valid)
 
     private const int MaxCheckpoints = 512;
     private const int MaxSnapshots = 8192;
@@ -4713,6 +4728,7 @@ public class RunSimulator
 
         _replaying = true;
         _replayQuiet = snap.commands.Count > 0;   // only the last result is returned
+        _rebuilding = cp;
         try
         {
             Dictionary<string, object?>? result;
@@ -4756,6 +4772,7 @@ public class RunSimulator
         {
             _replaying = false;
             _replayQuiet = false;
+            _rebuilding = null;
         }
     }
 

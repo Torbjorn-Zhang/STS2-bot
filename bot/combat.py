@@ -667,12 +667,25 @@ class TurnPlanner:
             if st.get("decision") == "combat_play":
                 leaves.append(("end", path + [("end_turn", {})], st, snap_id, ("end_turn", {})))
             moved = False   # the engine is at st on entry (just reached, or the root): the first child needs no restore
+            # two copies of the same card (same exported fields, same target) lead to the same
+            # state, which the `seen` check would discard after playing it: skip the copy
+            # unplayed (it still counts as a node, so the search is the same, only cheaper)
+            hand = {c.get("index"): c for c in st.get("hand") or []}
+            tried = set()
             for a in legal_actions(st) + potion_actions(st):
                 if a[0] == "end_turn":
                     continue
                 if nodes >= self.max_nodes:
                     self.stats["node_cap"] += 1
                     return
+                if a[0] == "play_card":
+                    card = hand.get(a[1].get("card_index"))
+                    k = json.dumps([{f: v for f, v in (card or {}).items() if f != "index"}, a[1].get("target_index")], sort_keys=True)
+                    if card is not None and k in tried:
+                        self.stats["same_card"] += 1
+                        nodes += 1
+                        continue
+                    tried.add(k)
                 if moved:
                     self._restore(snap_id)
                 s2 = self.sim.act(a[0], **a[1])

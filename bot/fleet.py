@@ -1079,7 +1079,9 @@ class Fleet:
     # skipped the roll, so every shop after the first was stocked from a shifted rng)
     # Fix4 (2026-10-26): restore replays build no combat state for the discarded intermediate
     # results (restore -35..45%; same states, runs identical to Fix3)
-    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4")
+    # Fix5: a restore rebuilds its checkpoint without re-validating its save or re-parsing its
+    # map flags (restore ~-20%; same states as Fix4)
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5")
 
     def ensure_builds(self, h):
         if linux(h):
