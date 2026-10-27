@@ -46,9 +46,11 @@ def act_state(st):
             "potions": [pot_tok(x) for x in p.get("potions") or [] if x], "boss": (ctx.get("boss") or {}).get("id")}
 
 
-def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None):
+def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg=None):
     """Play on from st with the bot (as play_run, without records) until the run ends.
-    decknets: the deck networks the run itself played with (else the --deck-nets rules)."""
+    decknets: the deck networks the run itself played with (else the --deck-nets rules).
+    boss_dmg: optional dict, gets {act: sum over that act's boss fights of the boss-HP share
+    removed (a win = 1)}, as play_run's boss_dmg."""
     dead_ends, memo, steps = {}, {}, 0
     while steps < max_steps:
         d = st.get("decision")
@@ -56,7 +58,18 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None):
         if d == "game_over" or (ctx.get("act") or 1) > acts or st.get("type") == "error":
             break
         if d == "combat_play" or (d == "card_select" and ctx.get("room_type") in ("Monster", "Elite", "Boss")):
-            st = planner.play_combat(st)
+            boss = boss_dmg is not None and ctx.get("room_type") == "Boss"
+            emax = sum((e.get("max_hp") or 0) for e in st.get("enemies") or [])
+            last = {}
+            def watch(s):
+                if s.get("enemies") is not None:
+                    last["hp"] = [e.get("hp") for e in s["enemies"]]
+            st = planner.play_combat(st, on_state=watch if boss else None)
+            if boss:
+                won = st.get("decision") not in ("game_over", "combat_play") or bool(st.get("victory"))
+                left = sum(h or 0 for h in last.get("hp") or [])
+                a = ctx.get("act") or 1
+                boss_dmg[a] = boss_dmg.get(a, 0.0) + (1.0 if won else max(0.0, 1 - left / max(1, emax)))
             if st.get("decision") == "combat_play":
                 break   # the planner's action cap: counts as a loss
             continue
@@ -80,7 +93,7 @@ def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None,
     policy being trained. Returns (sim, {"win": [...], "prog": [...], ...}); the engine may
     be recycled or replaced."""
     import zlib
-    out = {"act": MC_ACT, "k": MC_K, "win": [], "prog": [], "secs": [], "err": 0}
+    out = {"act": MC_ACT, "k": MC_K, "win": [], "prog": [], "bdmg": [], "secs": [], "err": 0}
     for j in range(MC_K):
         sim = maybe_recycle(sim)
         t0 = time.perf_counter()
@@ -92,7 +105,8 @@ def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None,
             planner = TurnPlanner(sim, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
             if decknets is not None:
                 decknets.rng, decknets.visits = random.Random(f"{seed}/mc{MC_ACT}/{j}"), {}
-            end = continue_run(sim, st, planner, acts, decknets=decknets)
+            bd = {}
+            end = continue_run(sim, st, planner, acts, decknets=decknets, boss_dmg=bd)
         except Exception as e:
             out["err"] += 1
             out.setdefault("errors", []).append(f"{type(e).__name__}: {e}"[:200])
@@ -106,6 +120,7 @@ def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None,
         win = bool(end.get("victory"))
         out["win"].append(int(win))
         out["prog"].append(53 if win else ((ctx.get("act") or 1) - 1) * 17 + (ctx.get("floor") or 0))
+        out["bdmg"].append(round(sum(v for a, v in bd.items() if a >= MC_ACT), 3))   # this act's bosses on (a win = 1 each)
         out["secs"].append(round(time.perf_counter() - t0, 1))
     return sim, out
 

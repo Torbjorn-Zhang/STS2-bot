@@ -69,6 +69,24 @@ WIN_BONUS = float(os.environ.get("STS2_WIN_BONUS", "0"))                # ... fo
 
 
 RETURN = os.environ.get("STS2_RETURN", "progress")   # "win": 100 x the run's win-chance estimate
+# STS2_RETURN=smcb: smc plus BOSS3_BONUS per act-3 boss's HP share removed (a win = 1 each, so
+# 0..2 at Ascension 10's double boss): at A10 almost no run wins, so smc is nearly floors only and
+# says nothing about how close the deck came in act 3, where runs end
+BOSS3_BONUS = float(os.environ.get("STS2_BOSS3_BONUS", "10"))
+
+
+def boss3_real(o):
+    """The act-3 boss-HP shares of the run itself: play_run's boss_dmg counts the act-1 and act-2
+    boss wins as 1 each (a run in act 3 beat both)."""
+    if o.get("victory"):
+        return 2.0
+    return max(0.0, (o.get("boss_dmg") or 0.0) - 2.0) if (o.get("act") or 1) >= 3 else 0.0
+
+
+def boss3_estimate(o):
+    """Act-3 boss shares averaged over the run and its run.py --mc-k plays from act 3's start."""
+    b = (o.get("mc") or {}).get("bdmg") or []
+    return (boss3_real(o) + sum(b)) / (1 + len(b))
 
 
 def win_estimate(o):
@@ -110,9 +128,10 @@ def decision_return(o, act):
     before the act the --mc-k plays start from get the plays' win estimate (they shaped that
     act-start state); decisions from that act on get the run's own outcome (sm), because the
     plays did not make them."""
-    if RETURN == "smc" and (act or 1) >= ((o.get("mc") or {}).get("act") or 3):
+    if RETURN in ("smc", "smcb") and (act or 1) >= ((o.get("mc") or {}).get("act") or 3):
         prog = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
-        return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * bool(o.get("victory")))
+        return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * bool(o.get("victory"))) + \
+            (BOSS3_BONUS * boss3_real(o) if RETURN == "smcb" else 0.0)
     return final_progress(o)
 
 
@@ -126,9 +145,10 @@ def final_progress(o):
         return 100.0 * win_estimate(o)
     if RETURN == "dv":
         return dv_return(o)
-    if RETURN == "smc":   # sm with the win share from the act-3-start plays (run.py --mc-k): same mean, far less noise
+    if RETURN in ("smc", "smcb"):   # sm with the win share from the act-3-start plays (run.py --mc-k): same mean, far less noise
         prog = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
-        return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * win_estimate(o))
+        return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * win_estimate(o)) + \
+            (BOSS3_BONUS * boss3_estimate(o) if RETURN == "smcb" else 0.0)
     if RETURN == "sm":   # spire-mentor's return: 0.5 x share of the run's floors + 0.5 x won (scaled x100)
         prog = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
         return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * bool(o.get("victory")))
