@@ -1052,6 +1052,11 @@ class Fleet:
             self.hosts[name] = {**h, "name": name, "state": "unknown", "fails": 0, "files": {}, "drain": None,
                                 "gpu_busy": 0, "gpu_quiet_since": None, "gpu_yield": False,
                                 "clean": []}
+        # pods mount one shared file system: two of them on one root run a requeued job (or a
+        # backup copy) twice in one directory, and each copy's start deletes the other's outputs
+        roots = [h["root"].rstrip("/") for h in self.hosts.values() if h.get("runai")]
+        if len(roots) != len(set(roots)):
+            raise SystemExit(f"{CONFIG}: runai hosts must have distinct roots ({roots})")
         self.jobs, self.pipes, self.seq, self.until_done = {}, [], 0, False
         if os.path.exists(STATE):
             with open(STATE) as fh:
@@ -1059,7 +1064,9 @@ class Fleet:
             self.jobs, self.seq = s["jobs"], s["seq"]
             for name, h in s["hosts"].items():
                 if name in self.hosts:
-                    for k in ("files", "drain", "clean", "state", "gpu_quiet_since", "gpu_yield"):
+                    moved = h.get("root", self.hosts[name]["root"]) != self.hosts[name]["root"]
+                    for k in ("drain", "state", "gpu_quiet_since", "gpu_yield") if moved else \
+                            ("files", "drain", "clean", "state", "gpu_quiet_since", "gpu_yield"):   # a new root has none of the old files
                         self.hosts[name][k] = h.get(k, self.hosts[name][k])
             self.pipes = [PIPES[p["type"]](p["spec"], p["st"]) for p in s["pipes"]]
             for j in self.jobs.values():

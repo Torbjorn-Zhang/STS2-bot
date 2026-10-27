@@ -120,7 +120,7 @@
   "apollo2": {
    "ssh": "apollo",
    "os": "linux",
-   "root": "/scratch/xkzhang/slzhang_cvpr27/sts2",
+   "root": "/scratch/xkzhang/slzhang_cvpr27/pod2/sts2",
    "slots": 28,
    "workers": 2,
    "gpu": false,
