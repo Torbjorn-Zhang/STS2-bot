@@ -1227,7 +1227,11 @@ class Fleet:
     # map flags (restore ~-20%; same states as Fix4)
     # Fix6: no extra heal between acts (the act's Ancient event already heals missing HP x0.8;
     # the engine healed twice, ~5 extra HP at acts 2 and 3). Found by the real-game replay
-    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6")
+    # Fix7 (never built alone): a fight's SpecialCardReward is collected (a Thieving Hopper's
+    # stolen card comes back; its +15 gold in the full_65 replay is Lucky Fysh, as in the game)
+    # Fix8 = Fix7 + the pump loops around thread-pool work (event options) wait on the task, not
+    # a fixed 10 ms (engine time -7..9%; same runs as Fix6 apart from Fix7)
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8")
 
     def ensure_builds(self, h):
         if linux(h):

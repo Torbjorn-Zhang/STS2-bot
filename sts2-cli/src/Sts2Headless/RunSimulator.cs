@@ -1689,7 +1689,7 @@ public class RunSimulator
                 if (_cardSelector.HasPending || _cardSelector.HasPendingReward) break;
                 if (_pendingBundles != null) break;
                 if (task.IsCompleted) break;
-                Thread.Sleep(10);
+                NapOn(task);
             }
             if (_cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null)
             {
@@ -1756,7 +1756,7 @@ public class RunSimulator
                 _syncCtx.Pump();
                 if (_cardSelector.HasPending) break;
                 if (task.IsCompleted) break;
-                Thread.Sleep(10);
+                NapOn(task);
             }
             if (_cardSelector.HasPending)
             {
@@ -1972,7 +1972,7 @@ public class RunSimulator
                     _syncCtx.Pump();
                     if (_cardSelector.HasPending) break;
                     if (task.IsCompleted) break;
-                    Thread.Sleep(10);
+                    NapOn(task);
                 }
                 if (_cardSelector.HasPending)
                 {
@@ -2048,7 +2048,7 @@ public class RunSimulator
                             if (_cardSelector.HasPending || _cardSelector.HasPendingReward) break;
                             if (_pendingBundles != null) break;
                             if (task.IsCompleted) break;
-                            Thread.Sleep(10);
+                            NapOn(task);
                         }
                         if (_cardSelector.HasPending || _cardSelector.HasPendingReward || _pendingBundles != null)
                         {
@@ -3357,6 +3357,12 @@ public class RunSimulator
             Log($"WaitForActionExecutor exception: {ex.Message}");
         }
     }
+
+    // The pump loops around thread-pool work wait here between checks: return as soon as the
+    // task is done (a fixed 10 ms sleep made every event option cost >= 10 ms, in replays too;
+    // Fix8, -7..9% engine time). Same 10 ms cap per check, so a task that waits on a prompt is
+    // handled as before.
+    private static void NapOn(Task task) => ((IAsyncResult)task).AsyncWaitHandle.WaitOne(10);
 
     private void SpinWaitForCombatStable()
     {
