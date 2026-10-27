@@ -44,6 +44,9 @@ STATE = os.path.join(FLEET, "state.json")
 CONFIG = os.path.join(REPO, "deploy", "fleet.json")
 POLL = 10            # seconds between polls
 DOWN_AFTER = 3       # failed polls before a host counts as gone
+# a host that stops answering usually comes back within minutes (this Mac's Wi-Fi, ssh hiccups)
+# with our jobs still running: they move to other hosts only after DOWN_GRACE seconds away
+DOWN_GRACE = 1200
 GPU_BUSY = 40        # % GPU utilisation by other programs that makes a yield_gpu host yield
 YIELD_QUIET = 600    # seconds of a quiet GPU before such a host gets work again
 MAX_TRIES = 4
@@ -751,7 +754,7 @@ class Task:
         sp, st = self.spec, self.st
         if st["phase"] == "start":
             st["job"] = fl.add_job(self.name, f"{self.name}_task", "task", sp.get("prio", 0.5), sp["argv"],
-                                   sp.get("inputs", []), sp.get("outputs", []), gpu=sp.get("gpu", False))
+                                   sp.get("inputs", []), sp.get("outputs", []), gpu=sp.get("gpu", False), only=sp.get("only"))
             st["phase"] = "running"
         elif st["phase"] == "running" and fl.jobs[st["job"]]["state"] in ("done", "failed"):
             j = fl.jobs[st["job"]]
@@ -968,11 +971,11 @@ class Fleet:
             json.dump(s, fh)
         os.replace(tmp, STATE)
 
-    def add_job(self, pipe, jid, kind, prio, argv, inputs, outputs, gpu=False):
+    def add_job(self, pipe, jid, kind, prio, argv, inputs, outputs, gpu=False, only=None):
         self.seq += 1
         self.jobs[jid] = {"id": jid, "pipe": pipe, "kind": kind, "prio": prio, "seq": self.seq, "argv": argv,
                           "inputs": inputs, "outputs": outputs, "gpu": gpu, "state": "queued", "tries": 0,
-                          "host": None, "result": None}
+                          "host": None, "result": None, **({"only": only} if only else {})}
         return jid
 
     def cleanup(self, pattern, keep=None):
@@ -1162,15 +1165,19 @@ class Fleet:
             h["fails"] += 1
             if h["state"] != "down" and h["fails"] >= DOWN_AFTER:
                 log(f"{h['name']}: not answering ({r['error'][:80]}); marked down")
-                h["state"] = "down"
+                h["state"], h["down_since"], h["moved"] = "down", time.time(), False
+            if h["state"] == "down" and not h.get("moved", True) and time.time() - h.get("down_since", 0) >= DOWN_GRACE:
                 self.requeue(h, f"{h['name']} down")
+                h["moved"] = True
             return
         h["fails"] = 0
         if h["state"] != "up":
             log(f"{h['name']}: up")
-            if h["state"] == "down":
+            if h["state"] == "down" and h.get("moved", True):
                 self.kill(h)          # leftovers of jobs that were moved elsewhere
                 self.requeue(h, "rejoin")
+            elif h["state"] == "down":
+                log(f"{h['name']}: back after {time.time() - h.get('down_since', time.time()):.0f} s; its jobs went on")
             if os.path.exists(os.path.join(FLEET, "drain", h["name"])):
                 # drained (the owner is using the machine): no sync or build now, undrain does it
                 log(f"{h['name']}: up (drained: no code sync or build until undrain)")
@@ -1329,6 +1336,8 @@ class Fleet:
         return cap - len(self.running_on(h))
 
     def pick(self, job, hosts):
+        if job.get("only"):   # e.g. a task whose data lives on one machine
+            hosts = [h for h in hosts if h["name"] == job["only"]]
         if job["gpu"]:
             gpu = [h for h in hosts if h.get("gpu") and self.free_slots(h) > 0
                    and not any(j.get("gpu_now") for j in self.running_on(h))]
@@ -1363,7 +1372,7 @@ class Fleet:
             if free <= 0:
                 continue
             cand = sorted([j for j in self.jobs.values() if j["state"] == "running" and j["host"] != h["name"]
-                           and not j.get("backup") and j["kind"] != "train" and not j.get("gpu_now")
+                           and not j.get("backup") and j["kind"] != "train" and not j.get("gpu_now") and not j.get("only")
                            and time.time() - j.get("t_start", time.time()) > BACKUP_AFTER],
                           key=lambda j: j.get("t_start", 0))[:free]
             if cand:
@@ -1594,6 +1603,7 @@ def main():
     ap.add_argument("--inputs", default=None, help='task: JSON list of bot/-relative files to push')
     ap.add_argument("--outputs", default=None, help='task: JSON list of bot/-relative files to fetch')
     ap.add_argument("--gpu", action="store_true", help="task: run on a GPU machine with CUDA")
+    ap.add_argument("--only", default=None, help="task: run on this host only (its data is there)")
     ap.add_argument("--reward", default=None, help='xdeckrl: JSON env overrides of the RL return (fleetjob.py --reward)')
     ap.add_argument("--set", default=None, help='set: JSON {spec key: value} for the live pipeline --tag')
     args = ap.parse_args()
@@ -1664,7 +1674,7 @@ def main():
         submit("xdeckrl", spec)
     elif args.cmd == "task":
         submit("task", {"tag": args.tag, "argv": json.loads(args.argv), "inputs": json.loads(args.inputs or "[]"),
-                        "outputs": json.loads(args.outputs or "[]"), "gpu": args.gpu,
+                        "outputs": json.loads(args.outputs or "[]"), "gpu": args.gpu, "only": args.only,
                         "prio": 0.5 if args.prio is None else args.prio})
     elif args.cmd == "cancel":
         submit("cancel", {"tag": args.tag})
