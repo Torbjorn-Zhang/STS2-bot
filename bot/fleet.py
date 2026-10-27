@@ -74,9 +74,19 @@ def ps(host, script, timeout=60):
     return res.stdout
 
 
+RUNAI = os.path.expanduser("~/.runai/bin/runai")
+# a Run:AI pod has no passwd entry for our uid, and ssh (rsync to the relay) needs one
+POD_PRE = 'getent passwd "$(id -u)" >/dev/null || echo "slzhang:x:$(id -u):$(id -g)::/tmp:/bin/bash" >> /etc/passwd 2>/dev/null; '
+POD_ARG_MAX = 6000   # Apollo's API rejects exec command lines of ~16 kB ("Request Header Fields Too Large")
+
+
 def remote_argv(host, cmd):
     """ssh argv running `cmd` on the host. Hosts with "via" (lab2/lab3: this Mac's key is not
-    authorised there) are reached by running ssh on the jump host with its own key."""
+    authorised there) are reached by running ssh on the jump host with its own key. "runai"
+    hosts (a CPU pod on Apollo) take no stdin: their files go through the relay (below)."""
+    if host.get("runai"):
+        r = host["runai"]
+        return [RUNAI, "training", "exec", r["workload"], "-p", r["project"], "--", "bash", "-c", POD_PRE + cmd]
     if host.get("via"):
         inner = (f"ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=10 -p {host.get('port', 22)} "
                  f"{host['target']} {shlex.quote(cmd)}")
@@ -84,17 +94,14 @@ def remote_argv(host, cmd):
     return SSH + [host["ssh"], cmd]
 
 
-def sftp_via(host, lines, timeout=900):
-    """The sftp batch subset the fleet uses (put / get / -mkdir with quoted absolute remote
-    paths) as tar streams through the jump host."""
-    import io
+def parse_batch(lines):
+    """The sftp batch subset the fleet uses: put / get / -mkdir with quoted absolute remote paths."""
     import re
-    import tarfile
     puts, gets, dirs = [], [], []
     for line in lines:
         m = re.fullmatch(r'-?(put|get|mkdir) "([^"]*)"(?: "([^"]*)")?', line.strip())
         if not m:
-            raise RuntimeError(f"sftp_via: cannot parse {line!r}")
+            raise RuntimeError(f"sftp batch: cannot parse {line!r}")
         op, a, b = m.groups()
         if op == "put":
             puts.append((a, b))
@@ -102,35 +109,133 @@ def sftp_via(host, lines, timeout=900):
             gets.append((a, b))
         else:
             dirs.append(a)
+    return puts, gets, dirs
+
+
+def puts_tar(puts):
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for loc, rem in puts:
+            tf.add(loc, arcname=rem.lstrip("/"), recursive=False)
+    return buf.getvalue()
+
+
+def untar_gets(data, want):
+    """Write the members of tar `data` named in want {remote path without "/": local path}; returns the count."""
+    import io
+    import tarfile
+    got = 0
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r") as tf:
+        for mem in tf.getmembers():
+            if mem.isfile() and mem.name in want:
+                os.makedirs(os.path.dirname(want[mem.name]) or ".", exist_ok=True)
+                with open(want[mem.name], "wb") as out:
+                    out.write(tf.extractfile(mem).read())
+                got += 1
+    return got
+
+
+def mkdirs_cmd(dirs):
+    return f"mkdir -p {' '.join(shlex.quote(d) for d in dirs)} && " if dirs else ""
+
+
+def sftp_via(host, lines, timeout=900):
+    """sftp batch lines as tar streams through the jump host."""
+    puts, gets, dirs = parse_batch(lines)
     if puts or dirs:
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w") as tf:
-            for loc, rem in puts:
-                tf.add(loc, arcname=rem.lstrip("/"), recursive=False)
-        cmd = (f"mkdir -p {' '.join(shlex.quote(d) for d in dirs)} && " if dirs else "") + "tar -xf - -C /"
-        res = subprocess.run(remote_argv(host, cmd), input=buf.getvalue(), capture_output=True, timeout=timeout)
+        res = subprocess.run(remote_argv(host, mkdirs_cmd(dirs) + "tar -xf - -C /"), input=puts_tar(puts),
+                             capture_output=True, timeout=timeout)
         if res.returncode != 0:
             raise RuntimeError(f"put via rc {res.returncode}: {res.stderr.decode(errors='replace')[-300:]}")
     if gets:
         want = {rem.lstrip("/"): loc for rem, loc in gets}
-        cmd = "tar -cf - -C / " + " ".join(shlex.quote(r) for r in want)
-        res = subprocess.run(remote_argv(host, cmd), capture_output=True, timeout=timeout)
-        got = 0
-        with tarfile.open(fileobj=io.BytesIO(res.stdout), mode="r") as tf:
-            for mem in tf.getmembers():
-                if mem.isfile() and mem.name in want:
-                    os.makedirs(os.path.dirname(want[mem.name]) or ".", exist_ok=True)
-                    with open(want[mem.name], "wb") as out:
-                        out.write(tf.extractfile(mem).read())
-                    got += 1
+        res = subprocess.run(remote_argv(host, "tar -cf - -C / " + " ".join(shlex.quote(r) for r in want)),
+                             capture_output=True, timeout=timeout)
+        got = untar_gets(res.stdout, want)
         if res.returncode != 0 or got < len(want):
             raise RuntimeError(f"get via rc {res.returncode}, {got}/{len(want)} files: "
                                f"{res.stderr.decode(errors='replace')[-300:]}")
 
 
+# ---- the relay: a directory on lab0 that the Apollo pod reaches with rsync (a key that may only
+# rrsync into it, from Apollo's subnet); this Mac reaches it over plain ssh
+
+_relay_n = [0]
+
+
+def relay_name(kind):
+    _relay_n[0] += 1
+    return f"{kind}_{os.getpid()}_{int(time.time() * 1000)}_{_relay_n[0]}.tar"
+
+
+def relay_rsync_e(host):
+    rl = host["relay"]
+    return shlex.quote(f"ssh -p {rl['port']} -i {rl['key']} -o UserKnownHostsFile={rl['known_hosts']} "
+                       f"-o StrictHostKeyChecking=yes -o BatchMode=yes")
+
+
+def relay_rsync(host, src, dst):
+    """Pod shell: rsync between the pod and the relay (prefix a relay path with "@"), retried:
+    lab0's sshd drops new connections now and then under the fleet's load."""
+    rl = host["relay"]
+    src, dst = (f"{rl['target']}:{rl['rel']}/{p[1:]}" if p.startswith("@") else p for p in (src, dst))
+    return f"( for i in 1 2 3 4; do rsync -a -e {relay_rsync_e(host)} {src} {dst} && exit 0; sleep 3; done; exit 1 )"
+
+
+def relay_send(host, data, name, timeout=900):
+    rl = host["relay"]
+    res = subprocess.run(SSH + [rl["host"], f"cat > {shlex.quote(rl['dir'] + '/' + name)}"], input=data,
+                         capture_output=True, timeout=timeout)
+    if res.returncode != 0:
+        raise RuntimeError(f"relay send rc {res.returncode}: {res.stderr.decode(errors='replace')[-200:]}")
+
+
+def relay_drop(host, name):
+    rl = host["relay"]
+    subprocess.run(SSH + [rl["host"], f"rm -f {shlex.quote(rl['dir'] + '/' + name)}"], capture_output=True, timeout=60)
+
+
+def relay_unpack(host, name, dest, pre="", timeout=900):
+    """In the pod: fetch tar `name` from the relay and unpack it into dest; then drop it from the relay."""
+    tmp = f"/tmp/{name}"
+    cmd = f"{pre}{relay_rsync(host, '@' + name, tmp)} && tar -xf {tmp} -C {shlex.quote(dest)}; rc=$?; rm -f {tmp}; exit $rc"
+    try:
+        res = subprocess.run(remote_argv(host, cmd), capture_output=True, text=True, timeout=timeout, errors="replace")
+    finally:
+        relay_drop(host, name)
+    return res.returncode == 0, (res.stderr or res.stdout).replace("\r", "")[-200:]
+
+
+def sftp_relay(host, lines, timeout=900):
+    puts, gets, dirs = parse_batch(lines)
+    if puts or dirs:
+        name = relay_name("put")
+        relay_send(host, puts_tar(puts), name, timeout)
+        ok, msg = relay_unpack(host, name, "/", pre=mkdirs_cmd(dirs), timeout=timeout)
+        if not ok:
+            raise RuntimeError(f"put relay: {msg}")
+    if gets:
+        rl, name = host["relay"], relay_name("get")
+        want = {rem.lstrip("/"): loc for rem, loc in gets}
+        tmp = f"/tmp/{name}"
+        cmd = (f"tar -cf {tmp} -C / {' '.join(shlex.quote(r) for r in want)} && "
+               f"{relay_rsync(host, tmp, '@' + name)}; rc=$?; rm -f {tmp}; exit $rc")
+        res = subprocess.run(remote_argv(host, cmd), capture_output=True, text=True, timeout=timeout, errors="replace")
+        path = shlex.quote(rl["dir"] + "/" + name)
+        data = subprocess.run(SSH + [rl["host"], f"cat {path} && rm -f {path}"], capture_output=True, timeout=timeout)
+        got = untar_gets(data.stdout, want) if res.returncode == 0 and data.returncode == 0 else 0
+        if got < len(want):
+            raise RuntimeError(f"get relay rc {res.returncode}/{data.returncode}, {got}/{len(want)} files: "
+                               f"{res.stderr.replace(chr(13), '')[-300:]}")
+
+
 def sftp(host, lines, timeout=900):
     if not lines:
         return
+    if host.get("runai"):
+        return sftp_relay(host, lines, timeout)
     if host.get("via"):
         return sftp_via(host, lines, timeout)
     with tempfile.NamedTemporaryFile("w", suffix=".sftp", delete=False) as fh:
@@ -158,6 +263,25 @@ def rpath(host, rel=""):
 
 def lx(host, script, timeout=60, interp="bash -s"):
     """Run a script on a Linux host (bash, or python3 with interp='python3 -'); returns stdout."""
+    if host.get("runai"):   # no stdin: the script rides in the command line, or the relay if too long
+        b64 = base64.b64encode(script.encode()).decode()
+        name = None
+        if len(b64) <= POD_ARG_MAX:
+            cmd = f"echo {b64} | base64 -d | {interp}"
+        else:
+            name = relay_name("lx")
+            relay_send(host, script.encode(), name)
+            tmp = f"/tmp/{name}"
+            cmd = f"{relay_rsync(host, '@' + name, tmp)} && {interp} < {tmp}; rc=$?; rm -f {tmp}; exit $rc"
+        try:
+            res = subprocess.run(remote_argv(host, cmd), capture_output=True, text=True, timeout=timeout,
+                                 encoding="utf-8", errors="replace")
+        finally:
+            if name:
+                relay_drop(host, name)
+        if res.returncode != 0:
+            raise RuntimeError(f"runai exec rc {res.returncode}: {res.stderr.replace(chr(13), '')[-300:]}")
+        return res.stdout.replace("\r", "")
     res = subprocess.run(remote_argv(host, interp), input=script, capture_output=True, text=True, timeout=timeout,
                          encoding="utf-8", errors="replace")
     if res.returncode != 0:
@@ -1059,17 +1183,23 @@ class Fleet:
         self.requeue(h, f"{h['name']} drained")
 
     def sync_code(self, h):
-        if h.get("via"):   # deploy/winsync.sh's file list, piped through the jump host
+        if h.get("via") or h.get("runai"):   # deploy/winsync.sh's file list, piped through the jump host / the relay
             files = subprocess.run("git ls-files -co --exclude-standard bot deploy harness sts2-cli/src sts2-cli/localization_eng "
                                    "sts2-cli/localization_zhs | grep -v '\\.pt$'", shell=True, cwd=REPO,
                                    capture_output=True, text=True).stdout
             try:
                 tar = subprocess.run(["tar", "--no-mac-metadata", "--no-xattrs", "-cf", "-", "-T", "-"], cwd=REPO, input=files.encode(),
                                      capture_output=True, env={**os.environ, "COPYFILE_DISABLE": "1"}, timeout=300)
+                if h.get("runai"):
+                    if tar.returncode != 0:
+                        return False, tar.stderr.decode(errors="replace")[-200:]
+                    name = relay_name("code")
+                    relay_send(h, tar.stdout, name)
+                    return relay_unpack(h, name, h["root"])
                 res = subprocess.run(remote_argv(h, f"tar -xf - -C {shlex.quote(h['root'])}"), input=tar.stdout,
                                      capture_output=True, timeout=600)
-            except subprocess.TimeoutExpired:
-                return False, "code sync timed out"
+            except (subprocess.TimeoutExpired, RuntimeError) as e:
+                return False, f"code sync failed: {str(e)[:150] or 'timed out'}"
             return res.returncode == 0 and tar.returncode == 0, (res.stderr or tar.stderr).decode(errors="replace")[-200:]
         try:
             res = subprocess.run([os.path.join(REPO, "deploy", "winsync.sh"), h["ssh"], h["root"]],
@@ -1100,6 +1230,16 @@ class Fleet:
                 have = lx(h, "; ".join(f"[ -f {R}/{dll.format(c=c)} ] && echo have:{c}" for c in self.ENGINE_BUILDS) + "; echo ok")
                 missing = [c for c in self.ENGINE_BUILDS if f"have:{c}" not in have]
                 if not missing:
+                    return
+                if h.get("runai"):   # the pod has the .NET runtime only: lab0's builds through the relay
+                    rl = h["relay"]
+                    JR = self.hosts[rl["host"]]["root"].rstrip("/")
+                    name = relay_name("builds")
+                    res = subprocess.run(SSH + [rl["host"], f"cd {JR}/sts2-cli/src/Sts2Headless/bin && "
+                                                f"tar -cf {rl['dir']}/{name} $(ls -d {' '.join(missing)} 2>/dev/null) && echo packed"],
+                                         capture_output=True, text=True, timeout=600)
+                    ok, msg = relay_unpack(h, name, f"{R}/sts2-cli/src/Sts2Headless/bin") if "packed" in res.stdout else (False, res.stderr[-100:])
+                    log(f"{h['name']}: engine builds {' '.join(missing)} from {rl['host']}: {'copied' if ok else 'FAILED ' + msg}")
                     return
                 if h.get("via"):   # lab2/lab3 have the .NET runtime only: copy lab0's builds through the jump
                     J = self.hosts[h["via"]]
@@ -1160,6 +1300,40 @@ class Fleet:
         except Exception as e:
             return {"error": str(e)[:200]}
 
+    def runai_revive(self, h):
+        """A pod host whose workload failed (its 160 h limit, a preemption, an error) or is gone:
+        submit it again, at most every 10 minutes and 6 times a day. A workload that completed
+        (its keeper saw the STOP file) or was stopped by hand stays as it is."""
+        import re
+        r, now = h["runai"], time.time()
+        if now - h.get("revive_t", 0) < 600:
+            return
+        h["revive_t"] = now
+        h["revives"] = [t for t in h.get("revives", []) if now - t < 86400]
+        if len(h["revives"]) >= 6:
+            return
+        try:
+            res = subprocess.run([RUNAI, "training", "describe", r["workload"], "-p", r["project"]],
+                                 capture_output=True, text=True, timeout=60, errors="replace")
+            out = (res.stdout + res.stderr).replace("\r", "")
+            m = re.search(r"^Phase:\s+(\S+)", out, re.M)
+            if m and m.group(1) != "Failed":
+                return
+            if not m and "not found" not in out.lower():
+                log(f"{h['name']}: runai describe: {out.strip()[:120]}")   # e.g. the login expired
+                return
+            if m:
+                subprocess.run([RUNAI, "training", "delete", r["workload"], "-p", r["project"]],
+                               capture_output=True, timeout=120)
+                time.sleep(5)
+            res = subprocess.run([RUNAI, "training", "submit", r["workload"], "-p", r["project"]] + r["submit"],
+                                 capture_output=True, text=True, timeout=120, errors="replace")
+            h["revives"].append(now)
+            log(f"{h['name']}: workload {'failed' if m else 'gone'}; submitted again "
+                f"(rc {res.returncode}: {(res.stdout + res.stderr).strip()[-120:]})")
+        except Exception as e:
+            log(f"{h['name']}: revive failed: {str(e)[:120]}")
+
     def handle_poll(self, h, r):
         if "error" in r:
             h["fails"] += 1
@@ -1169,6 +1343,8 @@ class Fleet:
             if h["state"] == "down" and not h.get("moved", True) and time.time() - h.get("down_since", 0) >= DOWN_GRACE:
                 self.requeue(h, f"{h['name']} down")
                 h["moved"] = True
+            if h.get("runai") and h["state"] == "down" and not h["drain"]:
+                self.runai_revive(h)
             return
         h["fails"] = 0
         if h["state"] != "up":
