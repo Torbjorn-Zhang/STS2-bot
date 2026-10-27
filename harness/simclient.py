@@ -30,15 +30,20 @@ class Sim:
         self.latencies = []  # (cmd_name, seconds)
         self.stderr_lines = []
         t0 = time.perf_counter()
+        # STS2_ENGINE_STDERR=path appends the engine's stderr there (to see why an engine died)
+        err_path = os.environ.get("STS2_ENGINE_STDERR")
+        err = subprocess.PIPE if capture_stderr else open(err_path, "a") if err_path else subprocess.DEVNULL
         self.proc = subprocess.Popen(
             [DOTNET, engine_dll(config)],
             cwd=CLI,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE if capture_stderr else subprocess.DEVNULL,
+            stderr=err,
             text=True,
             bufsize=1,
         )
+        if err_path and not capture_stderr:
+            err.close()   # the child has its own copy
         self._q = queue.Queue()
         threading.Thread(target=self._pump, daemon=True).start()
         if capture_stderr:

@@ -545,46 +545,50 @@ def main():
         try:
             for s in chunk:
                 sim = maybe_recycle(sim)
-                try:
-                    dn = None
-                    if args.deck_sample is not None:
-                        from decknets import DeckNets
-                        paths, shop = (args.card_prior, args.rest_net, args.event_net, args.map_net), args.shop_net
-                        unified = args.unified
-                        if args.deck_nets and not any(paths):   # sample the deck networks the bot plays with
-                            with open(args.deck_nets) as fh:
-                                cfg = json.load(fh)
-                            paths = (cfg.get("card"), cfg.get("rest"), cfg.get("event"), cfg.get("map"))
-                            shop = cfg.get("shop")
-                            unified = unified or cfg.get("unified")   # xdeckrl kind "unified": the network being trained
-                        dn = DeckNets(*paths, args.deck_sample, seed=s, shop=shop, unified=unified)
-                    rec = None
-                    if args.record:
-                        from record import GameRecorder
-                        rec = GameRecorder(args.record, rec_lock, s, {"tag": args.tag, "asc": args.ascension})
-                    r = play_run(sim, s, args.character, args.acts, args.nodes, model, args.value_weight, args.ascension,
-                                 json.loads(args.rollouts) if args.rollouts else None, rec=rec,
-                                 explore=args.explore, decknets=dn, combat_records=not args.no_combat_records)
-                    if MC_K and r.get("mc_save") and not r.get("error"):
-                        sim, r["mc"] = mc_rollouts(sim, r["mc_save"], s, args.acts, args.nodes, model, args.value_weight,
-                                                   json.loads(args.rollouts) if args.rollouts else None, decknets=dn)
-                        if args.mc_drop_saves:
-                            try:
-                                os.remove(r["mc_save"])
-                            except OSError:
-                                pass
-                    if rec and MC_K and r.get("mc_save"):
-                        rec.finish(r)
-                except Exception as e:  # engine hang/crash: record it, restart the engine, go on
-                    r = {"seed": s, "character": args.character, "ascension": args.ascension, "cleared_acts": 0,
-                         "victory": False, "died": False, "act": None, "floor": None, "room": None, "hp": None,
-                         "max_hp": None, "deck_size": None, "fights": 0, "seconds": 0, "planner": {},
-                         "dead_end_actions": 0, "fight_log": [], "error": f"{type(e).__name__}: {e}"}
+                for attempt in range(2):   # an engine that dies mid-run (a few per 240 runs) gets one more go
                     try:
-                        sim.close()
-                    except Exception:
-                        pass
-                    sim = fresh_sim()
+                        dn = None
+                        if args.deck_sample is not None:
+                            from decknets import DeckNets
+                            paths, shop = (args.card_prior, args.rest_net, args.event_net, args.map_net), args.shop_net
+                            unified = args.unified
+                            if args.deck_nets and not any(paths):   # sample the deck networks the bot plays with
+                                with open(args.deck_nets) as fh:
+                                    cfg = json.load(fh)
+                                paths = (cfg.get("card"), cfg.get("rest"), cfg.get("event"), cfg.get("map"))
+                                shop = cfg.get("shop")
+                                unified = unified or cfg.get("unified")   # xdeckrl kind "unified": the network being trained
+                            dn = DeckNets(*paths, args.deck_sample, seed=s, shop=shop, unified=unified)
+                        rec = None
+                        if args.record:
+                            from record import GameRecorder
+                            rec = GameRecorder(args.record, rec_lock, s, {"tag": args.tag, "asc": args.ascension})
+                        r = play_run(sim, s, args.character, args.acts, args.nodes, model, args.value_weight, args.ascension,
+                                     json.loads(args.rollouts) if args.rollouts else None, rec=rec,
+                                     explore=args.explore, decknets=dn, combat_records=not args.no_combat_records)
+                        if MC_K and r.get("mc_save") and not r.get("error"):
+                            sim, r["mc"] = mc_rollouts(sim, r["mc_save"], s, args.acts, args.nodes, model, args.value_weight,
+                                                       json.loads(args.rollouts) if args.rollouts else None, decknets=dn)
+                            if args.mc_drop_saves:
+                                try:
+                                    os.remove(r["mc_save"])
+                                except OSError:
+                                    pass
+                        if rec and MC_K and r.get("mc_save"):
+                            rec.finish(r)
+                        if attempt:
+                            r["retried"] = attempt
+                        break
+                    except Exception as e:  # engine hang/crash: record it, restart the engine, go on
+                        r = {"seed": s, "character": args.character, "ascension": args.ascension, "cleared_acts": 0,
+                             "victory": False, "died": False, "act": None, "floor": None, "room": None, "hp": None,
+                             "max_hp": None, "deck_size": None, "fights": 0, "seconds": 0, "planner": {},
+                             "dead_end_actions": 0, "fight_log": [], "error": f"{type(e).__name__}: {e}"}
+                        try:
+                            sim.close()
+                        except Exception:
+                            pass
+                        sim = fresh_sim()
                 with lock:
                     with open(out_path, "a") as f:
                         f.write(json.dumps(r) + "\n")
