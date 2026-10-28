@@ -28,6 +28,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -343,13 +344,19 @@ def sample():
         except (OSError, ValueError, IndexError):
             pass
     return sum(v), v[3] + v[4], mine
-import time
+import time, subprocess
 a = sample(); time.sleep(1.5); b = sample()
 ncpu = os.cpu_count()
+try:   # [index, name, MiB used] per card (None: no nvidia-smi)
+    out = subprocess.run(["nvidia-smi", "--query-gpu=index,name,memory.used", "--format=csv,noheader,nounits"],
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True, timeout=10).stdout
+    gpus = [[x.strip() for x in l.split(",")] for l in out.splitlines() if l.count(",") == 2]
+except Exception:
+    gpus = None
 per_cpu = max(1, (b[0] - a[0]) / ncpu)
 busy = ((b[0] - a[0]) - (b[1] - a[1])) / per_cpu
 mine = max(0, b[2] - a[2]) / per_cpu
-print(json.dumps({"pause": os.path.exists(root + "/PAUSE"), "jobs": jobs, "gpu": None, "ours": len(alive),
+print(json.dumps({"pause": os.path.exists(root + "/PAUSE"), "jobs": jobs, "gpu": None, "gpus": gpus, "ours": len(alive),
                   "load": float(open("/proc/loadavg").read().split()[0]), "ncpu": ncpu,
                   "others_now": round(max(0.0, busy - mine), 2), "ours_cpu": round(mine, 2)}))
 """
@@ -1435,6 +1442,10 @@ class Fleet:
             reasons.append("fleet.py drain")
         if r.get("pause"):
             reasons.append("PAUSE file")
+        if h.get("gpu") and r.get("gpus") is not None:
+            # cards a GPU job could take (job_sh's rule: memory ~0, not the avoided one)
+            avoid = re.compile(h.get("gpu_avoid", "^$"))
+            h["gpu_idle"] = sum(1 for g in r["gpus"] if not avoid.search(g[1]) and g[2].isdigit() and int(g[2]) < 100)
         if h.get("yield_gpu") and r.get("gpu") is not None:
             ours_gpu = any(j.get("gpu_now") for j in self.running_on(h))
             if r["gpu"] >= GPU_BUSY and not ours_gpu:
@@ -1571,14 +1582,20 @@ class Fleet:
         if job.get("only"):   # e.g. a task whose data lives on one machine
             hosts = [h for h in hosts if h["name"] == job["only"]]
         if job["gpu"]:
-            gpu = [h for h in hosts if h.get("gpu") and self.free_slots(h) > 0
+            # gpu_idle (Linux polls): cards with no memory in use; with every card taken by other
+            # users the job would only run on that host's CPU, so it goes where the CPU is best
+            gpu = [h for h in hosts if h.get("gpu") and h.get("gpu_idle", 1) > 0 and self.free_slots(h) > 0
                    and not any(j.get("gpu_now") for j in self.running_on(h))]
             if gpu:
                 return sorted(gpu, key=lambda h: h.get("gpu_order", h.get("order", 9)))[0], True
             # a GPU machine in the fleet frees a slot soon: wait for it (10 min at most)
-            if any(h.get("gpu") for h in hosts) and time.time() - job.get("queued_since", time.time()) < 600:
+            if any(h.get("gpu") and h.get("gpu_idle", 1) > 0 for h in hosts) and time.time() - job.get("queued_since", time.time()) < 600:
                 return None, False
         cand = [h for h in hosts if self.free_slots(h) > 0]
+        if job["kind"] == "train" and cand:
+            # a CPU update: the host that can give it the most of its TRAIN_SLOTS, then the biggest
+            need = lambda h: min(TRAIN_SLOTS, self.cap(h))
+            return max(cand, key=lambda h: (min(self.free_slots(h), need(h)) / need(h), self.cap(h), -h.get("order", 9))), False
         if job.get("slots") and job["kind"] != "train":
             # a multi-slot task waits (30 min at most) for a host with all its slots free, which
             # comes between two self-play iterations; launched on one free slot it gets 2 threads
@@ -1600,7 +1617,7 @@ class Fleet:
             if j["kind"] == "train" and time.time() - j["queued_since"] < TRAIN_WAIT:
                 # with the next self-play already queued, a slot freed here would go to it at once:
                 # hold the update's host (its GPU machine while that is busy) until it has the slots
-                gpus = sorted([x for x in hosts if x.get("gpu")], key=lambda x: x.get("gpu_order", x.get("order", 9)))
+                gpus = sorted([x for x in hosts if x.get("gpu") and x.get("gpu_idle", 1) > 0], key=lambda x: x.get("gpu_order", x.get("order", 9)))
                 tgt = h or (gpus[0] if gpus else None)
                 if tgt is not None and (h is None or self.free_slots(tgt) < min(TRAIN_SLOTS, self.cap(tgt))):
                     held.add(tgt["name"])
