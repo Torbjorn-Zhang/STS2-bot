@@ -160,6 +160,50 @@
     "key": "/scratch/xkzhang/slzhang_cvpr27/.ssh/id_lab0",
     "known_hosts": "/scratch/xkzhang/slzhang_cvpr27/.ssh/known_hosts"
    }
+  },
+  "apollo3": {
+   "ssh": "apollo",
+   "os": "linux",
+   "root": "/scratch/xkzhang/slzhang_cvpr27/pod3/sts2",
+   "slots": 28,
+   "workers": 2,
+   "gpu": false,
+   "order": 9,
+   "runai": {
+    "workload": "slz-sts2-cpu3",
+    "project": "xkzhang",
+    "submit": [
+     "--image",
+     "sydneyinformaticshub/dgx-interactive-terminal",
+     "--cpu-core-request",
+     "64",
+     "--cpu-memory-request",
+     "96G",
+     "--run-as-user",
+     "--existing-pvc",
+     "claimname=exa-pvc-xkzhang,path=/scratch/xkzhang",
+     "--preemptibility",
+     "preemptible",
+     "--backoff-limit",
+     "0",
+     "--restart-policy",
+     "Never",
+     "--command",
+     "--",
+     "bash",
+     "-c",
+     "exec python3 -c \"$(echo aW1wb3J0IG9zLCBzeXMsIHRpbWUKIyBQSUQgMSBvZiB0aGUgQXBvbGxvIENQVSBwb2Q6IHJlYXBzIHRoZSBqb2JzJyBvcnBoYW5lZCBwcm9jZXNzZXM7IGV4aXRzIDAgb24gdGhlIFNUT1AgZmlsZQojICh0aGUgd29ya2xvYWQgY29tcGxldGVzIGFuZCBzdGF5cyBkb3duKSwgMSBhZnRlciAxNjAgaCAoaXQgZmFpbHMgYW5kIHRoZSBmbGVldCBzdWJtaXRzIGl0IGFnYWluKQpzdG9wLCBlbmQgPSAiL3NjcmF0Y2gveGt6aGFuZy9zbHpoYW5nX2N2cHIyNy9TVFMyX1BPRF9TVE9QIiwgdGltZS50aW1lKCkgKyAxNjAgKiAzNjAwCndoaWxlIG5vdCBvcy5wYXRoLmV4aXN0cyhzdG9wKToKICAgIGlmIHRpbWUudGltZSgpID4gZW5kOgogICAgICAgIHN5cy5leGl0KDEpCiAgICB0cnk6CiAgICAgICAgd2hpbGUgb3Mud2FpdHBpZCgtMSwgb3MuV05PSEFORylbMF06CiAgICAgICAgICAgIHBhc3MKICAgIGV4Y2VwdCBDaGlsZFByb2Nlc3NFcnJvcjoKICAgICAgICBwYXNzCiAgICB0aW1lLnNsZWVwKDUpCg== | base64 -d)\""
+    ]
+   },
+   "relay": {
+    "host": "lab0",
+    "dir": "/mnt/sda/share/slzhang/cvpr27/transfer/sts2_apollo",
+    "rel": "sts2_apollo",
+    "target": "slzhang@10.165.232.24",
+    "port": 8222,
+    "key": "/scratch/xkzhang/slzhang_cvpr27/.ssh/id_lab0",
+    "known_hosts": "/scratch/xkzhang/slzhang_cvpr27/.ssh/known_hosts"
+   }
   }
  }
 }
