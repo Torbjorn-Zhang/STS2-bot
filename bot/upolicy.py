@@ -13,8 +13,8 @@ attends to every other; a head scores the option tokens; a softmax over one deci
   upolicy.py rl FILES... --init models/up1_bc.pt --out M --temperature 1   one PPO update on
       self-play played with this network (fleet xdeckrl kind "unified", fleetjob.py --unified)
   upolicy.py bcsel FILES... --init M --out M2   teach a network the card prompts (sel_* kinds:
-      which card to remove, transform, upgrade or add) by imitating the rule's recorded picks,
-      while distilling its own outputs on the other kinds so their play stays the same
+      which card to remove, transform, upgrade or add) by imitating the rule's recorded picks;
+      only the prompts' own parameters train, so the other kinds play exactly as before
 Records are run.py --record rows written with DeckNets (the extras carry the option lists).
 """
 import argparse
@@ -264,6 +264,11 @@ class Net(nn.Module):
         self.card, self.relic, self.pot, self.boss = E(enc.cards), E(enc.relics), E(enc.pots), nn.Embedding(len(enc.bosses), d)
         self.okind, self.evk, self.rest, self.room = E(enc.kind), E(enc.evk), E(enc.rest), E(enc.room)
         self.dec = nn.Embedding(len(KINDS), d)
+        # the decision kind on every option token too (zero: none), and a head of the card prompts'
+        # own: through the state token alone, the prompts could only be learned by moving the other
+        # kinds (card_reward's KL to its init 0.02-0.19 for agreement with the rule 0.4-0.9)
+        self.odec = nn.Embedding(len(KINDS), d)
+        nn.init.zeros_(self.odec.weight)
         self.tok = nn.Embedding(5, d)   # state, deck card, relic, potion, option
         self.up = nn.Parameter(torch.zeros(d))
         self.scal = nn.Linear(SDIM, d)
@@ -271,9 +276,11 @@ class Net(nn.Module):
         layer = nn.TransformerEncoderLayer(d, heads, 4 * d, dropout=0.1, batch_first=True, norm_first=True)
         self.tf = nn.TransformerEncoder(layer, layers, enable_nested_tensor=False)
         self.head = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.ReLU(), nn.Linear(d, 1))
+        self.shead = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.ReLU(), nn.Linear(d, 1))
         self.value = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.ReLU(), nn.Linear(d, 1))
 
-    def forward(self, T, with_value=False):
+    def embed(self, T):
+        """-> the tokens [n, L, d] (state, deck, relics, potions, options) and their padding mask."""
         k = self.tok.weight
         st = (self.scal(T["x"]) + self.boss(T["b"]) + self.dec(T["dec"]) + k[0]).unsqueeze(1)
         deck = self.card(T["d"]) + T["du"].unsqueeze(-1) * self.up + k[1]
@@ -281,13 +288,22 @@ class Net(nn.Module):
         pot = self.pot(T["p"]) + k[3]
         misc = self.rest(T["orest"]) + self.evk(T["oev"]) + self.room(T["oroom"])   # 0 = padding where not used
         opt = (self.okind(T["ok"]) + self.card(T["oc"]) + T["ou"].unsqueeze(-1) * self.up + self.relic(T["or"])
-               + self.pot(T["op"]) + misc + self.osc(T["osc"]) + k[4])
+               + self.pot(T["op"]) + misc + self.osc(T["osc"]) + self.odec(T["dec"]).unsqueeze(1) + k[4])
         x = torch.cat([st, deck, rel, pot, opt], 1)
         n = x.shape[0]
         pad = torch.cat([torch.zeros(n, 1, dtype=torch.bool, device=x.device), T["d"] == 0, T["r"] == 0, T["p"] == 0, ~T["omask"]], 1)
+        return x, pad
+
+    def option_scores(self, h, T):
+        """The option tokens' logits from the encoder output h: the card prompts' head for sel_* kinds."""
+        ho = h[:, -T["ok"].shape[1]:]
+        z = torch.where((T["dec"] >= len(BASE_KINDS))[:, None], self.shead(ho).squeeze(-1), self.head(ho).squeeze(-1))
+        return z.masked_fill(~T["omask"], -1e9)
+
+    def forward(self, T, with_value=False):
+        x, pad = self.embed(T)
         h = self.tf(x, src_key_padding_mask=pad)
-        no = T["ok"].shape[1]
-        z = self.head(h[:, -no:]).squeeze(-1).masked_fill(~T["omask"], -1e9)
+        z = self.option_scores(h, T)
         if with_value:
             return z, self.value(h[:, 0]).squeeze(-1)
         return z
@@ -295,13 +311,18 @@ class Net(nn.Module):
 
 def load_net(blob):
     """-> (network, the kinds it was trained on). A network saved before the sel_* kinds has fewer
-    decision embeddings: the new ones start as card_reward's (their options are cards too)."""
+    decision embeddings: the new ones start as card_reward's (their options are cards too); one saved
+    before the card prompts' own parameters gets no kind on its option tokens and the shared head
+    as the prompts' head, so it plays as it did."""
     enc = Enc(blob=blob["enc"])
     net = Net(enc)
     state = dict(blob["state"])
     w = state["dec.weight"]
     if w.shape[0] < len(KINDS):
         state["dec.weight"] = torch.cat([w, w[:1].repeat(len(KINDS) - w.shape[0], 1)], 0)
+    state.setdefault("odec.weight", torch.zeros_like(net.odec.weight))
+    for k in [k for k in state if k.startswith("head.")]:
+        state.setdefault("s" + k, state[k].clone())
     net.load_state_dict(state)
     return net, list(blob.get("kinds") or BASE_KINDS)
 
@@ -494,10 +515,12 @@ def rl(args):
 
 
 def bcsel(args):
-    """Teach --init the card prompts: cross-entropy on the rule's recorded picks (sel_* rows,
-    x.ck) plus, on every other decision, KL(init || new) to the init network's own softmax and
-    the squared change of its value, so the rest of its play stays as it was. Validation (a
-    tenth of the runs): agreement with the rule per purpose, mean KL on the other kinds."""
+    """Teach --init the card prompts: cross-entropy on the rule's recorded picks (sel_* rows, x.ck)
+    plus the squared change of the value on those rows, training only the prompts' own parameters
+    (their head and their rows of the decision-kind embeddings) through the frozen encoder, so the
+    other kinds' outputs cannot move. Validation (a tenth of the runs): agreement with the rule per
+    purpose, and as a check the other kinds' mean KL to the init network. Keeps the epoch with the
+    lowest validation cross-entropy."""
     blob = torch.load(os.path.join(HERE, args.init), map_location="cpu", weights_only=False)
     enc = Enc(blob=blob["enc"])
     decs, _ = load_records(expand(args.files))
@@ -506,78 +529,82 @@ def bcsel(args):
         dev = torch.device("cpu")
     net, kinds = load_net(blob)
     net.to(dev)
-    items = [enc.encode(d[0], d[1], d[2], d[4]) for d in decs]
+    net.eval()   # no dropout
     sel = np.array([d[0].startswith("sel_") for d in decs])
     keys = sorted({d[6] for d in decs})
     random.Random(0).shuffle(keys)
     va_keys = set(keys[:max(1, len(keys) // 10)])
     is_va = np.array([d[6] in va_keys for d in decs])
+    va = [i for i in range(len(decs)) if is_va[i]]
+    tr = [i for i in range(len(decs)) if sel[i] and not is_va[i]]
+    items = {i: enc.encode(decs[i][0], decs[i][1], decs[i][2], decs[i][4]) for i in range(len(decs)) if sel[i] or is_va[i]}
     A = torch.tensor([d[3] for d in decs], device=dev)
-    net.eval()
-    P0, V0 = [], []
-    with torch.no_grad():   # the init network's own outputs: the anchors of the other kinds
-        for i in range(0, len(decs), 512):
-            T = collate(items[i:i + 512], dev)
-            z, v = net(T, with_value=True)
-            p = torch.softmax(z, -1)
-            P0 += [p[j, :len(items[i + j]["ok"])].cpu() for j in range(len(p))]
-            V0.append(v.cpu())
-    V0 = torch.cat(V0).to(dev)
-    print(json.dumps({"decisions": len(decs), "by_kind": dict(Counter(d[0] for d in decs)), "runs": len(keys),
-                      "init_kinds": kinds}), flush=True)
 
-    def batch_loss(b):
-        T = collate([items[j] for j in b], dev)
-        z, v = net(T, with_value=True)
-        logp = torch.log_softmax(z, -1)
-        m = torch.tensor(sel[b], device=dev)
-        p0 = torch.zeros_like(logp)
-        for r, j in enumerate(b):
-            p0[r, :len(P0[j])] = P0[j].to(dev)
-        kl = (p0 * (torch.log(p0.clamp(min=1e-12)) - logp)).sum(1)
-        ce = -logp.gather(1, A[b][:, None]).squeeze(1)
-        vd = (v - V0[b]) ** 2
-        return ce, kl, vd, m, z
-
-    def evaluate():
-        net.eval()
-        idx = [i for i in range(len(decs)) if is_va[i]]
-        agree, kls = defaultdict(lambda: [0, 0]), defaultdict(list)
+    def outputs(idx):
+        """-> {decision: (option probabilities, value)} under the current network."""
+        out = {}
         with torch.no_grad():
             for i in range(0, len(idx), 512):
                 b = idx[i:i + 512]
-                ce, kl, vd, m, z = batch_loss(b)
-                ok = (z.argmax(-1) == A[b]).cpu().numpy()
+                z, v = net(collate([items[j] for j in b], dev), with_value=True)
+                p = torch.softmax(z, -1).cpu()
                 for r, j in enumerate(b):
-                    if sel[j]:
-                        agree[decs[j][0]][0] += int(ok[r])
-                        agree[decs[j][0]][1] += 1
-                    else:
-                        kls[decs[j][0]].append(float(kl[r]))
-        return {**{f"agree_{k}": round(v[0] / max(1, v[1]), 3) for k, v in sorted(agree.items())},
-                **{f"kl_{k}": round(float(np.mean(v)), 5) for k, v in sorted(kls.items())}}
+                    out[j] = (p[r, :len(items[j]["ok"])], float(v[r]))
+        return out
 
-    print(json.dumps({"epoch": -1, **evaluate()}), flush=True)
-    opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
-    tr = [i for i in range(len(decs)) if not is_va[i]]
+    init = outputs(sorted(set(va) | set(tr)))   # the anchors: the other kinds' play, the prompts' values
+    V0 = torch.tensor([init[j][1] if j in init else 0.0 for j in range(len(decs))], device=dev)
+    print(json.dumps({"decisions": len(decs), "by_kind": dict(Counter(d[0] for d in decs)), "runs": len(keys),
+                      "train_prompts": len(tr), "init_kinds": kinds}), flush=True)
+
+    def evaluate():
+        cur = outputs(va)
+        agree, kls, ce, dv = defaultdict(lambda: [0, 0]), defaultdict(list), [], []
+        for j in va:
+            p, v = cur[j]
+            if sel[j]:
+                agree[decs[j][0]][0] += int(int(p.argmax()) == decs[j][3])
+                agree[decs[j][0]][1] += 1
+                ce.append(-math.log(max(1e-12, float(p[decs[j][3]]))))
+                dv.append((v - init[j][1]) ** 2)
+            else:
+                p0 = init[j][0]
+                kls[decs[j][0]].append(float((p0 * (torch.log(p0.clamp(min=1e-12)) - torch.log(p.clamp(min=1e-12)))).sum()))
+        return {"ce": round(float(np.mean(ce)), 4), "dv2": round(float(np.mean(dv)), 5),
+                **{f"agree_{k}": round(v[0] / max(1, v[1]), 3) for k, v in sorted(agree.items())},
+                **{f"kl_{k}": round(float(np.mean(v)), 6) for k, v in sorted(kls.items())}}
+
+    res = evaluate()
+    print(json.dumps({"epoch": -1, **res}), flush=True)
+    best = (res["ce"], -1, {k: v.detach().cpu().clone() for k, v in net.state_dict().items()})
+    own = [net.dec.weight, net.odec.weight] + list(net.shead.parameters())
+    for p in net.parameters():
+        p.requires_grad_(False)
+    for p in own:
+        p.requires_grad_(True)
+    # no weight decay: the other kinds' embedding rows get no gradient, so Adam leaves them as they are
+    opt = torch.optim.Adam(own, lr=args.lr)
     for ep in range(args.epochs):
-        net.eval()   # no dropout: the KL anchors are the eval-mode outputs
         random.Random(ep).shuffle(tr)
         for i in range(0, len(tr), args.batch):
             b = tr[i:i + args.batch]
-            ce, kl, vd, m, _ = batch_loss(b)
-            mf = m.float()
-            loss = (ce * mf).sum() / mf.sum().clamp(min=1) + args.kl_coef * ((kl + vd) * (1 - mf)).sum() / (1 - mf).sum().clamp(min=1)
+            z, v = net(collate([items[j] for j in b], dev), with_value=True)
+            ce = -torch.log_softmax(z, -1).gather(1, A[b][:, None]).squeeze(1).mean()
+            loss = ce + ((v - V0[b]) ** 2).mean()
             opt.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+            nn.utils.clip_grad_norm_(own, 1.0)
             opt.step()
-        print(json.dumps({"epoch": ep, **evaluate()}), flush=True)
+        res = evaluate()
+        print(json.dumps({"epoch": ep, **res}), flush=True)
+        if res["ce"] < best[0]:
+            best = (res["ce"], ep, {k: v.detach().cpu().clone() for k, v in net.state_dict().items()})
+    net.load_state_dict(best[2])
     net.to("cpu")
     new_kinds = sorted(set(kinds) | {d[0] for d in decs if d[0].startswith("sel_")}, key=KINDS.index)
     torch.save({"enc": blob["enc"], "state": net.state_dict(), "bcsel_from": args.init, "kinds": new_kinds},
                os.path.join(HERE, args.out))
-    print(json.dumps({"saved": args.out, "kinds": new_kinds}))
+    print(json.dumps({"saved": args.out, "epoch": best[1], "kinds": new_kinds}))
 
 
 class UPolicy:
@@ -601,9 +628,9 @@ def main():
     ap.add_argument("files", nargs="+")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--epochs", type=int, default=None, help="train: 6, rl: 3")
+    ap.add_argument("--epochs", type=int, default=None, help="train: 6, rl: 3, bcsel: 40")
     ap.add_argument("--batch", type=int, default=256)
-    ap.add_argument("--lr", type=float, default=None, help="train: 3e-4, rl: 1e-4 (times NETS_LR_SCALE)")
+    ap.add_argument("--lr", type=float, default=None, help="train: 3e-4, rl: 1e-4 (times NETS_LR_SCALE), bcsel: 1e-3")
     ap.add_argument("--init", help="rl: the network to update (the self-play policy)")
     ap.add_argument("--temperature", type=float, default=1.0, help="rl: the self-play sampling temperature")
     ap.add_argument("--clip", type=float, default=0.2)
@@ -618,7 +645,6 @@ def main():
     ap.add_argument("--wmax", type=float, default=20.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threads", type=int, default=None, help="torch CPU threads (default: NETS_THREADS or 2)")
-    ap.add_argument("--kl-coef", type=float, default=1.0, help="bcsel: weight of the other kinds' KL to the init network")
     args = ap.parse_args()
     os.environ.setdefault("STS2_RETURN", "sm")
     import nets
@@ -628,7 +654,7 @@ def main():
         args.epochs, args.lr = args.epochs or 3, args.lr or 1e-4
         rl(args)
     elif args.cmd == "bcsel":
-        args.epochs, args.lr = args.epochs or 4, args.lr or 1e-4
+        args.epochs, args.lr = args.epochs or 40, args.lr or 1e-3
         bcsel(args)
     else:
         args.epochs, args.lr = args.epochs or 6, args.lr or 3e-4

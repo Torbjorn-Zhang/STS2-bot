@@ -97,18 +97,7 @@ class Names:
 def net_internals(net, T):
     """The unified network's forward pass, layer by layer: (logits, value, attention per layer
     [heads, L, L], token norms per stage [L])."""
-    import torch
-    k = net.tok.weight
-    st = (net.scal(T["x"]) + net.boss(T["b"]) + net.dec(T["dec"]) + k[0]).unsqueeze(1)
-    deck = net.card(T["d"]) + T["du"].unsqueeze(-1) * net.up + k[1]
-    rel = net.relic(T["r"]) + k[2]
-    pot = net.pot(T["p"]) + k[3]
-    misc = net.rest(T["orest"]) + net.evk(T["oev"]) + net.room(T["oroom"])
-    opt = (net.okind(T["ok"]) + net.card(T["oc"]) + T["ou"].unsqueeze(-1) * net.up + net.relic(T["or"])
-           + net.pot(T["op"]) + misc + net.osc(T["osc"]) + k[4])
-    x = torch.cat([st, deck, rel, pot, opt], 1)
-    n = x.shape[0]
-    pad = torch.cat([torch.zeros(n, 1, dtype=torch.bool), T["d"] == 0, T["r"] == 0, T["p"] == 0, ~T["omask"]], 1)
+    x, pad = net.embed(T)
     attns, norms = [], [x.norm(dim=-1)[0].numpy()]
     for layer in net.tf.layers:
         xa = layer.norm1(x)
@@ -119,8 +108,7 @@ def net_internals(net, T):
         norms.append(x.norm(dim=-1)[0].numpy())
     if net.tf.norm is not None:
         x = net.tf.norm(x)
-    no = T["ok"].shape[1]
-    z = net.head(x[:, -no:]).squeeze(-1)[0].numpy()
+    z = net.option_scores(x, T)[0].numpy()
     v = float(net.value(x[:, 0]).squeeze(-1)[0])
     return z, v, attns, norms, pad[0].numpy()
 
