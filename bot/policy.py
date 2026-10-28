@@ -656,7 +656,46 @@ def deck_roll_select(st, cards, room):
     return best
 
 
+SEL_ROOMS = ("Monster", "Elite", "Boss")   # card prompts inside a fight belong to the combat planner
+
+
+def select_options(st):
+    """A single-card prompt outside combat as (unique card tokens, the card index of each, its
+    purpose); None for multi-card prompts, combat prompts or fewer than two distinct cards. Copies
+    of a card are one option (removing either Strike is the same move)."""
+    from record import card_tok
+    cards = st.get("cards") or []
+    room = (st.get("context") or {}).get("room_type")
+    if room in SEL_ROOMS or (st.get("max_select") or 1) != 1 or (st.get("min_select") or 0) > 1:
+        return None
+    toks, idx = [], []
+    for i, c in enumerate(cards):
+        t = card_tok(c)
+        if t not in toks:
+            toks.append(t)
+            idx.append(c.get("index", i))
+    return (toks, idx, select_purpose(st)) if len(toks) >= 2 else None
+
+
 def choose_card_select(st, sim=None):
+    """The rule's pick; single-card prompts outside combat also record their options, purpose
+    and the pick (x.copts/cpur/ck), the imitation targets of the unified policy's card prompts."""
+    a = _rule_card_select(st, sim)
+    sel = select_options(st)
+    if sel is not None and a[0] == "select_cards":
+        toks, idx, pur = sel
+        picked = str(a[1].get("indices"))
+        k = next((j for j, i in enumerate(idx) if str(i) == picked), None)
+        if k is None:   # a later copy of a card: its token's option
+            from record import card_tok
+            c = next((c for i, c in enumerate(st.get("cards") or []) if str(c.get("index", i)) == picked), None)
+            k = toks.index(card_tok(c)) if c is not None and card_tok(c) in toks else None
+        if k is not None:
+            _LAST_SCORES.v = {**(getattr(_LAST_SCORES, "v", None) or {}), "copts": toks, "cpur": pur, "ck": k}
+    return a
+
+
+def _rule_card_select(st, sim=None):
     cards = st.get("cards") or []
     lo, hi = st.get("min_select") or 0, st.get("max_select") or 1
     if not cards:
@@ -971,6 +1010,28 @@ def event_prompt_kind():
     if re.search(r"upgrade|duplicate|copy|clone|enchant", t):
         return "better"
     return "worse"
+
+
+def select_purpose(st):
+    """What a single-card prompt outside combat is for: smith (rest site), remove (shop, Cook,
+    events), transform, upgrade (event upgrade / duplicate / enchant), add (event cards to add)
+    or other."""
+    room = (st.get("context") or {}).get("room_type")
+    if room == "RestSite":
+        return "remove" if getattr(_LAST_REST, "option", None) == "COOK" else "smith"
+    if room == "Shop":
+        return "remove"
+    if room == "Event":
+        t = re.sub(r"\[/?[a-z]+\]", "", getattr(_LAST_EVENT, "text", "") or "")
+        if "transform" in t:
+            return "transform"
+        if "remove" in t:
+            return "remove"
+        if re.search(r"to add to your deck", t):
+            return "add"
+        if re.search(r"upgrade|duplicate|copy|clone|enchant", t):
+            return "upgrade"
+    return "other"
 
 
 def choose_shop(st, memo, sim=None):

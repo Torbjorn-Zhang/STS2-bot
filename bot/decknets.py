@@ -4,8 +4,8 @@ with the full planner bot instead of the fast world).
 DeckNets(card, rest, event, map paths, temperature, shop=path) decides card rewards, rest
 sites, events, map choices and shop purchases by sampling softmax(logits / T) and returns
 the record extras the RL trainers read (card x.lp, rest x.rlp/rkeys/rk/route, event
-x.elp/eopts/ek/route, map x.mlp/mopts/mk, shop x.slp/sopts/sk/route/smemo), the same format
-as selfplay.py.
+x.elp/eopts/ek/route, map x.mlp/mopts/mk, shop x.slp/sopts/sk/route/smemo, card prompts
+x.clp/copts/cpur/ck when the unified network knows them), the same format as selfplay.py.
 """
 
 import math
@@ -101,6 +101,13 @@ class DeckNets:
                 elif a[0].startswith("buy_"):
                     visit["bought"] += 1
                 return a, {"sopts": [o for o, _ in opts], "sk": i, "slp": lp, "route": route, "smemo": before}
+        if d == "card_select" and self.unified is not None:
+            sel = policy.select_options(st)   # single-card prompts outside combat
+            if sel is not None and f"sel_{sel[2]}" in self.unified.kinds:
+                toks, idx, pur = sel
+                z = self.unified.score(f"sel_{pur}", st, [("card", t) for t in toks])
+                i, lp = self._sample(z)
+                return ("select_cards", {"indices": str(idx[i])}), {"copts": toks, "cpur": pur, "ck": i, "clp": lp}
         if d == "map_select" and self.map is not None and len(st.get("choices") or []) > 1:
             chs, descs, z = self.map.scores(sim, st)
             if z is not None and self.unified is not None:

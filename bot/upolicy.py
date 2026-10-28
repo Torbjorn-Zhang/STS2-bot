@@ -12,6 +12,9 @@ attends to every other; a head scores the option tokens; a softmax over one deci
       advantage-weighted) on self-play records: every decision type at once
   upolicy.py rl FILES... --init models/up1_bc.pt --out M --temperature 1   one PPO update on
       self-play played with this network (fleet xdeckrl kind "unified", fleetjob.py --unified)
+  upolicy.py bcsel FILES... --init M --out M2   teach a network the card prompts (sel_* kinds:
+      which card to remove, transform, upgrade or add) by imitating the rule's recorded picks,
+      while distilling its own outputs on the other kinds so their play stays the same
 Records are run.py --record rows written with DeckNets (the extras carry the option lists).
 """
 import argparse
@@ -29,7 +32,12 @@ import torch
 import torch.nn as nn
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KINDS = ["card_reward", "rest_site", "event_choice", "map_select", "shop"]
+KINDS = ["card_reward", "rest_site", "event_choice", "map_select", "shop",
+         "sel_remove", "sel_transform", "sel_upgrade", "sel_add", "sel_other"]
+# single-card prompts outside combat, by purpose (policy.select_purpose); the rest-site smith's
+# card is the rest decision's own pick (its SMITH:<card> options), so "smith" prompts stay rules
+SEL = ("remove", "transform", "upgrade", "add", "other")
+BASE_KINDS = KINDS[:5]   # what a network saved without a "kinds" list was trained on
 ROOMS = ["Monster", "Elite", "RestSite", "Shop", "Unknown", "Treasure", "Boss", "Event", "Ancient"]
 NUMS = ["Cards", "Relics", "Curses", "Gold", "Hp", "HpLoss", "MaxHp", "Potions", "Damage", "Heal", "Energy"]
 
@@ -62,9 +70,21 @@ def route_counts(route):
     return [sum(1 for r in route if r == t) / 5.0 for t in ROOMS] + [len(route) / 15.0]
 
 
+def kind_of(r):
+    """The policy kind of a record decision row: its decision, or sel_<purpose> for a card prompt
+    with recorded options (x.copts/cpur, from policy.choose_card_select or DeckNets)."""
+    dec = r.get("dec")
+    if dec == "card_select":
+        pur = (r.get("x") or {}).get("cpur")
+        return f"sel_{pur}" if pur in SEL and (r.get("x") or {}).get("copts") else None
+    return dec
+
+
 def options_of(r):
     """Option descriptors of a record decision row, in its action order; None if unsupported."""
-    dec, x, A = r.get("dec"), r.get("x") or {}, r.get("A") or []
+    dec, x, A = kind_of(r), r.get("x") or {}, r.get("A") or []
+    if dec and dec.startswith("sel_"):
+        return [("card", t) for t in x["copts"]]
     if dec == "card_reward":
         cards = r.get("cards") or []
         out = []
@@ -84,7 +104,9 @@ def options_of(r):
 
 
 def chosen_of(r, opts):
-    dec, x = r.get("dec"), r.get("x") or {}
+    dec, x = kind_of(r), r.get("x") or {}
+    if dec and dec.startswith("sel_"):
+        return x.get("ck", -1)
     if dec == "card_reward":
         return r.get("a", -1)
     if dec == "rest_site":
@@ -100,6 +122,8 @@ def chosen_of(r, opts):
 
 def behavior_lp(r):
     x = r.get("x") or {}
+    if r["dec"] == "card_select":
+        return x.get("clp")   # None for the rule's picks
     return x.get({"card_reward": "lp", "rest_site": "rlp", "event_choice": "elp", "map_select": "mlp", "shop": "slp"}[r["dec"]])
 
 
@@ -269,6 +293,19 @@ class Net(nn.Module):
         return z
 
 
+def load_net(blob):
+    """-> (network, the kinds it was trained on). A network saved before the sel_* kinds has fewer
+    decision embeddings: the new ones start as card_reward's (their options are cards too)."""
+    enc = Enc(blob=blob["enc"])
+    net = Net(enc)
+    state = dict(blob["state"])
+    w = state["dec.weight"]
+    if w.shape[0] < len(KINDS):
+        state["dec.weight"] = torch.cat([w, w[:1].repeat(len(KINDS) - w.shape[0], 1)], 0)
+    net.load_state_dict(state)
+    return net, list(blob.get("kinds") or BASE_KINDS)
+
+
 def load_records(files):
     """-> decisions [(dec, s, opts, chosen, route, behavior lp, run key)], outcomes {run key: row}."""
     decs, outcome = [], {}
@@ -279,7 +316,7 @@ def load_records(files):
             if r.get("k") == "o":
                 outcome[key] = r
                 continue
-            if r.get("k") != "d" or r.get("dec") not in KINDS or not r.get("s"):
+            if r.get("k") != "d" or kind_of(r) not in KINDS or not r.get("s"):
                 continue
             opts = options_of(r)
             if not opts or len(opts) < 2:
@@ -287,7 +324,7 @@ def load_records(files):
             a = chosen_of(r, opts)
             if a is None or a < 0 or a >= len(opts):
                 continue
-            decs.append((r["dec"], r["s"], opts, a, (r.get("x") or {}).get("route"), behavior_lp(r), key))
+            decs.append((kind_of(r), r["s"], opts, a, (r.get("x") or {}).get("route"), behavior_lp(r), key))
     return decs, outcome
 
 
@@ -365,7 +402,8 @@ def train(args):
         print(json.dumps(res), flush=True)
         if res["nll"] < best[0]:
             best = (res["nll"], {k: v.detach().cpu().clone() for k, v in net.state_dict().items()}, res)
-    torch.save({"enc": enc.to_json(), "state": best[1]}, os.path.join(HERE, args.out))
+    torch.save({"enc": enc.to_json(), "state": best[1], "kinds": sorted({d[0] for d in decs}, key=KINDS.index)},
+               os.path.join(HERE, args.out))
     print(json.dumps({"saved": args.out, "decisions": len(decs), **best[2]}))
 
 
@@ -390,8 +428,7 @@ def rl(args):
     dev = torch.device(os.environ.get("NETS_DEVICE", "cpu"))
     if dev.type == "cuda" and not torch.cuda.is_available():
         dev = torch.device("cpu")
-    net = Net(enc)
-    net.load_state_dict(blob["state"])
+    net, kinds = load_net(blob)
     net.to(dev)
     net.eval()   # no dropout: the behaviour log-probs were computed without it
     with torch.no_grad():   # the value head's baseline (it fits return / 100)
@@ -452,8 +489,95 @@ def rl(args):
         if res["kl"] > args.target_kl:
             break
     net.to("cpu")
-    torch.save({"enc": blob["enc"], "state": net.state_dict(), "rl_from": args.init}, os.path.join(HERE, args.out))
+    torch.save({"enc": blob["enc"], "state": net.state_dict(), "rl_from": args.init, "kinds": kinds}, os.path.join(HERE, args.out))
     print(json.dumps({"saved": args.out, "decisions": len(decs)}))
+
+
+def bcsel(args):
+    """Teach --init the card prompts: cross-entropy on the rule's recorded picks (sel_* rows,
+    x.ck) plus, on every other decision, KL(init || new) to the init network's own softmax and
+    the squared change of its value, so the rest of its play stays as it was. Validation (a
+    tenth of the runs): agreement with the rule per purpose, mean KL on the other kinds."""
+    blob = torch.load(os.path.join(HERE, args.init), map_location="cpu", weights_only=False)
+    enc = Enc(blob=blob["enc"])
+    decs, _ = load_records(expand(args.files))
+    dev = torch.device(os.environ.get("NETS_DEVICE", "cpu"))
+    if dev.type == "cuda" and not torch.cuda.is_available():
+        dev = torch.device("cpu")
+    net, kinds = load_net(blob)
+    net.to(dev)
+    items = [enc.encode(d[0], d[1], d[2], d[4]) for d in decs]
+    sel = np.array([d[0].startswith("sel_") for d in decs])
+    keys = sorted({d[6] for d in decs})
+    random.Random(0).shuffle(keys)
+    va_keys = set(keys[:max(1, len(keys) // 10)])
+    is_va = np.array([d[6] in va_keys for d in decs])
+    A = torch.tensor([d[3] for d in decs], device=dev)
+    net.eval()
+    P0, V0 = [], []
+    with torch.no_grad():   # the init network's own outputs: the anchors of the other kinds
+        for i in range(0, len(decs), 512):
+            T = collate(items[i:i + 512], dev)
+            z, v = net(T, with_value=True)
+            p = torch.softmax(z, -1)
+            P0 += [p[j, :len(items[i + j]["ok"])].cpu() for j in range(len(p))]
+            V0.append(v.cpu())
+    V0 = torch.cat(V0).to(dev)
+    print(json.dumps({"decisions": len(decs), "by_kind": dict(Counter(d[0] for d in decs)), "runs": len(keys),
+                      "init_kinds": kinds}), flush=True)
+
+    def batch_loss(b):
+        T = collate([items[j] for j in b], dev)
+        z, v = net(T, with_value=True)
+        logp = torch.log_softmax(z, -1)
+        m = torch.tensor(sel[b], device=dev)
+        p0 = torch.zeros_like(logp)
+        for r, j in enumerate(b):
+            p0[r, :len(P0[j])] = P0[j].to(dev)
+        kl = (p0 * (torch.log(p0.clamp(min=1e-12)) - logp)).sum(1)
+        ce = -logp.gather(1, A[b][:, None]).squeeze(1)
+        vd = (v - V0[b]) ** 2
+        return ce, kl, vd, m, z
+
+    def evaluate():
+        net.eval()
+        idx = [i for i in range(len(decs)) if is_va[i]]
+        agree, kls = defaultdict(lambda: [0, 0]), defaultdict(list)
+        with torch.no_grad():
+            for i in range(0, len(idx), 512):
+                b = idx[i:i + 512]
+                ce, kl, vd, m, z = batch_loss(b)
+                ok = (z.argmax(-1) == A[b]).cpu().numpy()
+                for r, j in enumerate(b):
+                    if sel[j]:
+                        agree[decs[j][0]][0] += int(ok[r])
+                        agree[decs[j][0]][1] += 1
+                    else:
+                        kls[decs[j][0]].append(float(kl[r]))
+        return {**{f"agree_{k}": round(v[0] / max(1, v[1]), 3) for k, v in sorted(agree.items())},
+                **{f"kl_{k}": round(float(np.mean(v)), 5) for k, v in sorted(kls.items())}}
+
+    print(json.dumps({"epoch": -1, **evaluate()}), flush=True)
+    opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
+    tr = [i for i in range(len(decs)) if not is_va[i]]
+    for ep in range(args.epochs):
+        net.train()
+        random.Random(ep).shuffle(tr)
+        for i in range(0, len(tr), args.batch):
+            b = tr[i:i + args.batch]
+            ce, kl, vd, m, _ = batch_loss(b)
+            mf = m.float()
+            loss = (ce * mf).sum() / mf.sum().clamp(min=1) + args.kl_coef * ((kl + vd) * (1 - mf)).sum() / (1 - mf).sum().clamp(min=1)
+            opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(net.parameters(), 1.0)
+            opt.step()
+        print(json.dumps({"epoch": ep, **evaluate()}), flush=True)
+    net.to("cpu")
+    new_kinds = sorted(set(kinds) | {d[0] for d in decs if d[0].startswith("sel_")}, key=KINDS.index)
+    torch.save({"enc": blob["enc"], "state": net.state_dict(), "bcsel_from": args.init, "kinds": new_kinds},
+               os.path.join(HERE, args.out))
+    print(json.dumps({"saved": args.out, "kinds": new_kinds}))
 
 
 class UPolicy:
@@ -462,8 +586,7 @@ class UPolicy:
     def __init__(self, path):
         blob = torch.load(os.path.join(HERE, path) if not os.path.isabs(path) else path, map_location="cpu", weights_only=False)
         self.enc = Enc(blob=blob["enc"])
-        self.net = Net(self.enc)
-        self.net.load_state_dict(blob["state"])
+        self.net, self.kinds = load_net(blob)
         self.net.eval()
 
     def score(self, dec, st, opts, route=None):
@@ -474,7 +597,7 @@ class UPolicy:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["train", "rl"])
+    ap.add_argument("cmd", choices=["train", "rl", "bcsel"])
     ap.add_argument("files", nargs="+")
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cuda")
@@ -495,6 +618,7 @@ def main():
     ap.add_argument("--wmax", type=float, default=20.0)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threads", type=int, default=None, help="torch CPU threads (default: NETS_THREADS or 2)")
+    ap.add_argument("--kl-coef", type=float, default=1.0, help="bcsel: weight of the other kinds' KL to the init network")
     args = ap.parse_args()
     os.environ.setdefault("STS2_RETURN", "sm")
     import nets
@@ -503,6 +627,9 @@ def main():
     if args.cmd == "rl":
         args.epochs, args.lr = args.epochs or 3, args.lr or 1e-4
         rl(args)
+    elif args.cmd == "bcsel":
+        args.epochs, args.lr = args.epochs or 4, args.lr or 1e-4
+        bcsel(args)
     else:
         args.epochs, args.lr = args.epochs or 6, args.lr or 3e-4
         train(args)

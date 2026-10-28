@@ -883,6 +883,8 @@ class Task:
         if st["phase"] == "start":
             st["job"] = fl.add_job(self.name, f"{self.name}_task", "task", sp.get("prio", 0.5), sp["argv"],
                                    sp.get("inputs", []), sp.get("outputs", []), gpu=sp.get("gpu", False), only=sp.get("only"))
+            if sp.get("slots"):   # a multi-threaded task (torch training): up to this many slots
+                fl.jobs[st["job"]]["slots"] = sp["slots"]
             st["phase"] = "running"
         elif st["phase"] == "running" and fl.jobs[st["job"]]["state"] in ("done", "failed"):
             j = fl.jobs[st["job"]]
@@ -1544,6 +1546,14 @@ class Fleet:
             if any(h.get("gpu") for h in hosts) and time.time() - job.get("queued_since", time.time()) < 600:
                 return None, False
         cand = [h for h in hosts if self.free_slots(h) > 0]
+        if job.get("slots") and job["kind"] != "train":
+            # a multi-slot task waits (30 min at most) for a host with all its slots free, which
+            # comes between two self-play iterations; launched on one free slot it gets 2 threads
+            full = [h for h in cand if self.free_slots(h) >= job["slots"]]
+            if full:
+                cand = full
+            elif time.time() - job.get("queued_since", time.time()) < 1800:
+                return None, False
         if not cand:
             return None, False
         return max(cand, key=lambda h: (self.free_slots(h) / h["slots"], -h.get("order", 9))), False
@@ -1556,8 +1566,9 @@ class Fleet:
             h, gpu = self.pick(j, hosts)
             if h is None:
                 continue
-            if j["kind"] == "train":   # the slots it may use (fewer when it lands on a busy host)
-                j["w"] = max(1, min(TRAIN_SLOTS, self.free_slots(h)))
+            want = TRAIN_SLOTS if j["kind"] == "train" else j.get("slots")
+            if want:   # the slots it may use (fewer when it lands on a busy host)
+                j["w"] = max(1, min(want, self.free_slots(h)))
             j["state"], j["host"], j["gpu_now"] = "running", h["name"], gpu
             plan.setdefault(h["name"], []).append(j)
         for name, js in plan.items():
@@ -1803,6 +1814,7 @@ def main():
     ap.add_argument("--outputs", default=None, help='task: JSON list of bot/-relative files to fetch')
     ap.add_argument("--gpu", action="store_true", help="task: run on a GPU machine with CUDA")
     ap.add_argument("--only", default=None, help="task: run on this host only (its data is there)")
+    ap.add_argument("--slots", type=int, default=None, help="task: take up to this many slots (NETS_THREADS = workers x slots)")
     ap.add_argument("--reward", default=None, help='xdeckrl: JSON env overrides of the RL return (fleetjob.py --reward)')
     ap.add_argument("--set", default=None, help='set: JSON {spec key: value} for the live pipeline --tag')
     args = ap.parse_args()
@@ -1874,7 +1886,7 @@ def main():
     elif args.cmd == "task":
         submit("task", {"tag": args.tag, "argv": json.loads(args.argv), "inputs": json.loads(args.inputs or "[]"),
                         "outputs": json.loads(args.outputs or "[]"), "gpu": args.gpu, "only": args.only,
-                        "prio": 0.5 if args.prio is None else args.prio})
+                        "prio": 0.5 if args.prio is None else args.prio, **({"slots": args.slots} if args.slots else {})})
     elif args.cmd == "cancel":
         submit("cancel", {"tag": args.tag})
     elif args.cmd == "set":

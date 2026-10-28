@@ -47,7 +47,7 @@ def _to_map(sim, st):
             a = policy.choose_card_reward_tier(st)
         elif d == "card_select":
             a = _pilot(st) if (st.get("context") or {}).get("room_type") in ("Monster", "Elite", "Boss") \
-                else policy.choose_card_select(st)
+                else policy._rule_card_select(st)
         elif d == "combat_play":
             a = _pilot(st)
         elif d == "event_choice":
