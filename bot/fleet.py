@@ -51,6 +51,9 @@ GPU_BUSY = 40        # % GPU utilisation by other programs that makes a yield_gp
 YIELD_QUIET = 600    # seconds of a quiet GPU before such a host gets work again
 MAX_TRIES = 4
 BACKUP_AFTER = 120   # a job running this long while the queue is empty gets a backup copy on an idle host
+# a CPU training job takes up to this many slots (workers threads each): with 2 torch threads it was
+# a third of each iteration (750 s on lab0); it runs while the pipeline's self-play waits for it
+TRAIN_SLOTS = 6
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10"]
 
 
@@ -429,7 +432,7 @@ def job_sh(host, job):
     argv = [str(host["workers"]) if a == "%W%" else str(a) for a in job["argv"]]
     env = {"HOME": f"{R}/home", "DOTNET": f"{R}/dotnet/dotnet", "DOTNET_ROOT": f"{R}/dotnet", "DOTNET_CLI_HOME": f"{R}/cache/dotnethome",
            "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "OMP_NUM_THREADS": "1", "XDG_CACHE_HOME": f"{R}/cache", "NETS_DEVICE": "cpu",
-           "PYTHONUNBUFFERED": "1"}
+           "PYTHONUNBUFFERED": "1", "NETS_THREADS": str(host["workers"] * job.get("w", 1))}
     py = f"{R}/.venv/bin/python"
     gpu = []
     if job.get("gpu_now"):
@@ -453,7 +456,8 @@ def job_cmd(host, job):
     root = wroot(host)
     py = root + ("\\.venv-cu" if job.get("gpu_now") else "\\.venv") + "\\Scripts\\python.exe"
     env = {"DOTNET": root + "\\dotnet\\dotnet.exe", "DOTNET_ROOT": root + "\\dotnet", "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
-           "OMP_NUM_THREADS": "1", "NETS_DEVICE": "cuda" if job.get("gpu_now") else "cpu", "PYTHONUNBUFFERED": "1"}
+           "OMP_NUM_THREADS": "1", "NETS_DEVICE": "cuda" if job.get("gpu_now") else "cpu", "PYTHONUNBUFFERED": "1",
+           "NETS_THREADS": str(host["workers"] * job.get("w", 1))}
     jid = job["id"]
     argv = [str(host["workers"]) if a == "%W%" else str(a) for a in job["argv"]]
     lines = ["@echo off"] + [f"set {k}={v}" for k, v in env.items()] + [f"cd /d {root}\\bot"] + [
@@ -1434,15 +1438,21 @@ class Fleet:
                 h["others_hist"] = hist
                 peak = max([others] + [x[1] for x in hist])
             else:
-                ours_threads = sum(h["workers"] for _ in self.running_on(h))
+                ours_threads = sum(h["workers"] * j.get("w", 1) for j in self.running_on(h))
                 others = peak = max(0.0, r["load"] - ours_threads)
             per = max(1, h["workers"])
             allow = int((r["ncpu"] - others) * h.get("share", 0.5)) // per
             h["slots_now"] = max(0, min(h["slots"], int((r["ncpu"] - peak) * h.get("share", 0.5)) // per))
             h["others_load"] = round(others, 1)
-            extra = len(self.running_on(h)) - max(0, min(h["slots"], allow))
+            extra = sum(j.get("w", 1) for j in self.running_on(h)) - max(0, min(h["slots"], allow))
             if extra > 1:   # one slot of slack against load-average jitter
-                for j in sorted(self.running_on(h), key=lambda j: -j.get("t_start", 0))[:extra]:
+                stop, freed = [], 0
+                for j in sorted(self.running_on(h), key=lambda j: (j["kind"] == "train", -j.get("t_start", 0))):
+                    if freed >= extra:
+                        break
+                    stop.append(j)
+                    freed += j.get("w", 1)
+                for j in stop:
                     self.kill_job(h["name"], j["id"])
                     if not self.drop_copy(j, h["name"]):
                         j["state"], j["host"] = "queued", None
@@ -1520,7 +1530,7 @@ class Fleet:
 
     def free_slots(self, h):
         cap = h.get("slots_now", h["slots"]) if h.get("dynamic") else h["slots"]
-        return cap - len(self.running_on(h))
+        return cap - sum(j.get("w", 1) for j in self.running_on(h))
 
     def pick(self, job, hosts):
         if job.get("only"):   # e.g. a task whose data lives on one machine
@@ -1546,6 +1556,8 @@ class Fleet:
             h, gpu = self.pick(j, hosts)
             if h is None:
                 continue
+            if j["kind"] == "train":   # the slots it may use (fewer when it lands on a busy host)
+                j["w"] = max(1, min(TRAIN_SLOTS, self.free_slots(h)))
             j["state"], j["host"], j["gpu_now"] = "running", h["name"], gpu
             plan.setdefault(h["name"], []).append(j)
         for name, js in plan.items():

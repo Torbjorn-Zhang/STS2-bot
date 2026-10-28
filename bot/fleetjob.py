@@ -44,7 +44,8 @@ def train(args):
         cmd = [PY, script, mode] + args.data + ["--init", init, "--out", out, "--temperature", str(args.temperature)]
         log = open(os.path.join(HERE, "fleet", "jobs", f"train_{args.tag}{args.it}_{kind}.log"), "w")
         procs[kind] = (subprocess.Popen(cmd, cwd=HERE, stdout=log, stderr=subprocess.STDOUT,
-                                        env={**os.environ, "OMP_NUM_THREADS": "2", "NETS_THREADS": "2",
+                                        env={**os.environ, "OMP_NUM_THREADS": os.environ.get("NETS_THREADS", "2"),
+                                             "NETS_THREADS": os.environ.get("NETS_THREADS", "2"),
                                              "NETS_LR_SCALE": str(args.lr_scale),
                                              **({k: str(v) for k, v in json.loads(args.reward).items()} if args.reward else {})}),
                                         log, time.time())
