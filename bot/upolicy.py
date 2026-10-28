@@ -433,7 +433,11 @@ def rl(args):
     temperature T (run.py --deck-sample T, deck-nets "unified"), so their behaviour log-probs are
     its own. Return: the run's final return (STS2_RETURN), baseline: its mean over the runs at the
     same (ascension, act, floor) in this data (--baseline: or the value head); the value head keeps
-    fitting the return."""
+    fitting the return. Decoupled PPO (Hilton et al. 2021): the ratio is clipped around this
+    network (the proximal policy) and each decision is weighted by proximal / behaviour
+    probability (capped at --is-cap), so records played by an older network (reuse, or self-play
+    that overlapped the previous update) count without biasing the step; on fresh records the
+    weight is 1 and the loss is plain PPO."""
     from nets import decision_return
     blob = torch.load(os.path.join(HERE, args.init), map_location="cpu", weights_only=False)
     enc = Enc(blob=blob["enc"])
@@ -452,9 +456,16 @@ def rl(args):
     net, kinds = load_net(blob)
     net.to(dev)
     net.eval()   # no dropout: the behaviour log-probs were computed without it
-    with torch.no_grad():   # the value head's baseline (it fits return / 100)
-        b_value = np.concatenate([100.0 * net(collate([items[j] for j in range(i, min(len(decs), i + 512))], dev), with_value=True)[1].cpu().numpy()
-                                  for i in range(0, len(decs), 512)]).astype(np.float32)
+    A = torch.tensor([d[3] for d in decs], device=dev)
+    T = args.temperature
+    with torch.no_grad():   # the value head's baseline (it fits return / 100) and the proximal log-probs
+        b_value, lpp = [], []
+        for i in range(0, len(decs), 512):
+            z, v = net(collate([items[j] for j in range(i, min(len(decs), i + 512))], dev), with_value=True)
+            b_value.append(100.0 * v.cpu().numpy())
+            lpp.append(torch.log_softmax(z / T, -1).gather(1, A[i:i + 512][:, None]).squeeze(1))
+        b_value = np.concatenate(b_value).astype(np.float32)
+        LPP = torch.cat(lpp)
     ev = lambda b, m=slice(None): round(float(1 - np.var(G[m] - b[m]) / (np.var(G[m]) + 1e-9)), 3)
     acts = np.array([d[1].get("act") or 1 for d in decs])
     print(json.dumps({"decisions": len(decs), "by_kind": dict(Counter(d[0] for d in decs)), "runs": len({d[6] for d in decs}),
@@ -467,18 +478,17 @@ def rl(args):
         print(json.dumps({"baseline_chosen": args.baseline}), flush=True)
     adv = G - {"bucket": b_bucket, "value": b_value, "mix": 0.5 * (b_bucket + b_value)}[args.baseline]
     adv = (adv - adv.mean()) / (adv.std() + 1e-6)
-    A = torch.tensor([d[3] for d in decs], device=dev)
     LP0 = torch.tensor([d[5] for d in decs], dtype=torch.float32, device=dev)
     ADV = torch.from_numpy(adv).to(dev)
     R = torch.from_numpy(G / 100.0).to(dev)
-    T = args.temperature
     lr = args.lr * float(os.environ.get("NETS_LR_SCALE", "1"))
     opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
-    with torch.no_grad():   # the records' log-probs should be this network's own (ratio 1 before the update)
-        idx = list(range(min(len(decs), 2048)))
-        z = net(collate([items[j] for j in idx], dev))
-        lp = torch.log_softmax(z / T, -1).gather(1, A[idx][:, None]).squeeze(1)
-        print(json.dumps({"init_lp_gap": round(float((lp - LP0[idx]).abs().mean()), 4)}), flush=True)
+    # behaviour -> proximal importance weights: 1 where the records are this network's own
+    IW = torch.exp(LPP - LP0).clamp(max=args.is_cap)
+    gap = (LPP - LP0).abs()
+    print(json.dumps({"init_lp_gap": round(float(gap.mean()), 4), "stale": round(float((gap > 1e-3).float().mean()), 3),
+                      "iw_mean": round(float(IW.mean()), 4), "iw_capped": round(float((LPP - LP0 > np.log(args.is_cap)).float().mean()), 4)}),
+          flush=True)
     order = list(range(len(decs)))
     for ep in range(args.epochs):
         random.Random(ep).shuffle(order)
@@ -488,9 +498,9 @@ def rl(args):
             z, v = net(collate([items[j] for j in b], dev), with_value=True)
             logp = torch.log_softmax(z / T, -1)
             lp_new = logp.gather(1, A[b][:, None]).squeeze(1)
-            ratio = torch.exp(lp_new - LP0[b])
+            ratio = torch.exp(lp_new - LPP[b])
             ad = ADV[b]
-            pg = -torch.min(ratio * ad, ratio.clamp(1 - args.clip, 1 + args.clip) * ad).mean()
+            pg = -(IW[b] * torch.min(ratio * ad, ratio.clamp(1 - args.clip, 1 + args.clip) * ad)).mean()
             p = logp.exp()
             entropy = -(p * logp.clamp(min=-30)).sum(1).mean()
             vl = ((v - R[b]) ** 2).mean()
@@ -503,7 +513,7 @@ def rl(args):
             stats["ent"] += entropy.item()
             stats["v"] += vl.item()
             stats["clipfrac"] += ((ratio - 1).abs() > args.clip).float().mean().item()
-            stats["kl"] += (LP0[b] - lp_new).mean().item()
+            stats["kl"] += (LPP[b] - lp_new).mean().item()
             nb += 1
         res = {"epoch": ep, **{k: round(v / nb, 4) for k, v in stats.items()}}
         print(json.dumps(res), flush=True)
@@ -636,7 +646,8 @@ def main():
     ap.add_argument("--clip", type=float, default=0.2)
     ap.add_argument("--ent", type=float, default=0.01)
     ap.add_argument("--vcoef", type=float, default=0.25)
-    ap.add_argument("--target-kl", type=float, default=0.03, help="rl: stop the epochs once the mean KL passes this")
+    ap.add_argument("--target-kl", type=float, default=0.03, help="rl: stop the epochs once the mean KL (from --init) passes this")
+    ap.add_argument("--is-cap", type=float, default=2.0, help="rl: cap on the proximal / behaviour probability weight")
     ap.add_argument("--baseline", default="auto", choices=["auto", "bucket", "value", "mix"],
                     help="rl: mean return at the same (asc, act, floor), the value head, their mean, or (auto) whichever "
                          "explains more of the return's variance in this data")

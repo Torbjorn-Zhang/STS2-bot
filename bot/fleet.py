@@ -754,9 +754,12 @@ class XDeckRL:
     def inputs(self, models, cfg):
         return [cfg] + [m for m in models.values() if m]
 
-    def start_selfplay(self, fl, it):
+    def start_selfplay(self, fl, it, early=False):
+        """early ("overlap"): started when iteration it-1's update starts, on the networks that
+        update begins from, so the fleet does not idle through it; switch_selfplay moves the
+        chunks still queued when the update lands onto its networks."""
         sp = self.spec
-        cfg = self.nets_json(it - 1, self.st["cur"])
+        cfg = self.nets_json(it - 2 if early else it - 1, self.st["cur"])
         jobs = []
         for k, s0 in enumerate(range(0, sp["runs"], sp["chunk"])):
             rec, rows = f"fleetdata/{self.name}_it{it}_c{k}.jsonl", f"runs/{self.name}{it}_sp{k}.jsonl"
@@ -770,9 +773,26 @@ class XDeckRL:
                                  asc=mix[k % len(mix)])
             jobs.append(fl.add_job(self.name, f"{self.name}{it}_sp{k}", "xselfplay", 1, argv,
                                    self.inputs(self.st["cur"], cfg), [rec, rows]))
-        self.st["sp"][str(it)] = {"jobs": jobs, "t0": time.time()}
+        self.st["sp"][str(it)] = {"jobs": jobs, "t0": time.time(), **({"early": True} if early else {})}
+        if not early:
+            self.st["phase"] = "selfplay"
+        log(f"{self.name}: iteration {it} expert self-play, {len(jobs)} chunks" + (" (overlapping the update)" if early else ""))
+
+    def switch_selfplay(self, fl, it):
+        """The update before iteration it landed: its early self-play chunks not started yet play
+        the new networks (the records carry their own behaviour log-probs, which the PPO update
+        weighs, so mixed chunks are fine)."""
+        cfg = self.nets_json(it - 1, self.st["cur"])
+        n = 0
+        for jid in self.st["sp"][str(it)]["jobs"]:
+            j = fl.jobs[jid]
+            if j["state"] == "queued":
+                j["argv"][j["argv"].index("--deck-nets") + 1] = cfg
+                j["inputs"] = self.inputs(self.st["cur"], cfg)
+                n += 1
+        self.st["sp"][str(it)]["switched"] = n
         self.st["phase"] = "selfplay"
-        log(f"{self.name}: iteration {it} expert self-play, {len(jobs)} chunks")
+        log(f"{self.name}: iteration {it} self-play: {n} of {len(self.st['sp'][str(it)]['jobs'])} chunks switched to the new networks")
 
     def start_eval(self, fl, it, models, sp_summary):
         sp = self.spec
@@ -823,6 +843,8 @@ class XDeckRL:
                                          outs, gpu=True)
                 st["phase"] = "train"
                 log(f"{self.name}: iteration {it} expert self-play done {json.dumps(summary)}; training on {len(data)} files")
+                if sp.get("overlap") and it + 1 < sp["start"] + sp["iters"]:
+                    self.start_selfplay(fl, it + 1, early=True)
         elif st["phase"] == "train":
             j = fl.jobs[st["train"]]
             it = st["it"]
@@ -843,7 +865,10 @@ class XDeckRL:
                 st["cur"] = new
                 if it + 1 < sp["start"] + sp["iters"]:
                     st["it"] = it + 1
-                    self.start_selfplay(fl, it + 1)
+                    if str(it + 1) in st["sp"]:   # started early, during this update
+                        self.switch_selfplay(fl, it + 1)
+                    else:
+                        self.start_selfplay(fl, it + 1)
                 else:
                     st["phase"] = "finishing"
         for it, ev in list(st["evals"].items()):
