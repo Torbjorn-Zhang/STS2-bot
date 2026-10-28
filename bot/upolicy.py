@@ -561,7 +561,7 @@ def bcsel(args):
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
     tr = [i for i in range(len(decs)) if not is_va[i]]
     for ep in range(args.epochs):
-        net.train()
+        net.eval()   # no dropout: the KL anchors are the eval-mode outputs
         random.Random(ep).shuffle(tr)
         for i in range(0, len(tr), args.batch):
             b = tr[i:i + args.batch]
