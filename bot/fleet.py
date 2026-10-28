@@ -643,7 +643,7 @@ class Expert:
                 log(f"{self.name}: expert evaluation done {json.dumps(summ)}")
 
     def finished(self):
-        return self.st["phase"] == "finished"
+        return self.st["phase"] in ("finished", "cancelled")
 
 
 class Bench:
@@ -710,7 +710,7 @@ class Bench:
             st.update(phase="finished", summary=summ)
 
     def finished(self):
-        return self.st["phase"] == "finished"
+        return self.st["phase"] in ("finished", "cancelled")
 
 
 def summarize_runs(rows):
@@ -819,6 +819,10 @@ class XDeckRL:
 
     def step(self, fl):
         st, sp = self.st, self.spec
+        for k, v in st["sp"].items():   # iterations already trained on: their chunks are used
+            if int(k) < st["it"] and "jobs" in v:
+                fl.forget(v["jobs"])
+                v["n_jobs"] = len(v.pop("jobs"))
         if st["phase"] == "start":
             if sp.get("eval_init"):
                 self.start_eval(fl, sp["start"] - 1, st["cur"], None)
@@ -875,6 +879,8 @@ class XDeckRL:
                 if it % sp.get("eval_every", 1) == 0 or last:
                     self.start_eval(fl, it, new, st["sp"][str(it)].get("summary"))
                 fl.cleanup(f"fleetdata/{self.name}_it{it}_c*.jsonl", keep=f"data/xdarchive/{self.name}_it{it}")
+                if sp.get("reuse"):   # the hosts' copies of the oldest reused iteration: no later update reads them
+                    fl.cleanup(f"data/xdarchive/{self.name}_it{it - sp['reuse']}/*.jsonl", local=False)
                 st["cur"] = new
                 if it + 1 < sp["start"] + sp["iters"]:
                     st["it"] = it + 1
@@ -898,6 +904,7 @@ class XDeckRL:
                 with open(os.path.join(HERE, "runs", f"{self.name}.jsonl"), "a") as fh:
                     fh.write(json.dumps(row) + "\n")
                 log(f"{self.name}: iteration {it} A10 {json.dumps(res)}")
+                fl.forget(ev["jobs"])
                 del st["evals"][it]
         if st["phase"] == "finishing" and not st["evals"]:
             st["phase"] = "finished"
@@ -930,7 +937,7 @@ class Task:
             log(f"{self.name}: task {j['state']} {json.dumps(j.get('result'))[:300]}")
 
     def finished(self):
-        return self.st["phase"] == "finished"
+        return self.st["phase"] in ("finished", "cancelled")
 
 
 def fight_score(r):
@@ -1146,6 +1153,13 @@ class Fleet:
             json.dump(s, fh)
         os.replace(tmp, STATE)
 
+    def forget(self, ids):
+        """Drop finished jobs whose results their pipeline has used (a live pipeline's chunks
+        otherwise pile up in the state file, rewritten every 30 s, by ~110-440 per iteration)."""
+        for i in ids:
+            if i in self.jobs and self.jobs[i]["state"] in ("done", "failed"):
+                del self.jobs[i]
+
     def add_job(self, pipe, jid, kind, prio, argv, inputs, outputs, gpu=False, only=None):
         self.seq += 1
         self.jobs[jid] = {"id": jid, "pipe": pipe, "kind": kind, "prio": prio, "seq": self.seq, "argv": argv,
@@ -1153,14 +1167,14 @@ class Fleet:
                           "host": None, "result": None, **({"only": only} if only else {})}
         return jid
 
-    def cleanup(self, pattern, keep=None):
+    def cleanup(self, pattern, keep=None, local=True):
         """Delete files matching pattern on every host; on this Mac move them to `keep`
-        (a directory under bot/) instead when given."""
+        (a directory under bot/) instead when given, or leave them (local=False)."""
         for h in self.hosts.values():
             h["clean"].append(pattern)
         if keep:
             os.makedirs(os.path.join(HERE, keep), exist_ok=True)
-        for p in glob.glob(os.path.join(HERE, pattern)):
+        for p in glob.glob(os.path.join(HERE, pattern)) if local else []:
             if keep:
                 os.replace(p, os.path.join(HERE, keep, os.path.basename(p)))
             else:
@@ -1507,6 +1521,11 @@ class Fleet:
                 log(f"{h['name']}: {r['ours']} of our jobs still alive while drained; killing")
                 self.kill(h)
             return
+        if h["clean"] and time.time() - h.get("clean_t", 0) > 600:
+            # cleanups queued since the last pass (it used to run only when a host joined, so old
+            # record files piled up between coordinator restarts: 1006 on lab0)
+            h["clean_t"] = time.time()
+            self.remote_clean(h)
         fetch = []
         for jid, jr in (r.get("jobs") or {}).items():
             j = self.jobs.get(jid)
