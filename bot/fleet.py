@@ -52,8 +52,9 @@ YIELD_QUIET = 600    # seconds of a quiet GPU before such a host gets work again
 MAX_TRIES = 4
 BACKUP_AFTER = 120   # a job running this long while the queue is empty gets a backup copy on an idle host
 # a CPU training job takes up to this many slots (workers threads each): with 2 torch threads it was
-# a third of each iteration (750 s on lab0); it runs while the pipeline's self-play waits for it
+# a third of each iteration (750 s on lab0); without "overlap" the pipeline's self-play waits for it
 TRAIN_SLOTS = 6
+TRAIN_WAIT = 900   # a queued train job holds its host this long for TRAIN_SLOTS free slots (pipelined self-play keeps every slot busy)
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10"]
 
 
@@ -755,9 +756,11 @@ class XDeckRL:
         return [cfg] + [m for m in models.values() if m]
 
     def start_selfplay(self, fl, it, early=False):
-        """early ("overlap"): started when iteration it-1's update starts, on the networks that
-        update begins from, so the fleet does not idle through it; switch_selfplay moves the
-        chunks still queued when the update lands onto its networks."""
+        """early: started before iteration it-1's update lands, on the networks that update
+        begins from, so the fleet does not idle through it ("overlap": true, from the update's
+        start) or through the iteration's slowest chunks ("overlap": "pipe", once all of it-1's
+        chunks have started); switch_selfplay moves the chunks still queued when the update
+        lands onto its networks. The self-play stays at most one update behind."""
         sp = self.spec
         cfg = self.nets_json(it - 2 if early else it - 1, self.st["cur"])
         jobs = []
@@ -776,7 +779,7 @@ class XDeckRL:
         self.st["sp"][str(it)] = {"jobs": jobs, "t0": time.time(), **({"early": True} if early else {})}
         if not early:
             self.st["phase"] = "selfplay"
-        log(f"{self.name}: iteration {it} expert self-play, {len(jobs)} chunks" + (" (overlapping the update)" if early else ""))
+        log(f"{self.name}: iteration {it} expert self-play, {len(jobs)} chunks" + (" (early, one update behind)" if early else ""))
 
     def switch_selfplay(self, fl, it):
         """The update before iteration it landed: its early self-play chunks not started yet play
@@ -816,6 +819,9 @@ class XDeckRL:
         elif st["phase"] == "selfplay":
             it = st["it"]
             ids = st["sp"][str(it)]["jobs"]
+            if sp.get("overlap") == "pipe" and str(it + 1) not in st["sp"] and it + 1 < sp["start"] + sp["iters"] \
+                    and not any(fl.jobs[j]["state"] == "queued" for j in ids):
+                self.start_selfplay(fl, it + 1, early=True)
             if all(fl.jobs[j]["state"] in ("done", "failed") for j in ids):
                 done = [fl.jobs[j] for j in ids if fl.jobs[j]["state"] == "done"]
                 summary = summarize_runs(read_rows([j["outputs"][1] for j in done]))
@@ -843,7 +849,7 @@ class XDeckRL:
                                          outs, gpu=True)
                 st["phase"] = "train"
                 log(f"{self.name}: iteration {it} expert self-play done {json.dumps(summary)}; training on {len(data)} files")
-                if sp.get("overlap") and it + 1 < sp["start"] + sp["iters"]:
+                if sp.get("overlap") and str(it + 1) not in st["sp"] and it + 1 < sp["start"] + sp["iters"]:
                     self.start_selfplay(fl, it + 1, early=True)
         elif st["phase"] == "train":
             j = fl.jobs[st["train"]]
@@ -1555,9 +1561,11 @@ class Fleet:
 
     # ---- scheduling
 
+    def cap(self, h):
+        return h.get("slots_now", h["slots"]) if h.get("dynamic") else h["slots"]
+
     def free_slots(self, h):
-        cap = h.get("slots_now", h["slots"]) if h.get("dynamic") else h["slots"]
-        return cap - sum(j.get("w", 1) for j in self.running_on(h))
+        return self.cap(h) - sum(j.get("w", 1) for j in self.running_on(h))
 
     def pick(self, job, hosts):
         if job.get("only"):   # e.g. a task whose data lives on one machine
@@ -1585,10 +1593,18 @@ class Fleet:
 
     def schedule(self):
         hosts = [h for h in self.hosts.values() if h["state"] == "up" and not h["drain"]]
-        plan = {}
+        plan, held = {}, set()
         for j in sorted([j for j in self.jobs.values() if j["state"] == "queued"], key=lambda j: (j["prio"], j["seq"])):
             j.setdefault("queued_since", time.time())
-            h, gpu = self.pick(j, hosts)
+            h, gpu = self.pick(j, [x for x in hosts if x["name"] not in held])
+            if j["kind"] == "train" and time.time() - j["queued_since"] < TRAIN_WAIT:
+                # with the next self-play already queued, a slot freed here would go to it at once:
+                # hold the update's host (its GPU machine while that is busy) until it has the slots
+                gpus = sorted([x for x in hosts if x.get("gpu")], key=lambda x: x.get("gpu_order", x.get("order", 9)))
+                tgt = h or (gpus[0] if gpus else None)
+                if tgt is not None and (h is None or self.free_slots(tgt) < min(TRAIN_SLOTS, self.cap(tgt))):
+                    held.add(tgt["name"])
+                    continue
             if h is None:
                 continue
             want = TRAIN_SLOTS if j["kind"] == "train" else j.get("slots")
