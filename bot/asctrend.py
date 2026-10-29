@@ -5,7 +5,8 @@ import glob, json, os, re, subprocess
 from collections import defaultdict
 B = 6
 acc = defaultdict(lambda: defaultdict(lambda: [0, 0, 0]))
-for d in sorted(glob.glob(os.path.join(HERE, "data", "xdarchive", "up[245]_it*"))):
+for d in sorted(glob.glob(os.path.join(HERE, "data", "xdarchive", "up[245]_it*")),
+               key=lambda d: (d.rsplit("/", 1)[1].split("_it")[0], int(d.rsplit("_it", 1)[1]))):   # up2, up4, up5; numeric iteration order
     m = re.search(r"/(up\d)_it(\d+)$", d); pipe, it = m.group(1), int(m.group(2))
     lab = f"{pipe} it{(it-1)//B*B+1:02d}"
     out = subprocess.run(f"cat {d}/*.jsonl | grep '\"k\":\"o\"'", shell=True, capture_output=True, text=True).stdout
