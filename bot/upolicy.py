@@ -437,7 +437,10 @@ def rl(args):
     network (the proximal policy) and each decision is weighted by proximal / behaviour
     probability (capped at --is-cap), so records played by an older network (reuse, or self-play
     that overlapped the previous update) count without biasing the step; on fresh records the
-    weight is 1 and the loss is plain PPO."""
+    weight is 1 and the loss is plain PPO. --gae-lambda < 1: the return becomes the lambda-return
+    over the run's decisions in play order, bootstrapped from the value head (GAE; spire-mentor
+    used 0.97): an act-1 decision no longer carries the full noise of acts 2-3 (its advantage std
+    23 -> 13 at 0.97 on up5 it102); 1 is exactly the run's return."""
     from nets import decision_return
     blob = torch.load(os.path.join(HERE, args.init), map_location="cpu", weights_only=False)
     enc = Enc(blob=blob["enc"])
@@ -476,7 +479,23 @@ def rl(args):
     if args.baseline == "auto":   # any state-only baseline leaves the gradient unbiased: take the lower-variance one
         args.baseline = "value" if ev(b_value) > ev(b_bucket) else "bucket"
         print(json.dumps({"baseline_chosen": args.baseline}), flush=True)
-    adv = G - {"bucket": b_bucket, "value": b_value, "mix": 0.5 * (b_bucket + b_value)}[args.baseline]
+    Gl = G
+    if args.gae_lambda < 1.0:   # lambda-returns: the run's later decisions' values stand in for part of its return
+        lam, Gl = args.gae_lambda, G.copy()
+        idx = defaultdict(list)
+        for i, d in enumerate(decs):   # a run's decisions, in play order
+            idx[d[6]].append(i)
+        for run in idx.values():
+            S, w = 0.0, 1.0   # R_t = (1 - lam) V_t+1 + lam R_t+1, the last one's own return (it differs by act)
+            for i in reversed(run):
+                Gl[i] = S + w * G[i]
+                S, w = (1 - lam) * b_value[i] + lam * S, lam * w
+        print(json.dumps({"gae_lambda": lam, "ret_std": round(float(G.std()), 3), "ret_lambda_std": round(float(Gl.std()), 3),
+                          "adv_std": round(float((G - b_value).std()), 3), "adv_lambda_std": round(float((Gl - b_value).std()), 3),
+                          **{f"adv_lambda_std_act{a}": round(float((Gl - b_value)[acts == a].std()), 3) for a in (1, 2, 3) if (acts == a).sum() > 10},
+                          **{f"adv_std_act{a}": round(float((G - b_value)[acts == a].std()), 3) for a in (1, 2, 3) if (acts == a).sum() > 10}}),
+              flush=True)
+    adv = Gl - {"bucket": b_bucket, "value": b_value, "mix": 0.5 * (b_bucket + b_value)}[args.baseline]
     adv = (adv - adv.mean()) / (adv.std() + 1e-6)
     LP0 = torch.tensor([d[5] for d in decs], dtype=torch.float32, device=dev)
     ADV = torch.from_numpy(adv).to(dev)
@@ -648,6 +667,9 @@ def main():
     ap.add_argument("--vcoef", type=float, default=0.25)
     ap.add_argument("--target-kl", type=float, default=0.03, help="rl: stop the epochs once the mean KL (from --init) passes this")
     ap.add_argument("--is-cap", type=float, default=2.0, help="rl: cap on the proximal / behaviour probability weight")
+    ap.add_argument("--gae-lambda", type=float, default=float(os.environ.get("NETS_GAE_LAMBDA", "1")),
+                    help="rl: lambda-returns over a run's decisions, bootstrapped from the value head (1 = the run's "
+                         "return; env NETS_GAE_LAMBDA, which the fleet's spec reward passes)")
     ap.add_argument("--baseline", default="auto", choices=["auto", "bucket", "value", "mix"],
                     help="rl: mean return at the same (asc, act, floor), the value head, their mean, or (auto) whichever "
                          "explains more of the return's variance in this data")
