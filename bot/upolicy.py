@@ -475,7 +475,7 @@ def rl(args):
                       "ret_std": round(float(G.std()), 3), "ev_bucket": ev(b_bucket), "ev_value": ev(b_value),
                       **{f"ev_value_act{a}": ev(b_value, acts == a) for a in (1, 2, 3) if (acts == a).sum() > 10},
                       **{f"ev_bucket_act{a}": ev(b_bucket, acts == a) for a in (1, 2, 3) if (acts == a).sum() > 10},
-                      "baseline": args.baseline}), flush=True)
+                      "baseline": args.baseline, "ent_coef": args.ent}), flush=True)
     if args.baseline == "auto":   # any state-only baseline leaves the gradient unbiased: take the lower-variance one
         args.baseline = "value" if ev(b_value) > ev(b_bucket) else "bucket"
         print(json.dumps({"baseline_chosen": args.baseline}), flush=True)
@@ -663,7 +663,8 @@ def main():
     ap.add_argument("--init", help="rl: the network to update (the self-play policy)")
     ap.add_argument("--temperature", type=float, default=1.0, help="rl: the self-play sampling temperature")
     ap.add_argument("--clip", type=float, default=0.2)
-    ap.add_argument("--ent", type=float, default=0.01)
+    ap.add_argument("--ent", type=float, default=float(os.environ.get("NETS_ENT", "0.01")),
+                    help="entropy bonus (env NETS_ENT, which the fleet's spec reward passes)")
     ap.add_argument("--vcoef", type=float, default=0.25)
     ap.add_argument("--target-kl", type=float, default=0.03, help="rl: stop the epochs once the mean KL (from --init) passes this")
     ap.add_argument("--is-cap", type=float, default=2.0, help="rl: cap on the proximal / behaviour probability weight")
