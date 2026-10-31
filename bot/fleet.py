@@ -1289,7 +1289,9 @@ class Fleet:
     # stolen card comes back; its +15 gold in the full_65 replay is Lucky Fysh, as in the game)
     # Fix8 = Fix7 + the pump loops around thread-pool work (event options) wait on the task, not
     # a fixed 10 ms (engine time -7..9%; same runs as Fix6 apart from Fix7)
-    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8")
+    # Fix9 = Fix8 + restore {"quiet": true} replies with an ack instead of the state (the planner
+    # discards it; restore -9%, same runs) + restore_prof (per-phase restore timings)
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8", "Fix9")
 
     def ensure_builds(self, h):
         if linux(h):

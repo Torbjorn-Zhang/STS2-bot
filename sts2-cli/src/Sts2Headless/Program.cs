@@ -89,7 +89,13 @@ class Program
                 // Commands that change game state are logged for snapshot/restore replay.
                 if (cmd.TryGetProperty("cmd", out var c) && c.GetString() is "action" or "set_player" or "enter_room" or "set_draw_order" or "determinize" or "determinize_run")
                     sim.RecordCommand(line);
+                var hsw = System.Diagnostics.Stopwatch.StartNew();
                 result = HandleCommand(sim, cmd);
+                if (RunSimulator.ProfOn)
+                {
+                    var nm = cmd.TryGetProperty("action", out var an) ? an.GetString() : c.ValueKind == JsonValueKind.String ? c.GetString() : "?";
+                    sim.ProfAdd("live." + nm, hsw);
+                }
             }
             catch (JsonException ex)
             {
@@ -102,7 +108,9 @@ class Program
 
             if (result != null)
             {
+                var wsw = System.Diagnostics.Stopwatch.StartNew();
                 WriteLine(result);
+                if (RunSimulator.ProfOn) sim.ProfAdd("write", wsw);
                 if (result.TryGetValue("type", out var resultTypeObj) &&
                     string.Equals(resultTypeObj as string, "quit_result", StringComparison.Ordinal))
                 {
@@ -223,12 +231,16 @@ class Program
                 return sim.Snapshot();
 
             case "restore":
+                // "quiet": true builds no state for the reply (the caller already has it): an ack only
                 return cmd.TryGetProperty("id", out var sid)
-                    ? sim.Restore(sid.GetInt32())
+                    ? sim.Restore(sid.GetInt32(), cmd.TryGetProperty("quiet", out var rq) && rq.ValueKind == JsonValueKind.True)
                     : new Dictionary<string, object?> { ["type"] = "error", ["message"] = "restore requires 'id'" };
 
             case "drop_snapshots":
                 return sim.DropSnapshots(cmd.TryGetProperty("from", out var df) ? df.GetInt32() : null);
+
+            case "restore_prof":
+                return sim.RestoreProf(cmd.TryGetProperty("reset", out var rp) && rp.GetBoolean());
 
             case "gc_stats":
             {

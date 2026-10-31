@@ -58,6 +58,10 @@ W = {
     # of a determinized sample, i.e. a planner that knows the future
     "determinize": 1,
     "steam_lethal": 0.0,    # Waterfall Giant: penalty when its death blast (Steam Eruption) would kill us (80: 9 vs 7 of 44 WG fights)
+    # 1 = the turn search tries each multiset of plays in one order only (the first one it
+    # reaches): 40% of its plays end in an already-seen state, and each costs a play plus a
+    # restore. Not exact: in ~1 of 4 such reorderings the order matters (Bash before Strike)
+    "mset_prune": 0,
 }
 PLAYER_DEBUFFS = ("Vulnerable", "Weak", "Frail")
 COUNTED = ("Strength", "Dexterity") + PLAYER_DEBUFFS
@@ -502,8 +506,10 @@ class TurnPlanner:
     def _snap(self):
         return self.sim.send({"cmd": "snapshot"})["id"]
 
-    def _restore(self, sid):
-        return self.sim.send({"cmd": "restore", "id": sid})
+    def _restore(self, sid, quiet=False):
+        # quiet: the caller already has the state; the engine replies with an ack only
+        # (Fix9; older engines ignore the flag and send the state as before)
+        return self.sim.send({"cmd": "restore", "id": sid, "quiet": True} if quiet else {"cmd": "restore", "id": sid})
 
     def _score_leaves(self, root, leaves):
         """leaves: [(kind, path, state)], kind in end / terminal / partial."""
@@ -544,7 +550,7 @@ class TurnPlanner:
         return ROLLOUT_DEATH + W["death_turn"] * future + W["death_dmg"] * max(0.0, (e0 - e1) / max(1, e0))
 
     def _rollout(self, root, snap, last, seed, turns, pilot_nodes=0, lam=0.0):
-        self._restore(snap)
+        self._restore(snap, quiet=True)
         if W["determinize"]:
             self.sim.send({"cmd": "determinize", "seed": seed})
         s = self.sim.act(last[0], **last[1])
@@ -661,8 +667,9 @@ class TurnPlanner:
         leaves = []
         seen = {canon(root)}
         nodes = 0
+        prune, msets = W["mset_prune"], set()
 
-        def visit(st, path, snap_id):
+        def visit(st, path, snap_id, pkeys=()):
             nonlocal nodes
             if st.get("decision") == "combat_play":
                 leaves.append(("end", path + [("end_turn", {})], st, snap_id, ("end_turn", {})))
@@ -686,8 +693,22 @@ class TurnPlanner:
                         nodes += 1
                         continue
                     tried.add(k)
+                if prune:
+                    if a[0] == "play_card":
+                        ak = "c" + k
+                    elif a[0] == "use_potion":
+                        pot = next((x for x in potions(st) if x.get("index") == a[1].get("potion_index")), None)
+                        ak = "p" + json.dumps([(pot or {}).get("id"), a[1].get("target_index")])
+                    else:
+                        ak = "x" + json.dumps([st.get("decision"), a], sort_keys=True)
+                    mk = tuple(sorted(pkeys + (ak,)))
+                    if mk in msets:
+                        self.stats["mset_skip"] += 1
+                        nodes += 1
+                        continue
+                    msets.add(mk)
                 if moved:
-                    self._restore(snap_id)
+                    self._restore(snap_id, quiet=True)
                 s2 = self.sim.act(a[0], **a[1])
                 moved = True
                 nodes += 1
@@ -705,13 +726,13 @@ class TurnPlanner:
                     # stop here: what follows depends on information we don't have yet
                     leaves.append(("partial", p2, s2, snap_id, a))
                 else:
-                    visit(s2, p2, self._snap())
+                    visit(s2, p2, self._snap(), pkeys + (ak,) if prune else ())
 
         visit(root, [], root_snap)
         self.stats["plans"] += 1
         self.stats["nodes"] += nodes
         if not leaves:
-            self._restore(root_snap)
+            self._restore(root_snap, quiet=True)
             self.sim.send({"cmd": "drop_snapshots", "from": root_snap})
             return [("end_turn", {})], float("-inf")
         scores = self._score_leaves(root, [l[:3] for l in leaves])
@@ -727,7 +748,7 @@ class TurnPlanner:
                     firsts[k] = max(firsts.get(k, float("-inf")), sc)
                 hfirst[k] = max(hfirst.get(k, float("-inf")), hs)
         self.last_root, self.last_first = root, {"q": firsts, "h": hfirst}
-        self._restore(root_snap)
+        self._restore(root_snap, quiet=True)
         self.sim.send({"cmd": "drop_snapshots", "from": root_snap})
         order = sorted(range(len(leaves)), key=lambda i: scores[i], reverse=True)
         pick = order[0]

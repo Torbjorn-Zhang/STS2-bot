@@ -20,6 +20,8 @@ from simclient import Sim, legal_actions
 
 CHARS = ["Ironclad", "Silent", "Defect", "Regent", "Necrobinder"]
 GODMODE = "--godmode" in sys.argv
+QUIET = "--quiet" in sys.argv   # restores reply with an ack only (Fix9): checked by checksums and the replays after them
+RQ = {"quiet": True} if QUIET else {}
 
 
 def canon(st):
@@ -66,11 +68,11 @@ def main():
                 stats["snapshots"] += 1
                 by_decision[states[i].get("decision")] += 1
                 t0 = time.perf_counter()
-                r = sim.send({"cmd": "restore", "id": sid})
+                r = sim.send({"cmd": "restore", "id": sid, **RQ})
                 restore_ms.append(1000 * (time.perf_counter() - t0))
                 replay_len.append(rlen)
                 cs2 = sim.send({"cmd": "checksum"})
-                ok = canon(r) == canon(states[i]) and cs2.get("combat") == cs.get("combat") and cs2.get("run") == cs.get("run")
+                ok = (QUIET or canon(r) == canon(states[i])) and cs2.get("combat") == cs.get("combat") and cs2.get("run") == cs.get("run")
                 bad_at = None
                 if ok:
                     for j in range(i, min(i + k_follow, len(actions))):
@@ -88,9 +90,9 @@ def main():
                 if i + 1 < len(actions):
                     alt = [a for a in legal_actions(states[i]) if a != actions[i]]
                     if alt:
-                        sim.send({"cmd": "restore", "id": sid})
+                        sim.send({"cmd": "restore", "id": sid, **RQ})
                         sim.act(*random.Random(sid).choice(alt)[:1], **random.Random(sid).choice(alt)[1])
-                        sim.send({"cmd": "restore", "id": sid})
+                        sim.send({"cmd": "restore", "id": sid, **RQ})
                         s = None
                         good = True
                         for j in range(i, min(i + k_follow, len(actions))):

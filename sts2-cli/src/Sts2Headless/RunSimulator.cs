@@ -788,7 +788,10 @@ public class RunSimulator
     {
         try
         {
+            var psw = System.Diagnostics.Stopwatch.StartNew();
+            void Lap(string n) { if (_rebuilding != null) Prof("load." + n, psw); }
             CleanUp();
+            Lap("cleanup");
             _loc.Lang = lang;
             EnsureModelDbInitialized();
             CapturePristineProgressOnce();
@@ -803,17 +806,20 @@ public class RunSimulator
                 return Error($"Failed to parse save file: {readResult.Status} {readResult.ErrorMessage}");
 
             var save = readResult.SaveData;
+            Lap("parse");
             Log($"Save loaded: seed={save.SerializableRng?.Seed}, act={save.CurrentActIndex}, ascension={save.Ascension}");
 
             _runState = RunState.FromSerializable(save);
             if (_runState == null)
                 return Error("Failed to create RunState from save");
 
+            Lap("from_serializable");
             Log($"RunState created, players={_runState.Players?.Count}");
 
             var netService = new NetSingleplayerGameService();
             RunManager.Instance.SetUpSavedSingleplayer(_runState, save).GetAwaiter().GetResult();
             LocalContext.NetId = netService.NetId;
+            Lap("setup_saved");
 
             RegisterCombatHandlersOnce();
             _cardSelectorScope = CardSelectCmd.UseSelector(_cardSelector);
@@ -827,6 +833,7 @@ public class RunSimulator
             Log($"Save has {savedVisitedCoords.Count} visited coords");
 
             RunManager.Instance.Launch();
+            Lap("launch");
             Log("Run launched");
 
             if (savedRoom is MapRoom || savedRoom == null)
@@ -842,6 +849,7 @@ public class RunSimulator
                 var savedOdds = unknownOdds == null ? null : new[] { unknownOdds.MonsterOdds, unknownOdds.EliteOdds, unknownOdds.TreasureOdds, unknownOdds.ShopOdds };
                 RunManager.Instance.EnterAct(_runState.CurrentActIndex, doTransition: false).GetAwaiter().GetResult();
                 _syncCtx.Pump();
+                Lap("enter_act");
                 Log($"Entered Act {_runState.CurrentActIndex}");
                 if (savedOdds != null && savedVisitedCoords.Count > 0 && _runState.Odds?.UnknownMapPoint is { } odds)
                 {
@@ -875,6 +883,7 @@ public class RunSimulator
                 // flag, otherwise "?" rooms roll differently after a load than in the
                 // uninterrupted run.
                 RestoreMapPointFlags(saveJson, _runState.CurrentActIndex);
+                Lap("map_flags");
                 // Only EnterAct needed the flag cleared; keep the run identical to the saved one.
                 _runState.ExtraFields.StartedWithNeow = savedStartedWithNeow;
             }
@@ -883,7 +892,9 @@ public class RunSimulator
                 Log($"Preserving saved room: {savedRoom.GetType().Name}");
             }
 
-            return DetectDecisionPoint();
+            var dp = DetectDecisionPoint();
+            Lap("detect");
+            return dp;
         }
         catch (Exception ex)
         {
@@ -1178,7 +1189,9 @@ public class RunSimulator
                 return Error("No run in progress");
 
             var player = _runState.Players[0];
+            var xsw = System.Diagnostics.Stopwatch.StartNew();
             SettleBackground();
+            if (_replaying) Prof("rp.settle", xsw);
 
             switch (action)
             {
@@ -1332,9 +1345,12 @@ public class RunSimulator
 
         var handCountBefore = hand.Count;
 
+        var qsw = System.Diagnostics.Stopwatch.StartNew();
         var playAction = new PlayCardAction(card, target);
         RunManager.Instance.ActionQueueSet.EnqueueWithoutSynchronizing(playAction);
+        if (_replaying) Prof("rp.play.enqueue", qsw);
         WaitForActionExecutor();
+        if (_replaying) Prof("rp.play.execute", qsw);
 
         // Check if card play had no effect (hand unchanged, same card still at same index)
         var handAfter = pcs.Hand.Cards;
@@ -1343,7 +1359,9 @@ public class RunSimulator
             return Error($"Card could not be played (still in hand after action): {card.GetType().Name} [{card.Id}]");
         }
 
-        return DetectDecisionPoint();
+        var dres = DetectDecisionPoint();
+        if (_replaying) Prof("rp.play.detect", qsw);
+        return dres;
     }
 
     // STS2 build 23372702 removed CombatManager.IsPlayPhase (global) in favor of a
@@ -1426,8 +1444,10 @@ public class RunSimulator
         YieldPatches.SuppressYield = true;
         try
         {
+            var esw = System.Diagnostics.Stopwatch.StartNew();
             PlayerCmd.EndTurn(player, canBackOut: false);
             _syncCtx.Pump();
+            Prof("et.sync", esw);
 
             // Fallback: if turn didn't complete synchronously, keep pumping with SuppressYield on
             if (CombatManager.Instance.IsInProgress && !IsPlayPhase() && !player.Creature.IsDead)
@@ -1439,8 +1459,10 @@ public class RunSimulator
                     if (SelectionPending()) break;
                     if (!CombatManager.Instance.IsInProgress || player.Creature.IsDead) break;
                     if (IsPlayPhase()) break;
+                    Prof("et.sleep5_iter", esw);
                     Thread.Sleep(5);
                 }
+                Prof("et.fallback", esw);
             }
         }
         finally
@@ -4628,6 +4650,29 @@ public class RunSimulator
 
     #region Snapshot / restore
 
+    // restore_prof: cumulative time per restore phase (rebuild sub-phases, room entry, replay)
+    private readonly Dictionary<string, (long ticks, long n)> _prof = new();
+    public static readonly bool ProfOn = Environment.GetEnvironmentVariable("STS2_PROF") == "1";
+    private void Prof(string name, System.Diagnostics.Stopwatch sw)
+    {
+        var e = _prof.GetValueOrDefault(name);
+        _prof[name] = (e.ticks + sw.ElapsedTicks, e.n + 1);
+        sw.Restart();
+    }
+    public void ProfAdd(string name, System.Diagnostics.Stopwatch sw) => Prof(name, sw);
+    public Dictionary<string, object?> RestoreProf(bool reset)
+    {
+        var d = new Dictionary<string, object?> { ["type"] = "restore_prof",
+            ["gc_pause_ms"] = GC.GetTotalPauseDuration().TotalMilliseconds, ["gc0"] = GC.CollectionCount(0),
+            ["gc1"] = GC.CollectionCount(1), ["gc2"] = GC.CollectionCount(2),
+            ["alloc_mb"] = GC.GetTotalAllocatedBytes() / 1048576.0, ["cpu_ms"] = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime.TotalMilliseconds,
+            ["server_gc"] = System.Runtime.GCSettings.IsServerGC, ["latency"] = System.Runtime.GCSettings.LatencyMode.ToString() };
+        foreach (var (k, v) in _prof)
+            d[k] = new Dictionary<string, object?> { ["ms"] = v.ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency, ["n"] = v.n };
+        if (reset) _prof.Clear();
+        return d;
+    }
+
     // A checkpoint is a state the engine can rebuild exactly in this process: run start
     // (the start_run command), a loaded save, or the pre-entry save of a map node plus the
     // node. Every state-changing command after it is logged. A snapshot is (checkpoint,
@@ -4728,7 +4773,7 @@ public class RunSimulator
     private static bool IsError(Dictionary<string, object?>? r) =>
         r == null || (r.TryGetValue("type", out var t) && t as string == "error");
 
-    public Dictionary<string, object?> Restore(int snapshotId)
+    public Dictionary<string, object?> Restore(int snapshotId, bool quiet = false)
     {
         if (!_snapshots.TryGetValue(snapshotId, out var snap))
             return Error($"Unknown snapshot {snapshotId}");
@@ -4738,8 +4783,9 @@ public class RunSimulator
             return Error("Restore needs a command handler");
 
         _replaying = true;
-        _replayQuiet = snap.commands.Count > 0;   // only the last result is returned
+        _replayQuiet = quiet || snap.commands.Count > 0;   // only the last result is returned (none when quiet)
         _rebuilding = cp;
+        var rsw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             Dictionary<string, object?>? result;
@@ -4753,7 +4799,9 @@ public class RunSimulator
                     result = LoadSave(cp.SaveJson!);
                     break;
                 default:
+                    rsw.Restart();
                     result = LoadSave(cp.SaveJson!);
+                    Prof("restore.load", rsw);
                     if (!IsError(result))
                         result = ExecuteAction("select_map_node", new Dictionary<string, object?>
                         {
@@ -4762,21 +4810,34 @@ public class RunSimulator
                         });
                     break;
             }
+            Prof("restore.enter_" + cp.Kind, rsw);
             if (IsError(result))
                 return Error($"Restore: rebuilding checkpoint {snap.checkpoint} ({cp.Kind}) failed: {result?.GetValueOrDefault("message")}");
 
             for (int i = 0; i < snap.commands.Count; i++)
             {
                 if (i == snap.commands.Count - 1)
-                    _replayQuiet = false;
+                    _replayQuiet = quiet;
+                var csw = System.Diagnostics.Stopwatch.StartNew();
                 using var doc = System.Text.Json.JsonDocument.Parse(snap.commands[i]);
                 result = CommandHandler(doc.RootElement.Clone());
+                if (ProfOn)
+                {
+                    var root = doc.RootElement;
+                    var nm = root.TryGetProperty("action", out var an) ? an.GetString() : root.TryGetProperty("cmd", out var cn) ? cn.GetString() : "?";
+                    Prof("rcmd." + nm, csw);
+                }
                 if (IsError(result))
                     return Error($"Restore: replaying command {i} failed: {result?.GetValueOrDefault("message")}");
             }
+            if (snap.commands.Count > 0) Prof("restore.replay", rsw);
+            var e = _prof.GetValueOrDefault("restore.replay_cmds");
+            _prof["restore.replay_cmds"] = (e.ticks, e.n + snap.commands.Count);
 
             _currentCheckpoint = snap.checkpoint;
             _commandLog = new List<string>(snap.commands);
+            if (quiet)
+                return new Dictionary<string, object?> { ["type"] = "restored", ["id"] = snapshotId };
             return result ?? DetectDecisionPoint();
         }
         finally
