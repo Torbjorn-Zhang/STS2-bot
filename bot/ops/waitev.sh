@@ -1,11 +1,11 @@
 #!/bin/zsh
-# waitev.sh N: wait for up5 eval N (or a runai token expiry), then print the checkpoint summary
+# waitev.sh N: wait for up5 eval N (or a runai token expiry unless NOEXP=1), then print the checkpoint summary
 N=$1; S=${0:A:h}
 cd ${S:h} || exit 1
 L0=$(wc -l < runs/fleet/fleet.log)
 while true; do
   if grep -q "up5: iteration $N A10" runs/fleet/fleet.log; then echo "EVAL$N"; break; fi
-  if tail -n +$((L0+1)) runs/fleet/fleet.log | grep -q "token has expired"; then
+  if [ -z "$NOEXP" ] && tail -n +$((L0+1)) runs/fleet/fleet.log | grep -q "token has expired"; then
     echo "TOKEN_EXPIRED"; tail -n +$((L0+1)) runs/fleet/fleet.log | grep -m1 "token has expired" | cut -c1-120; exit 0
   fi
   sleep 120
