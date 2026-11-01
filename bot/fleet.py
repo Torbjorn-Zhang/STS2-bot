@@ -1291,7 +1291,9 @@ class Fleet:
     # a fixed 10 ms (engine time -7..9%; same runs as Fix6 apart from Fix7)
     # Fix9 = Fix8 + restore {"quiet": true} replies with an ack instead of the state (the planner
     # discards it; restore -9%, same runs) + restore_prof (per-phase restore timings)
-    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8", "Fix9")
+    # Fix10 = Fix9 + memoized loc strings + combat_play states carry a slim deck {id, type,
+    # upgraded, stats} (no descriptions / after_upgrade clones): replies 13 -> 6 KB, runs -6..9%, same runs
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8", "Fix9", "Fix10")
 
     def ensure_builds(self, h):
         if linux(h):

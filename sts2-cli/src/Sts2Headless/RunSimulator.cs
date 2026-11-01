@@ -140,8 +140,18 @@ internal class LocLookup
     /// <summary>Language for JSON output: "en" or "zh". Default: "en".</summary>
     public string Lang { get; set; } = "en";
 
+    // Fix10: the loc tables never change, so each (lang, table, key) is resolved (and its
+    // BBCode regex run) once; combat states look up every hand card and power each reply
+    private readonly Dictionary<(string, string, string), string> _memo = new();
+
     /// <summary>Return localized string for JSON output based on Lang setting.</summary>
     public string Bilingual(string table, string key)
+    {
+        if (_memo.TryGetValue((Lang, table, key), out var hit)) return hit;
+        return _memo[(Lang, table, key)] = BilingualUncached(table, key);
+    }
+
+    private string BilingualUncached(string table, string key)
     {
         if (Lang == "zh")
         {
@@ -2735,7 +2745,7 @@ public class RunSimulator
             ["max_energy"] = pcs?.MaxEnergy ?? 0,
             ["hand"] = hand,
             ["enemies"] = enemies,
-            ["player"] = PlayerSummary(player),
+            ["player"] = PlayerSummary(player, SlimCombatDeck),
             ["player_powers"] = playerPowers?.Count > 0 ? playerPowers : null,
             ["draw_pile_count"] = pcs?.DrawPile?.Cards?.Count ?? 0,
             ["discard_pile_count"] = pcs?.DiscardPile?.Cards?.Count ?? 0,
@@ -3438,7 +3448,13 @@ public class RunSimulator
         catch { return null; }
     }
 
-    private Dictionary<string, object?> PlayerSummary(Player player)
+    // Fix10: combat_play states carry the deck only as {id, type, upgraded, stats} (what the
+    // planner and the run log read); names, descriptions, keywords and the after_upgrade preview
+    // (a card clone + upgrade per deck card) were most of each reply's cost.
+    // STS2_FULL_COMBAT_DECK=1 restores the full deck there.
+    public static readonly bool SlimCombatDeck = Environment.GetEnvironmentVariable("STS2_FULL_COMBAT_DECK") != "1";
+
+    private Dictionary<string, object?> PlayerSummary(Player player, bool slimDeck = false)
     {
         return new Dictionary<string, object?>
         {
@@ -3477,6 +3493,14 @@ public class RunSimulator
             {
                 var dstats = new Dictionary<string, object?>();
                 try { foreach (var dv in c.DynamicVars.Values) dstats[dv.Name.ToLowerInvariant()] = (int)dv.BaseValue; } catch { }
+                if (slimDeck)
+                    return new Dictionary<string, object?>
+                    {
+                        ["id"] = c.Id.ToString(),
+                        ["type"] = c.Type.ToString(),
+                        ["upgraded"] = c.IsUpgraded,
+                        ["stats"] = dstats.Count > 0 ? dstats : null,
+                    };
                 var dkws = c.Keywords?.Where(k => k != CardKeyword.None).Select(k => k.ToString()).ToList();
                 var dcard = new Dictionary<string, object?>
                 {
