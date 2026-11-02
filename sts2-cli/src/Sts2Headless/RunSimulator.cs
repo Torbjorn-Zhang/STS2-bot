@@ -351,6 +351,33 @@ public class RunSimulator
         field?.SetValue(obj, value);
     }
 
+    /// Fix11: every card model's id, type, rarity and printed energy cost (-1 = X), the v0.111.0
+    /// card table bot/rssim.py renders sts2-rs cards with (sts2-rs's own card_kinds() is v0.107.1).
+    public Dictionary<string, object?> CardDb()
+    {
+        var rows = ModelDb.All.OfType<CardModel>().Select(c => (object?)new Dictionary<string, object?>
+        {
+            ["id"] = c.Id.Entry,
+            ["type"] = c.Type.ToString(),
+            ["rarity"] = c.Rarity.ToString(),
+            ["cost"] = c.EnergyCost == null ? null : (c.EnergyCost.CostsX ? -1 : c.EnergyCost.Canonical),
+            ["target_type"] = c.TargetType.ToString(),
+        }).ToList();
+        return new Dictionary<string, object?> { ["type"] = "card_db", ["cards"] = rows };
+    }
+
+    /// Fix11: every relic model's canonical dynamic vars, as the relic summaries show them.
+    public Dictionary<string, object?> RelicDb()
+    {
+        var rows = ModelDb.All.OfType<RelicModel>().Select(r =>
+        {
+            var vars = new Dictionary<string, object?>();
+            try { foreach (var dv in r.DynamicVars.Values) vars[dv.Name] = (int)dv.BaseValue; } catch { }
+            return (object?)new Dictionary<string, object?> { ["id"] = r.Id.Entry, ["vars"] = vars.Count > 0 ? vars : null };
+        }).ToList();
+        return new Dictionary<string, object?> { ["type"] = "relic_db", ["relics"] = rows };
+    }
+
     public Dictionary<string, object?> SetPlayer(Dictionary<string, System.Text.Json.JsonElement> args)
     {
         try
@@ -2267,6 +2294,7 @@ public class RunSimulator
                     ["cost"] = cr.Card.EnergyCost?.GetResolved() ?? 0,
                     ["type"] = cr.Card.Type.ToString(),
                     ["rarity"] = cr.Card.Rarity.ToString(),
+                    ["upgraded"] = cr.Card.IsUpgraded,   // Fix11
                     ["description"] = _loc.Bilingual("cards", cr.Card.Id.Entry + ".description"),
                     ["stats"] = stats.Count > 0 ? stats : null,
                     ["keywords"] = rrkws?.Count > 0 ? rrkws : null,
@@ -2927,6 +2955,8 @@ public class RunSimulator
                 ["cost"] = c.EnergyCost?.GetResolved() ?? 0,
                 ["type"] = c.Type.ToString(),
                 ["rarity"] = c.Rarity.ToString(),
+                // Fix11: upgraded reward cards (act 2+ rolls, Molten Egg, ...) were shown as plain
+                ["upgraded"] = c.IsUpgraded,
                 ["description"] = _loc.Bilingual("cards", c.Id.Entry + ".description"),
                 ["stats"] = stats.Count > 0 ? stats : null,
                 ["keywords"] = crkws?.Count > 0 ? crkws : null,

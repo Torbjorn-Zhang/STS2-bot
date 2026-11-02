@@ -256,8 +256,26 @@ index e15aa59..13a24c8 100644
  # `pythonize` 0.24 matches the pyo3 0.24 minor — required for converting
  # the `serde_json::Value` returned by `sts2_core::parity::combat_state_to_bridge_state`
  # into a Python `dict` without round-tripping through a JSON string.
+diff --git a/sts2-rs/crates/sts2-py/src/lib.rs b/sts2-rs/crates/sts2-py/src/lib.rs
+index de215ac..d4f6d70 100644
+--- a/sts2-rs/crates/sts2-py/src/lib.rs
++++ b/sts2-rs/crates/sts2-py/src/lib.rs
+@@ -807,6 +807,13 @@ impl PyCombatState {
+     /// Serialize the current state into a Python dict matching the bridge
+     /// JSON shape (`combat_state_to_bridge_state`). The result deserializes
+     /// via Python's `BridgeReplayTrace.from_dict` without raising.
++    /// Local patch (sts2-ai): the player's live `(hp, max_hp, block)`, also while a
++    /// card prompt is pending (`get_state` then shows only the prompt).
++    fn player_hp(&self) -> (i32, i32, i32) {
++        let p = &self.inner.player;
++        (p.current_hp, p.max_hp, p.block)
++    }
++
+     fn get_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+         let value = parity::combat_state_to_bridge_state(&self.inner);
+         pythonize::pythonize(py, &value)
 diff --git a/sts2-rs/crates/sts2-py/src/run_manager.rs b/sts2-rs/crates/sts2-py/src/run_manager.rs
-index 47c50f6..e16e836 100644
+index 47c50f6..9c869cd 100644
 --- a/sts2-rs/crates/sts2-py/src/run_manager.rs
 +++ b/sts2-rs/crates/sts2-py/src/run_manager.rs
 @@ -188,6 +188,10 @@ impl PyRunManager {
@@ -271,7 +289,27 @@ index 47c50f6..e16e836 100644
              Some(s) => game_version.run_seed_hash(&sts2_core::canonicalize_seed(s)),
              None => u64::from(seed as u32),
          };
-@@ -999,6 +1003,25 @@ impl PyRunManager {
+@@ -592,6 +596,19 @@ impl PyRunManager {
+         emit_rm::boss_relic_options(&self.inner)
+     }
+ 
++    /// Local patch (sts2-ai): the Ancient that opens the NEXT act (whose relics
++    /// `boss_relic_options` offers), as its Debug name (`"Pael"`, `"Tezcatara"`),
++    /// read like `RunState::roll_boss_relic_offers` does. `None` when none is routed.
++    fn next_ancient(&self) -> Option<String> {
++        let next_act = self.inner.run_state.act_index as usize;
++        self.inner
++            .run_state
++            .generated_rooms
++            .get(next_act)
++            .and_then(|g| g.ancient)
++            .map(|a| format!("{a:?}"))
++    }
++
+     /// `(option_id, enabled)` for every rest-site option the site
+     /// offers, in the order a `RestOption{idx}` action indexes them.
+     /// `option_id` is the game's own `RestSiteOption.OptionId`
+@@ -999,6 +1016,25 @@ impl PyRunManager {
          emit_rm::relics(&self.inner)
      }
  
@@ -319,3 +357,16 @@ index ec003e1..862ecd5 100644
      rm.run_state.interactive_card_removal = true;
      rm.run_state.interactive_card_upgrade = true;
      rm.run_state.interactive_card_transform = true;
+diff --git a/sts2-rs/crates/sts2-wire/src/emit/run_manager.rs b/sts2-rs/crates/sts2-wire/src/emit/run_manager.rs
+index ff21497..957ebf8 100644
+--- a/sts2-rs/crates/sts2-wire/src/emit/run_manager.rs
++++ b/sts2-rs/crates/sts2-wire/src/emit/run_manager.rs
+@@ -879,6 +879,8 @@ pub fn shop_inventory(rm: &RunManager) -> Value {
+         potion_rows.push(Value::Object(pd));
+     }
+     d.insert("potions".to_owned(), Value::Array(potion_rows));
++    // Local patch (sts2-ai): the shop's card-removal price (our engine's card_removal_cost).
++    d.insert("removal_price".to_owned(), Value::from(inv.removal_cost));
+ 
+     set(&mut d, "removal_cost", price_of(inv.removal_cost));
+     set(&mut d, "removal_used", inv.removal_used);

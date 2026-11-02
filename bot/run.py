@@ -64,7 +64,10 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg
             def watch(s):
                 if s.get("enemies") is not None:
                     last["hp"] = [e.get("hp") for e in s["enemies"]]
-            st = planner.play_combat(st, on_state=watch if boss else None)
+            if getattr(sim, "plays_combat", False):   # rssim.RsSim: sts2-rs's MCTS plays the fight
+                st = sim.play_combat(st, on_state=watch if boss else None)
+            else:
+                st = planner.play_combat(st, on_state=watch if boss else None)
             if boss:
                 won = st.get("decision") not in ("game_over", "combat_play") or bool(st.get("victory"))
                 left = sum(h or 0 for h in last.get("hp") or [])
@@ -216,7 +219,10 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 mc_boss_acts.append(act)
             rp = ROOM_PLANNER.get(room) or {}   # e.g. a deeper search for boss fights only
             planner.max_nodes, planner.rollouts = rp.get("nodes", max_nodes), rp.get("rollouts", rollouts)
-            st = planner.play_combat(st, on_state=watch, on_step=on_step)
+            if getattr(sim, "plays_combat", False):   # rssim.RsSim: sts2-rs's MCTS plays the fight
+                st = sim.play_combat(st, on_state=watch)
+            else:
+                st = planner.play_combat(st, on_state=watch, on_step=on_step)
             if rec:
                 rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"),
                               last_enemies.get("php"))
@@ -337,6 +343,8 @@ def main():
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
     ap.add_argument("--mc-boss-acts", default=None, help='--mc-boss only at these acts\' bosses, e.g. "3"')
     ap.add_argument("--remove-defend-first", action="store_true", help="removals take Defends before Strikes")
+    ap.add_argument("--rs", default=None, help='play on sts2-rs (rssim.RsSim) instead of our engine: "SIMS,BOSS_SIMS" '
+                                               'for its MCTS fights (e.g. 250,1000)')
     ap.add_argument("--unified", default=None, help="with --deck-sample: the unified transformer policy (upolicy.py) scores every deck decision")
     ap.add_argument("--rs-value", default=None, help="card rewards by the run-state value net (rsvalue.py model)")
     ap.add_argument("--rs-beta", type=float, default=0.0, help="--rs-value: + beta x the card net's log-probability")
@@ -378,6 +386,9 @@ def main():
     ap.add_argument("--value-weight", type=float, default=None,
                     help="with --model: score = hand-written + w * model (default: model only)")
     args = ap.parse_args()
+    if args.rs:
+        import engine
+        engine.RS = args.rs
     if args.engine_config:
         import engine
         engine.ENGINE_CONFIG = args.engine_config

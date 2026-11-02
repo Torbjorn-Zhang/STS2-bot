@@ -17,7 +17,15 @@ RECYCLE_MB = int(os.environ.get("STS2_RECYCLE_MB", "1500"))
 ENGINE_CONFIG = os.environ.get("STS2_ENGINE_CONFIG", "Release")
 
 
+# "SIMS,BOSS_SIMS": play on sts2-rs instead (rssim.RsSim; its MCTS plays the fights). run.py --rs sets it.
+RS = os.environ.get("STS2_RS")
+
+
 def fresh_sim():
+    if RS:
+        from rssim import RsSim
+        sims, boss = (int(x) for x in str(RS).split(","))
+        return RsSim(sims=sims, boss_sims=boss)
     return Sim(ENGINE_CONFIG, timeout=60)
 
 

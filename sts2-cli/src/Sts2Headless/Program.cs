@@ -431,6 +431,12 @@ class Program
                 return new Dictionary<string, object?> { ["type"] = "static_audit", ["sizes"] = sizes, ["combat_ended_handlers"] = handlers };
             }
 
+            case "card_db":   // Fix11: every card's id, type, rarity and printed cost (rssim's card table)
+                return sim.CardDb();
+
+            case "relic_db":  // Fix11: every relic's canonical dynamic vars (rssim's Ancient option vars)
+                return sim.RelicDb();
+
             case "checksum":
                 return sim.Checksum(cmd.TryGetProperty("dump", out var dmp) && dmp.GetBoolean());
 
