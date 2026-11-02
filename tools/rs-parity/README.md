@@ -8,7 +8,8 @@ sts2-rs is the MIT Rust port of StS2 in github.com/tfriedel/spire-mentor (sparse
   - knobs and bindings: `STS2_ARENA_GAME_VERSION` for `run_arena`, `STS2_RS_RAW_SEED=1` (hash the
     seed string as given, like `RunState.CreateForTest`), PyO3 abi3-py39, `relic_counters()` and
     `next_ancient()` on the PyO3 RunManager, `player_hp()` on PyCombatState, `removal_price` in the
-    shop inventory;
+    shop inventory, and `MctsCombatAgent.step` searches without the GIL (run.py's worker threads
+    search in parallel);
   - fixes found by lockstep: the side-turn-start walk is skipped once a `SetupPlayerTurn` kill
     ended the combat (C# `IterateCombatHookListeners` yields nothing when `IsOverOrEnding`), Pael's
     Tears clears its leftover-energy latch at combat end, Sunken Treasury rolls, Gremlin Merc's gold
@@ -39,4 +40,14 @@ MC plays run unchanged while sts2-rs's MCTS plays the fights: `run.py ... --rs S
 - `apollo_install.sh`: rustup + the patched source + the builds on the Apollo pods' Lustre dir
   (`/scratch/xkzhang/slzhang_cvpr27/rs`: `py/sts2_rs.abi3.so`, `bin/run_arena`, `data/`); a changed
   patch re-extracts the pristine source and re-applies it.
+
+## rsfight: sts2-rs's MCTS playing fights in our engine
+
+`bot/rsfight.py` (`run.py ... --engine-config Fix12 --rs-fight SIMS,BOSS_SIMS`): at every combat
+decision our engine's board (Fix12 `combat_wire`, ported from spire-mentor's Sts2Headless) goes
+through spire-mentor's `sts2_hint` adapter (vendored in `bot/vendor`, MIT) into
+`sts2_rs.state_from_dict`, is installed in a host RunManager (`debug_enter_combat`) and the
+deployed run agent (`MctsCombatAgent`, honest beliefdraw search) picks the action, which is played
+in our engine. The prompt a play opens is answered on the host when its pending choice offers the
+same cards; whatever the agent cannot take goes to our planner.
 

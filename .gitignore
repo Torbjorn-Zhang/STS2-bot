@@ -29,3 +29,4 @@ bot/models/*.pt
 !bot/models/frozen/
 bot/fleetdata/
 bot/models/*_nets*.json
+bot/vendor/sts2_hint/logs/

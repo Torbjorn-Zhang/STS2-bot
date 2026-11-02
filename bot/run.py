@@ -25,6 +25,27 @@ def _key(st):
 
 
 ROOM_PLANNER = {}   # run.py --room-planner: {room type: {"nodes": N, "rollouts": {...}}} overrides per fight
+RS_FIGHT = None   # run.py --rs-fight: (sims, boss_sims) for rsfight.RsFighter, sts2-rs's MCTS in our engine
+
+
+def new_planner(sim, seed, **kw):
+    """A run's TurnPlanner; with --rs-fight it carries the run's RsFighter (one per worker
+    thread's run: the fighter keeps per-fight state), which then plays the fights."""
+    planner = TurnPlanner(sim, **kw)
+    if RS_FIGHT:
+        import zlib
+        from rsfight import RsFighter
+        planner.rs_fighter = RsFighter(*RS_FIGHT, seed=zlib.crc32(str(seed).encode()))
+    return planner
+
+
+def fight(sim, st, planner, on_state=None, on_step=None):
+    """Play the fight st is in to its end; returns the first state after it."""
+    if getattr(sim, "plays_combat", False):   # rssim.RsSim: sts2-rs's MCTS plays the fight
+        return sim.play_combat(st, on_state=on_state)
+    if getattr(planner, "rs_fighter", None) is not None:   # the planner only takes what the fighter cannot
+        return planner.rs_fighter.play_combat(sim, st, fallback=planner, on_state=on_state, on_step=on_step)
+    return planner.play_combat(st, on_state=on_state, on_step=on_step)
 MC_BOSS = 0   # run.py --mc-boss K: K extra determinized plays of every boss fight (lower-variance RL return)
 MC_BOSS_ACTS = None   # --mc-boss-acts: replay only these acts' bosses (the record's boss_mc then covers only them)
 # --mc-act A --mc-k K: save at act A's first map node; after the run, play the rest of the run K more
@@ -64,10 +85,7 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg
             def watch(s):
                 if s.get("enemies") is not None:
                     last["hp"] = [e.get("hp") for e in s["enemies"]]
-            if getattr(sim, "plays_combat", False):   # rssim.RsSim: sts2-rs's MCTS plays the fight
-                st = sim.play_combat(st, on_state=watch if boss else None)
-            else:
-                st = planner.play_combat(st, on_state=watch if boss else None)
+            st = fight(sim, st, planner, on_state=watch if boss else None)
             if boss:
                 won = st.get("decision") not in ("game_over", "combat_play") or bool(st.get("victory"))
                 left = sum(h or 0 for h in last.get("hp") or [])
@@ -105,7 +123,8 @@ def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None,
             if st.get("type") == "error":
                 raise RuntimeError(st.get("message"))
             sim.send({"cmd": "determinize_run", "seed": zlib.crc32(f"{seed}/mc{MC_ACT}/{j}".encode()) * 2654435761 % (2 ** 62)})
-            planner = TurnPlanner(sim, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
+            planner = new_planner(sim, f"{seed}/mc{MC_ACT}/{j}", max_nodes=max_nodes, value=model, value_weight=value_weight,
+                                  rollouts=rollouts)
             if decknets is not None:
                 decknets.rng, decknets.visits = random.Random(f"{seed}/mc{MC_ACT}/{j}"), {}
             bd = {}
@@ -145,7 +164,7 @@ def boss_mc(sim, st, planner, seed, enemy_max):
                 if s_.get("enemies") is not None:
                     last["s"] = s_
 
-            end = planner.play_combat(dict(st), on_state=w)
+            end = fight(sim, dict(st), planner, on_state=w)
             # still in combat = the planner's action cap: not a win
             won = end.get("decision") not in ("game_over", "combat_play", "card_select") or bool(end.get("victory"))
             left = 0 if won else sum((e.get("hp") or 0) for e in combat.alive(last["s"]))
@@ -165,7 +184,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
     rng = random.Random(f"explore/{seed}")
     vine_rng = random.Random(f"vine/{seed}")
     policy.ASCENSION = ascension
-    planner = TurnPlanner(sim, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
+    planner = new_planner(sim, seed, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
     st = sim.send({"cmd": "start_run", "character": character, "seed": seed, "ascension": ascension})
     t0, steps, fights, hp_log = time.perf_counter(), 0, 0, []
     dead_ends, loops, memo, stuck = {}, 0, {}, False
@@ -219,10 +238,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 mc_boss_acts.append(act)
             rp = ROOM_PLANNER.get(room) or {}   # e.g. a deeper search for boss fights only
             planner.max_nodes, planner.rollouts = rp.get("nodes", max_nodes), rp.get("rollouts", rollouts)
-            if getattr(sim, "plays_combat", False):   # rssim.RsSim: sts2-rs's MCTS plays the fight
-                st = sim.play_combat(st, on_state=watch)
-            else:
-                st = planner.play_combat(st, on_state=watch, on_step=on_step)
+            st = fight(sim, st, planner, on_state=watch, on_step=on_step)
             if rec:
                 rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"),
                               last_enemies.get("php"))
@@ -278,7 +294,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         "boss_dmg": round(boss_dmg, 3), "boss_mc": [[round(x, 3) for x in m] for m in mc_boss] if MC_BOSS else None,
         **({"boss_mc_acts": mc_boss_acts} if MC_BOSS_ACTS is not None else {}),
         "act_states": act_states, **({"mc_save": mc_save} if mc_save else {}),
-        "planner": dict(planner.stats), "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
+        "planner": dict(planner.stats), **({"rs_fight": dict(planner.rs_fighter.stats)} if getattr(planner, "rs_fighter", None) else {}),
+        "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
     }
     if rec and not (MC_K and mc_save):   # with act-start rollouts pending, the worker finishes the record
         rec.finish(res)
@@ -343,6 +360,8 @@ def main():
     ap.add_argument("--mc-boss", type=int, default=0, help="K extra determinized plays of each boss fight (RL return)")
     ap.add_argument("--mc-boss-acts", default=None, help='--mc-boss only at these acts\' bosses, e.g. "3"')
     ap.add_argument("--remove-defend-first", action="store_true", help="removals take Defends before Strikes")
+    ap.add_argument("--rs-fight", default=None, help='our engine (needs Fix12), its fights played by sts2-rs\'s MCTS '
+                                                     '(rsfight.RsFighter): "SIMS,BOSS_SIMS", e.g. 1000,4000')
     ap.add_argument("--rs", default=None, help='play on sts2-rs (rssim.RsSim) instead of our engine: "SIMS,BOSS_SIMS" '
                                                'for its MCTS fights (e.g. 250,1000)')
     ap.add_argument("--unified", default=None, help="with --deck-sample: the unified transformer policy (upolicy.py) scores every deck decision")
@@ -386,6 +405,9 @@ def main():
     ap.add_argument("--value-weight", type=float, default=None,
                     help="with --model: score = hand-written + w * model (default: model only)")
     args = ap.parse_args()
+    if args.rs_fight:
+        global RS_FIGHT
+        RS_FIGHT = tuple(int(x) for x in args.rs_fight.split(","))
     if args.rs:
         import engine
         engine.RS = args.rs

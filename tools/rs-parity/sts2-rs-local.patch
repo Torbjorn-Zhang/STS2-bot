@@ -274,6 +274,23 @@ index de215ac..d4f6d70 100644
      fn get_state<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
          let value = parity::combat_state_to_bridge_state(&self.inner);
          pythonize::pythonize(py, &value)
+diff --git a/sts2-rs/crates/sts2-py/src/mcts_combat_agent.rs b/sts2-rs/crates/sts2-py/src/mcts_combat_agent.rs
+index ddcc440..c9f23da 100644
+--- a/sts2-rs/crates/sts2-py/src/mcts_combat_agent.rs
++++ b/sts2-rs/crates/sts2-py/src/mcts_combat_agent.rs
+@@ -94,7 +94,11 @@ impl PyMctsCombatAgent {
+         let phase = rm.inner.phase();
+         let is_combat = phase == Phase::Combat;
+ 
+-        let Some(idx) = self.policy.choose(&rm.inner, &actions) else {
++        // Local patch (sts2-ai): search without the GIL, so the worker threads of one process
++        // (run.py --workers) run their searches in parallel instead of in turn.
++        let policy = &mut self.policy;
++        let inner = &rm.inner;
++        let Some(idx) = py.allow_threads(|| policy.choose(inner, &actions)) else {
+             return Ok(None);
+         };
+         let action = actions[idx];
 diff --git a/sts2-rs/crates/sts2-py/src/run_manager.rs b/sts2-rs/crates/sts2-py/src/run_manager.rs
 index 47c50f6..9c869cd 100644
 --- a/sts2-rs/crates/sts2-py/src/run_manager.rs

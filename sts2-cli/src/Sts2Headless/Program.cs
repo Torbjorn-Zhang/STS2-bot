@@ -437,6 +437,9 @@ class Program
             case "relic_db":  // Fix11: every relic's canonical dynamic vars (rssim's Ancient option vars)
                 return sim.RelicDb();
 
+            case "combat_wire":  // Fix12: the full board for sts2-rs (spire-mentor's wire shape)
+                return sim.CombatWire();
+
             case "checksum":
                 return sim.Checksum(cmd.TryGetProperty("dump", out var dmp) && dmp.GetBoolean());
 

@@ -215,7 +215,7 @@ internal class LocLookup
 /// through map navigation, combat, events, rest sites, shops, and act transitions.
 /// Drives the engine forward until it hits a "decision point" requiring external input.
 /// </summary>
-public class RunSimulator
+public partial class RunSimulator
 {
     private static int? _expectedSaveSchemaVersion;
     private static bool _expectedSaveSchemaVersionReady;
