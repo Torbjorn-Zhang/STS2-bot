@@ -781,12 +781,10 @@ class XDeckRL:
             argv = self.run_args(min(sp["runs"], s0 + sp["chunk"]), s0, f"{self.name}{it}", cfg, f"{self.name}{it}_sp{k}",
                                  ["--deck-sample", sp["temperature"], "--record", rec, "--no-combat-records"] + list(sp.get("sp_extra", [])),
                                  asc=mix[k % len(mix)])
-            # run.py --rs: self-play on sts2-rs (rssim.RsSim), only where it is installed
-            needs = ["rs"] if "--rs" in [str(a) for a in sp.get("sp_extra", [])] else None
             # sp_prio: the queue rank of these chunks (lower runs first; sts2-rs self-play is ~20x
             # cheaper than ours, so its chunks may go ahead of another pipeline's)
             jobs.append(fl.add_job(self.name, f"{self.name}{it}_sp{k}", "xselfplay", sp.get("sp_prio", 1), argv,
-                                   self.inputs(self.st["cur"], cfg), [rec, rows], needs=needs))
+                                   self.inputs(self.st["cur"], cfg), [rec, rows]))
         self.st["sp"][str(it)] = {"jobs": jobs, "t0": time.time(), **({"early": True} if early else {})}
         if not early:
             self.st["phase"] = "selfplay"
@@ -1165,7 +1163,10 @@ class Fleet:
                 del self.jobs[i]
 
     def add_job(self, pipe, jid, kind, prio, argv, inputs, outputs, gpu=False, only=None, needs=None):
-        """needs: host capabilities the job requires (e.g. ["rs"]: sts2-rs installed, for run.py --rs)."""
+        """needs: host capabilities the job requires (e.g. ["rs"]: sts2-rs installed); run.py
+        --rs (sts2-rs self-play) and --rs-fight (sts2-rs's MCTS fighting in our engine) imply it."""
+        if needs is None and any(str(a) in ("--rs", "--rs-fight") for a in argv):
+            needs = ["rs"]
         self.seq += 1
         self.jobs[jid] = {"id": jid, "pipe": pipe, "kind": kind, "prio": prio, "seq": self.seq, "argv": argv,
                           "inputs": inputs, "outputs": outputs, "gpu": gpu, "state": "queued", "tries": 0,
@@ -1303,7 +1304,10 @@ class Fleet:
     # dropped), treasure gold is paid before the relic (as the game does), read-only reply fields
     # (hand upgraded / x_cost, relic counter, reward cards upgraded) and card_db / relic_db
     # (rssim's tables). Found by the sts2-rs lockstep parity runs
-    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8", "Fix9", "Fix10", "Fix11")
+    # Fix12 = Fix11 + the read-only "combat_wire" command (the full board in spire-mentor's wire
+    # shape: piles in order, layered costs, move states, RNG cursors) that run.py --rs-fight
+    # feeds to sts2-rs's MCTS; every other reply is Fix11's
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8", "Fix9", "Fix10", "Fix11", "Fix12")
 
     def ensure_builds(self, h):
         if linux(h):

@@ -31,6 +31,7 @@ class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, seed=0):
         self.sims, self.boss_sims, self.seed = sims, boss_sims, seed
         self.stats = Counter()
+        self.fails = []       # the first failures of the run (kind, detail), for the run record
         self.k = 0            # decisions searched (the agent seed mixes it in)
         self.host = None      # host RunManager after the last searched play (answers its prompt)
 
@@ -45,7 +46,9 @@ class RsFighter:
         ctx = st.get("context") or {}
         asc = int(ctx.get("ascension") or 0)
         wire = {**wire, "game_version": GAME_VERSION}
-        cs = sts2_rs.state_from_dict(adapter.translate(wire, ascension=asc))
+        # character: the adapter otherwise infers the class from card ids, which fails for a
+        # deck with no Ironclad-prefixed card left
+        cs = sts2_rs.state_from_dict(adapter.translate(wire, character="Ironclad", ascension=asc))
         rm = sts2_rs.RunManager(seed=0, character="Ironclad", ascension_level=asc, game_version=GAME_VERSION)
         rm.debug_enter_combat(cs, TIER.get(ctx.get("room_type"), "monster"))
         return rm
@@ -64,6 +67,7 @@ class RsFighter:
             except (UnsupportedStateError, ValueError, KeyError, TypeError, IndexError) as e:
                 self.stats["import_fail"] += 1
                 self.stats["import_fail:" + type(e).__name__] += 1
+                self._fail("import", f"{type(e).__name__}: {str(e)[:200]}")
                 return None
             rec = self._agent(st).step(rm)
             if rec is None or not rec.get("is_combat"):
@@ -72,7 +76,7 @@ class RsFighter:
             act = self._ours(st, rec["action"])
             if act is not None:
                 self.stats["searched"] += 1
-                self.host = rm if act[0] == "play_card" else None
+                self.host = rm   # took the same action on the true board: it answers the next prompt
             return act
         if d == "card_select":
             return self._answer_prompt(st)
@@ -93,9 +97,16 @@ class RsFighter:
                 args["target_index"] = a["target_index"]
             return ("play_card", args)
         if kind == "drink_potion":
-            args = {"potion_index": a.get("potion_slot")}
+            slot = a.get("potion_slot")
+            args = {"potion_index": slot}
             if a.get("target_index") is not None:
                 args["target_index"] = a["target_index"]
+            else:
+                # sts2-rs drinks every potion untargeted and aims an AnyEnemy one at the first
+                # living enemy (as the original Sts2Headless did); our engine wants the target
+                pot = next((p for p in (st.get("player") or {}).get("potions") or [] if p and p.get("index") == slot), None)
+                if pot is not None and pot.get("target_type") == "AnyEnemy":
+                    args["target_index"] = 0
             return ("use_potion", args)
         self.stats["unmapped:" + str(kind)] += 1
         return None
@@ -147,6 +158,10 @@ class RsFighter:
         self.stats["prompt_answered"] += 1
         return ("select_cards", {"indices": ",".join(idx)})
 
+    def _fail(self, kind, detail):
+        if len(self.fails) < 12:
+            self.fails.append((kind, detail))
+
     # ── a whole fight ───────────────────────────────────────────────────────
     def play_combat(self, sim, state, fallback=None, max_actions=600, on_state=None, on_step=None):
         """Play until the combat ends (TurnPlanner.play_combat's contract); decisions the agent
@@ -166,6 +181,10 @@ class RsFighter:
             n += 1
             if nxt.get("type") == "error":
                 self.stats["exec_error"] += 1
+                self._fail("exec", f"{a} -> {str(nxt.get('message'))[:160]} | hand "
+                                   f"{[(c.get('id'), c.get('cost'), c.get('can_play')) for c in state.get('hand') or []]} "
+                                   f"energy {state.get('energy')} enemies {len(state.get('enemies') or [])} "
+                                   f"pots {[(p.get('index'), p.get('name')) for p in (state.get('player') or {}).get('potions') or [] if p]}")
                 self.host = None
                 nxt = sim.act("end_turn") if state.get("decision") == "combat_play" else sim.act("skip_select")
                 if nxt.get("type") == "error":

@@ -294,7 +294,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         "boss_dmg": round(boss_dmg, 3), "boss_mc": [[round(x, 3) for x in m] for m in mc_boss] if MC_BOSS else None,
         **({"boss_mc_acts": mc_boss_acts} if MC_BOSS_ACTS is not None else {}),
         "act_states": act_states, **({"mc_save": mc_save} if mc_save else {}),
-        "planner": dict(planner.stats), **({"rs_fight": dict(planner.rs_fighter.stats)} if getattr(planner, "rs_fighter", None) else {}),
+        "planner": dict(planner.stats), **({"rs_fight": dict(planner.rs_fighter.stats), "rs_fight_fails": planner.rs_fighter.fails}
+           if getattr(planner, "rs_fighter", None) else {}),
         "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
     }
     if rec and not (MC_K and mc_save):   # with act-start rollouts pending, the worker finishes the record
