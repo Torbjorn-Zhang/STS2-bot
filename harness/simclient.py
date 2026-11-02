@@ -114,7 +114,8 @@ def legal_actions(state):
             if not c.get("can_play"):
                 continue
             cost = c.get("cost", 0)
-            if isinstance(cost, int) and cost > energy:
+            # X-cost cards (Fix11 "x_cost") report a resolved cost but play with any energy
+            if isinstance(cost, int) and cost > energy and not c.get("x_cost"):
                 continue
             if c.get("target_type") == "AnyEnemy" and len(alive) > 1:
                 acts += [("play_card", {"card_index": c["index"], "target_index": t}) for t in alive]

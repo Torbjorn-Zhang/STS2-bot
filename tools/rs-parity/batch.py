@@ -9,7 +9,7 @@ def one(seed):
         r = L.lockstep(seed)
     except Exception as e:
         r = {"seed": seed, "error": repr(e)[:1500]}
-    r["soft"] = dict(L.SOFT_SEEN.most_common(3))
+    r["soft"] = {str(k): v for k, v in L.SOFT_SEEN.most_common(3)}
     return r
 
 if __name__ == "__main__":

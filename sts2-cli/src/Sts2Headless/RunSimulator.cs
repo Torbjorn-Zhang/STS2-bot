@@ -2623,6 +2623,8 @@ public class RunSimulator
                 ["target_type"] = c.TargetType.ToString(),
                 // Fix11: the upgrade flag (stats are combat-modified, so they cannot tell Defend from Defend+)
                 ["upgraded"] = c.IsUpgraded,
+                // Fix11: X-cost cards report a resolved cost (3) but play with any energy; can_play is the truth
+                ["x_cost"] = c.EnergyCost?.CostsX == true,
                 ["stats"] = stats.Count > 0 ? stats : null,
                 ["description"] = _loc.Bilingual("cards", c.Id.Entry + ".description"),
             };

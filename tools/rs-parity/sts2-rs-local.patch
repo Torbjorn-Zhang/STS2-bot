@@ -1,3 +1,49 @@
+diff --git a/sts2-rs/crates/sts2-content/src/events/shared_wave_b.rs b/sts2-rs/crates/sts2-content/src/events/shared_wave_b.rs
+index 41a93fd..f8f8b2a 100644
+--- a/sts2-rs/crates/sts2-content/src/events/shared_wave_b.rs
++++ b/sts2-rs/crates/sts2-content/src/events/shared_wave_b.rs
+@@ -783,9 +783,22 @@ pub const SUNKEN_TREASURY_SMALL_GOLD: i32 = 60;
+ /// `SunkenTreasury.second_chest` gold (`shared.py:1659`, 333 ±30).
+ pub const SUNKEN_TREASURY_LARGE_GOLD: i32 = 333;
+ 
++/// Local patch (sts2-ai): C# `SunkenTreasury.CalculateVars` rolls both chests off the
++/// event's own stream at `BeginEvent` — read #1 `SmallChestGold += NextInt(16) - 8`,
++/// read #2 `LargeChestGold += NextInt(61) - 30` (`SunkenTreasury.cs:193-198`, v0.111.0).
++/// The stream is private to the event, so re-deriving it per call gives the displayed
++/// values. The port paid the flat base (lockstep vs the DLL, full_0: C# +58, Rust +60).
++fn sunken_treasury_rolled_gold(state: &RunState) -> (i32, i32) {
++    let mut rng = state.rng.named("SUNKEN_TREASURY");
++    let small = SUNKEN_TREASURY_SMALL_GOLD + rng.next_int_exclusive(0, 16) - 8;
++    let large = SUNKEN_TREASURY_LARGE_GOLD + rng.next_int_exclusive(0, 61) - 30;
++    (small, large)
++}
++
+ fn sunken_treasury_first_chest(state: &mut RunState) -> EventOutcome {
+-    state.gain_gold(SUNKEN_TREASURY_SMALL_GOLD);
+-    EventOutcome::finished(format!("Gained {SUNKEN_TREASURY_SMALL_GOLD} gold."))
++    let (gold, _) = sunken_treasury_rolled_gold(state);
++    state.gain_gold(gold);
++    EventOutcome::finished(format!("Gained {gold} gold."))
+ }
+ 
+ fn sunken_treasury_second_chest(state: &mut RunState) -> EventOutcome {
+@@ -793,13 +806,12 @@ fn sunken_treasury_second_chest(state: &mut RunState) -> EventOutcome {
+     // `AddCurseToDeck<Greed>` — an unconditional deck append. (The ±30 gold
+     // variance off the event Rng is a separate roll still pinned flat to the
+     // base — `6ynt.4.rng`.)
+-    state.gain_gold(SUNKEN_TREASURY_LARGE_GOLD);
++    let (_, gold) = sunken_treasury_rolled_gold(state);
++    state.gain_gold(gold);
+     if let Some(curse) = card_pod_from_id(CardId::Greed, false) {
+         state.add_card_to_deck_with_hooks(curse, sts2_core::relic_effects::AddSource::EventGain);
+     }
+-    EventOutcome::finished(format!(
+-        "Gained {SUNKEN_TREASURY_LARGE_GOLD} gold, gained a Greed curse."
+-    ))
++    EventOutcome::finished(format!("Gained {gold} gold, gained a Greed curse."))
+ }
+ 
+ const SUNKEN_TREASURY_OPTIONS: &[EventOptionSpec] = &[
 diff --git a/sts2-rs/crates/sts2-core/src/combat_loop.rs b/sts2-rs/crates/sts2-core/src/combat_loop.rs
 index a52c646..3e38ae7 100644
 --- a/sts2-rs/crates/sts2-core/src/combat_loop.rs

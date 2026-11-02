@@ -23,6 +23,9 @@ GOD = int(os.environ.get("LOCKSTEP_GOD", "0"))        # >0: both players start w
 PICK = os.environ.get("LOCKSTEP_PICK", "first")        # card rewards: "first" card or "skip"
 
 
+CARD_ALIAS = {"slothstatus": "sloth"}   # sts2-rs status-card ids
+
+
 def ncard(cid):
     """'CARD.STRIKE_IRONCLAD' / 'STRIKE_IRONCLAD' / 'StrikeIronclad' / 'RageCard+' -> 'strikeironclad'."""
     s = str(cid)
@@ -33,7 +36,8 @@ def ncard(cid):
         s = s[:-4]   # sts2-rs names some cards XCard / X_CARD to dodge enum clashes (ColossusCard, RAGE_CARD)
     elif s.endswith("_CARD"):
         s = s[:-5]
-    return s.replace("_", "").lower() + ("+" if up else "")
+    n = s.replace("_", "").lower()
+    return CARD_ALIAS.get(n, n) + ("+" if up else "")
 
 
 ALIAS = {"backattackleft": "backattack", "backattackright": "backattack"}   # sts2-rs power-id variants
@@ -67,8 +71,8 @@ class Ours:
                      discard=s.get("discard_pile_count"),
                      # our hand entries carry no "upgraded" flag; the display name ends in "+"
                      hand=[ncard(c["id"]) + ("+" if c.get("upgraded") else "") for c in s.get("hand", [])],
-                     playable=[bool(c.get("can_play")) and not (isinstance(c.get("cost"), int) and c["cost"] > s.get("energy", 0))
-                               for c in s.get("hand", [])],
+                     # can_play already checks energy (and X-cost cards report a resolved cost of 3)
+                     playable=[bool(c.get("can_play")) for c in s.get("hand", [])],
                      # intents are not compared: ours shows damage after Strength etc., sts2-rs the base value;
                      # a real damage difference shows up as an HP mismatch one step later
                      # names are not compared (ours shows display names, sts2-rs model ids such as
@@ -77,6 +81,19 @@ class Ours:
                                tuple(sorted((nname(pw["name"]), pw.get("amount")) for pw in (e.get("powers") or []))))
                               for e in s.get("enemies", []) if e.get("hp", 0) > 0],
                      ppowers=tuple(sorted((nname(pw["name"]), pw.get("amount")) for pw in (s.get("player_powers") or []))))
+        self._reward_is_select = False
+        in_combat = self._in_combat()
+        if k == "combat":
+            self._last_kind = "combat"
+        elif k == "card_select" and in_combat:
+            self._last_kind = "card_select_combat"
+        else:
+            self._last_kind = k
+        if k == "card_select" and s.get("min_select") == 0 and s.get("max_select") == 1 and not in_combat:
+            k = "card_reward"   # a skippable single pick outside combat is a card reward in sts2-rs terms
+            o["kind"] = k
+            self._sel_index = [c.get("index", i) for i, c in enumerate(s.get("cards", []))]
+            self._reward_is_select = True
         if k == "card_select":
             o.update(cards=[ncard(c["id"]) + ("+" if c.get("upgraded") else "") for c in s.get("cards", [])],
                      min_select=s.get("min_select"), max_select=min(s.get("max_select") or 0, len(s.get("cards", []))))
@@ -89,7 +106,8 @@ class Ours:
                      deck=sorted(Counter(ncard(c["id"]) + ("+" if c.get("upgraded") else "") for c in (p.get("deck") or [])).items()),
                      n_relics=len(p.get("relics") or []), potions=sorted(nname(x["name"]) for x in (p.get("potions") or [])))
         if k == "event":
-            o["options"] = [o2.get("text_key", "").rsplit(".", 1)[-1] for o2 in s.get("options", []) if not o2.get("is_locked")]
+            o["options"] = [o2.get("text_key", "").rsplit(".", 1)[-1] for o2 in s.get("options", [])]
+            o["avail"] = [o2.get("index", i) for i, o2 in enumerate(s.get("options", [])) if not o2.get("is_locked")]
         if k == "rest":
             o["options"] = [nname(o2.get("id") or o2.get("name") or o2.get("title")).replace("restsiteoption", "") for o2 in s.get("options", []) if o2.get("is_enabled", True)]
             self._rest_raw = s.get("options", [])
@@ -99,9 +117,19 @@ class Ours:
             o["cards"] = [ncard(c["id"]) for c in s.get("cards", [])]
         return o
 
+    def _in_combat(self):
+        """A prompt right after a combat state (or another in-combat prompt) is inside that combat."""
+        return getattr(self, "_last_kind", None) in ("combat", "card_select_combat")
+
     def act(self, a):
         """a: an engine-neutral action from policy()."""
         t = a[0]
+        if t in ("pick_reward", "skip_reward") and getattr(self, "_reward_is_select", False):
+            if t == "pick_reward":
+                self.st = self.sim.act("select_cards", indices=str(self._sel_index[a[1]]))
+            else:
+                self.st = self.sim.act("skip_select")
+            return
         if t == "option":
             self.st = self.sim.act("choose_option", option_index=a[1])
         elif t == "move":
@@ -164,11 +192,18 @@ class Rust:
             deck = self.g("master_deck_detailed")
             idx = {"enchant": "enchant_select_deck_indices", "upgrade": "upgrade_select_deck_indices",
                    "transform": "transform_select_deck_indices"}.get(kind)
+            if kind == "grant":   # pick-k-of-n card offers (Gorge): one grant_deck_card per pick
+                n = self.g("pending_card_grants") or 1
+                o.update(kind="card_select", cards=[ncard(c) + ("+" if up else "") for c, up in self.g("card_grant_options")],
+                         min_select=n, max_select=n)
+                return o
             if idx:
                 cards = [ncard(deck[i][0]) + ("+" if deck[i][1] else "") for i in self.g(idx)]
             else:
                 cards = [ncard(c) + ("+" if up else "") for c, up in self.g("card_removal_options")]
-            o.update(kind="card_select", cards=cards, min_select=1, max_select=1)
+            n = self.g({"enchant": "pending_deck_enchants", "upgrade": "pending_deck_upgrades",
+                        "transform": "pending_deck_transforms"}.get(kind, "pending_deck_removals")) or 1
+            o.update(kind="card_select", cards=cards, min_select=n, max_select=min(n, len(cards)))
             return o
         if k == "card_select" and self.g("phase") == "combat":
             s = self.rm.combat_state().get_state()
@@ -198,11 +233,13 @@ class Rust:
                      n_relics=len(self.g("relics")), potions=sorted(nname(x) for x in self.g("potions")))
         if k == "event":
             o["options"] = [x[1] for x in (self.g("event_options") or [])]
+            o["avail"] = sorted(a["idx"] for a in self.rm.available_actions() if a.get("action") == "event_choice")
         if k == "rest":
             o["options"] = [nname(n) for n, en in (self.g("rest_site_options") or []) if en]
         if k == "boss_relic":
             o["kind"] = "event"   # the act-start Ancient's offer; ours shows it as an event after the row-0 node
             o["options"] = [ncard(x.split(".", 1)[-1]) for x in (self.g("boss_relic_options") or [])]
+            o["avail"] = sorted(a["idx"] for a in self.rm.available_actions() if a.get("idx") is not None)
             o["_rust_boss_relic"] = True
         if k == "map":
             o["choices"] = sorted((a["col"], a.get("row")) for a in self.rm.available_actions() if a.get("action") == "move")
@@ -237,7 +274,19 @@ class Rust:
         elif t == "pick_reward":
             pick(lambda x: x.get("action") == "pick_card_reward" and x.get("idx") == a[1])
         elif t == "select_first" and self.kind() == "deck_select":
-            pick(lambda x: str(x.get("action", "")).endswith("_deck_card") and x.get("idx") == 0)
+            if any(x.get("action") == "grant_deck_card" for x in acts):
+                want = [c for c, _ in self.g("card_grant_options")][:a[1]]
+                for name in want:
+                    cur = [c for c, _ in self.g("card_grant_options")]
+                    self.rm.take_action({"action": "grant_deck_card", "idx": cur.index(name)})
+                return
+            # one pick per action; the picked card leaves the eligible list, so idx 0 each time
+            # takes the same cards as ours selecting its first n
+            for _ in range(a[1]):
+                cur = [x for x in self.rm.available_actions() if str(x.get("action", "")).endswith("_deck_card")]
+                if not cur:
+                    break
+                self.rm.take_action(min(cur, key=lambda x: x.get("idx", 0)))
         elif t == "select_first" and self.g("phase") == "combat":
             multi = (self.rm.combat_state().get_state().get("max_select") or 1) > 1
             if a[1] == 1 and not multi:
@@ -258,7 +307,7 @@ class Rust:
 def policy(o):
     k = o["kind"]
     if k == "event":
-        return ("option", 0)
+        return ("option", (o.get("avail") or [0])[0])
     if k == "map":
         c = min(o["choices"])
         return ("move", c[0], c[1])
@@ -280,7 +329,7 @@ def policy(o):
     return ("proceed",)
 
 
-SOFT = {"ppowers", "rcount"}   # sts2-rs's state export leaves some player powers out (Inferno): logged, not fatal
+SOFT = {"ppowers", "rcount", "min_select"}   # sts2-rs export gaps; min_select: whether a pick may be skipped (Discovery)
 SOFT_SEEN = Counter()
 
 
@@ -335,6 +384,9 @@ def lockstep(seed, max_steps=3000):
                 return {"seed": seed, "step": step, "kind": (oa["kind"], ob["kind"]), "diff": d, "ours": oa, "rust": ob}
             if oa["kind"] == "over":
                 return {"seed": seed, "step": step, "ok": True, "hp": oa.get("hp")}
+            if oa["kind"] == "event" and "Crystal Sphere" in str(us.st.get("event_name")):
+                # its minigame is auto-played by each harness's own heuristic: a known, by-design difference
+                return {"seed": seed, "step": step, "ok": True, "note": "stopped at Crystal Sphere"}
             a = policy(oa)
             us.act(a)
             rs.act(a)
