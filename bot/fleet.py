@@ -302,9 +302,19 @@ def lx_pat(path):
 LX_POLL = r"""
 import json, os, re, subprocess
 root, ids = %ROOT%, %IDS%
-ps = subprocess.run(["ps", "-eww", "-o", "args"], capture_output=True, text=True).stdout.splitlines()
+# one /proc scan instead of ps: a pod whose PID 1 does not reap keeps tens of thousands of
+# zombies, and ps over them took ~2 s of the ~5 s after which runai exec drops the output
+cmd = {}
+for p in os.listdir("/proc"):
+    if p.isdigit():
+        try:
+            c = open("/proc/" + p + "/cmdline", "rb").read()
+        except OSError:
+            continue
+        if c:   # empty: a zombie or a kernel thread
+            cmd[p] = c.replace(b"\0", b" ").decode(errors="replace")
 alive = set()
-for line in ps:
+for line in cmd.values():
     m = re.search(r"fleet/jobs/([\w.\-]+)\.sh", line)
     if m and root in line:
         alive.add(m.group(1))
@@ -328,16 +338,13 @@ for i in ids:
         jobs[i] = {"state": "running"}
     else:
         jobs[i] = {"state": "lost"}
+ours = [p for p, c in cmd.items() if root in c]
 def sample():
     # (all CPU ticks, idle ticks, ticks of our processes: command line under our root)
     v = [int(x) for x in open("/proc/stat").readline().split()[1:9]]
     mine = 0
-    for p in os.listdir("/proc"):
-        if not p.isdigit():
-            continue
+    for p in ours:
         try:
-            if root.encode() not in open("/proc/" + p + "/cmdline", "rb").read():
-                continue
             s = open("/proc/" + p + "/stat").read()
             f = s[s.rfind(")") + 2:].split()
             mine += int(f[11]) + int(f[12])
