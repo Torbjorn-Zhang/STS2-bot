@@ -25,6 +25,23 @@ from sts2_hint.errors import UnsupportedStateError  # noqa: E402
 
 GAME_VERSION = "v0.111.0"
 TIER = {"Monster": "monster", "Elite": "elite", "Boss": "boss"}
+_LAST_BOSS = {}   # ascension -> the host run's last boss node on its act-3 map
+
+
+def last_boss_node(asc):
+    """(col, row) of the run's last boss on the host run's act-3 map (seed 0): the second boss
+    at A10 (Double Boss), the only one below."""
+    if asc not in _LAST_BOSS:
+        rm = sts2_rs.RunManager(seed=0, character="Ironclad", ascension_level=asc, game_version=GAME_VERSION)
+        bosses = [(n["col"], n["row"]) for n in rm.act_map_for(3) if n["point_type"] == "boss"]
+        _LAST_BOSS[asc] = max(bosses, key=lambda c: c[1])
+    return _LAST_BOSS[asc]
+
+
+def is_last_boss(ctx):
+    """Our engine's act-3 bosses are on floors 15 and 16 (A10's second boss), every run."""
+    asc = int(ctx.get("ascension") or 0)
+    return ctx.get("act") == 3 and ctx.get("room_type") == "Boss" and ctx.get("floor") == (16 if asc >= 10 else 15)
 
 
 class RsFighter:
@@ -50,6 +67,12 @@ class RsFighter:
         # deck with no Ironclad-prefixed card left
         cs = sts2_rs.state_from_dict(adapter.translate(wire, character="Ironclad", ascension=asc))
         rm = sts2_rs.RunManager(seed=0, character="Ironclad", ascension_level=asc, game_version=GAME_VERSION)
+        if is_last_boss(ctx):
+            # the run's last fight: stand the host on its last boss node, so the agent searches
+            # for the win alone (no HP / potions kept for later; sts2-rs's last-boss objective)
+            col, row = last_boss_node(asc)
+            rm.debug_place_on_map(3, col, row, [], int(ctx.get("floor") or 0), 50)
+            self.stats["last_boss"] += 1
         rm.debug_enter_combat(cs, TIER.get(ctx.get("room_type"), "monster"))
         return rm
 
