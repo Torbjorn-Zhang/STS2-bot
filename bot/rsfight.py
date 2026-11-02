@@ -44,10 +44,41 @@ def is_last_boss(ctx):
     return ctx.get("act") == 3 and ctx.get("room_type") == "Boss" and ctx.get("floor") == (16 if asc >= 10 else 15)
 
 
+def want_override(tok):
+    """Add a "key=value" knob to STS2_RUNAI_MCTS_OVERRIDES unless the key is set (the agents
+    read it when they are built)."""
+    cur = os.environ.get("STS2_RUNAI_MCTS_OVERRIDES", "").strip()
+    if tok.split("=")[0] not in {t.split("=")[0].strip() for t in cur.split(",") if t.strip()}:
+        os.environ["STS2_RUNAI_MCTS_OVERRIDES"] = ",".join(x for x in (cur, tok) if x)
+
+
+def _piles(rm):
+    d = sts2_rs.state_to_dict(rm.combat_state()).get("deck") or {}
+    return {k: sorted((c.get("id"), c.get("upgraded")) for c in v) for k, v in d.items() if isinstance(v, list)}
+
+
+def same_board(a, b):
+    """Two hosts show the same board: the visible state, potions, relic counters and the cards
+    of every pile (the draw order is not compared: the search never reads it)."""
+    try:
+        return (a.combat_state().get_state() == b.combat_state().get_state() and a.potions() == b.potions()
+                and a.relic_counters() == b.relic_counters() and _piles(a) == _piles(b))
+    except Exception:
+        return False
+
+
 class RsFighter:
-    def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0):
-        # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run
+    def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False):
+        # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
+        # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
+        self.elite_sims = elite_sims or sims
+        # reuse: one agent per fight under sts2-rs's tree reuse (GH #830): a search starts from the
+        # subtree of the previous decision's move when the new board matches one of its nodes
+        self.reuse, self.agent = reuse, None
+        self.cont = None      # reuse: the host after the agent's last move, kept while it matches our board
+        if reuse:
+            want_override("tree_reuse=1")
         self.stats = Counter()
         self.fails = []       # the first failures of the run (kind, detail), for the run record
         self.k = 0            # decisions searched (the agent seed mixes it in)
@@ -55,11 +86,24 @@ class RsFighter:
 
     # ── one decision ────────────────────────────────────────────────────────
     def _agent(self, st):
+        if self.agent is not None:
+            return self.agent
         ctx = st.get("context") or {}
         self.k += 1
         s = zlib.crc32(f"{self.seed}:{ctx.get('act')}:{ctx.get('floor')}:{self.k}".encode()) & 0x7FFFFFFF
-        boss = self.boss3_sims if ctx.get("act") == 3 and ctx.get("room_type") == "Boss" else self.boss_sims
-        return sts2_rs.MctsCombatAgent(seed=s, sims=self.sims, boss_sims=boss)
+        room = ctx.get("room_type")
+        boss = self.boss3_sims if ctx.get("act") == 3 and room == "Boss" else self.boss_sims
+        agent = sts2_rs.MctsCombatAgent(seed=s, sims=self.elite_sims if room == "Elite" else self.sims, boss_sims=boss)
+        if self.reuse:
+            self.agent = agent
+        return agent
+
+    def _step(self, st, rm):
+        rec = self._agent(st).step(rm)
+        if rec is not None and rec.get("retained_visits") is not None:
+            self.stats["reused"] += 1
+            self.stats["retained_visits"] += int(rec["retained_visits"])
+        return rec
 
     def _host(self, st, wire):
         ctx = st.get("context") or {}
@@ -87,6 +131,7 @@ class RsFighter:
             if wire.get("type") != "combat_wire":
                 self.stats["wire_error"] += 1
                 return None
+            cont, self.cont = self.cont, None
             try:
                 rm = self._host(st, wire)
             except (UnsupportedStateError, ValueError, KeyError, TypeError, IndexError) as e:
@@ -94,7 +139,16 @@ class RsFighter:
                 self.stats["import_fail:" + type(e).__name__] += 1
                 self._fail("import", f"{type(e).__name__}: {str(e)[:200]}")
                 return None
-            rec = self._agent(st).step(rm)
+            if cont is not None:
+                # the host that made the last move carries what the wire lacks (cards played, HP
+                # lost, hits this turn...), which tree reuse's node match reads: go on with it
+                # while it shows the board we have (a chance edge, e.g. the enemy turn, mostly differs)
+                if same_board(cont, rm):
+                    rm = cont
+                    self.stats["host_kept"] += 1
+                else:
+                    self.stats["host_rebuilt"] += 1
+            rec = self._step(st, rm)
             if rec is None or not rec.get("is_combat"):
                 self.stats["no_action"] += 1
                 return None
@@ -102,6 +156,8 @@ class RsFighter:
             if act is not None:
                 self.stats["searched"] += 1
                 self.host = rm   # took the same action on the true board: it answers the next prompt
+                if self.reuse:
+                    self.cont = rm
             return act
         if d == "card_select":
             return self._answer_prompt(st)
@@ -153,7 +209,7 @@ class RsFighter:
         if Counter(rs_cards) != Counter(our_cards):
             self.stats["prompt_mismatch"] += 1
             return None
-        rec = self._agent(st).step(rm)
+        rec = self._step(st, rm)
         if rec is None:
             self.stats["prompt_no_action"] += 1
             return None
@@ -170,6 +226,8 @@ class RsFighter:
             return None
         if not pick:
             self.stats["prompt_skip"] += 1
+            if self.reuse:
+                self.cont = rm
             return ("skip_select", {})
         used, idx = set(), []
         for j in pick:   # rs option j -> the first unused card of ours that is the same card
@@ -181,6 +239,8 @@ class RsFighter:
             used.add(k)
             idx.append(str(ours[k].get("index", k)))
         self.stats["prompt_answered"] += 1
+        if self.reuse:
+            self.cont = rm
         return ("select_cards", {"indices": ",".join(idx)})
 
     def _fail(self, kind, detail):
@@ -192,12 +252,14 @@ class RsFighter:
         """Play until the combat ends (TurnPlanner.play_combat's contract); decisions the agent
         cannot take go to fallback.plan(state)'s first action (or end_turn / skip)."""
         n = 0
+        self.agent = self.cont = None   # a fight's own agent and host (reuse)
         if on_state:
             on_state(state)
         while state.get("decision") in ("combat_play", "card_select") and n < max_actions:
             a = self.choose(sim, state)
             if a is None:
                 self.stats["fallback"] += 1
+                self.cont = None   # the host did not take the fallback's move
                 path = fallback.plan(state)[0] if fallback is not None else []
                 a = path[0] if path else (("end_turn", {}) if state.get("decision") == "combat_play" else ("skip_select", {}))
             if on_step:
@@ -210,11 +272,16 @@ class RsFighter:
                                    f"{[(c.get('id'), c.get('cost'), c.get('can_play')) for c in state.get('hand') or []]} "
                                    f"energy {state.get('energy')} enemies {len(state.get('enemies') or [])} "
                                    f"pots {[(p.get('index'), p.get('name')) for p in (state.get('player') or {}).get('potions') or [] if p]}")
-                self.host = None
+                self.host = self.cont = None
                 nxt = sim.act("end_turn") if state.get("decision") == "combat_play" else sim.act("skip_select")
                 if nxt.get("type") == "error":
                     break
             state = nxt
             if on_state:
                 on_state(state)
+        if self.agent is not None:   # what tree reuse did in this fight (sts2-rs's tally by reason)
+            for k, v in self.agent.tree_reuse_stats().items():
+                if isinstance(v, int) and k not in ("reused", "retained_visits"):
+                    self.stats["tr_" + k] += v
+        self.agent = self.cont = None
         return state
