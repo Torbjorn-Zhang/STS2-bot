@@ -45,8 +45,9 @@ def is_last_boss(ctx):
 
 
 class RsFighter:
-    def __init__(self, sims=1000, boss_sims=4000, seed=0):
-        self.sims, self.boss_sims, self.seed = sims, boss_sims, seed
+    def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0):
+        # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run
+        self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
         self.stats = Counter()
         self.fails = []       # the first failures of the run (kind, detail), for the run record
         self.k = 0            # decisions searched (the agent seed mixes it in)
@@ -57,7 +58,8 @@ class RsFighter:
         ctx = st.get("context") or {}
         self.k += 1
         s = zlib.crc32(f"{self.seed}:{ctx.get('act')}:{ctx.get('floor')}:{self.k}".encode()) & 0x7FFFFFFF
-        return sts2_rs.MctsCombatAgent(seed=s, sims=self.sims, boss_sims=self.boss_sims)
+        boss = self.boss3_sims if ctx.get("act") == 3 and ctx.get("room_type") == "Boss" else self.boss_sims
+        return sts2_rs.MctsCombatAgent(seed=s, sims=self.sims, boss_sims=boss)
 
     def _host(self, st, wire):
         ctx = st.get("context") or {}

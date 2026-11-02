@@ -25,7 +25,7 @@ def _key(st):
 
 
 ROOM_PLANNER = {}   # run.py --room-planner: {room type: {"nodes": N, "rollouts": {...}}} overrides per fight
-RS_FIGHT = None   # run.py --rs-fight: (sims, boss_sims) for rsfight.RsFighter, sts2-rs's MCTS in our engine
+RS_FIGHT = None   # run.py --rs-fight: (sims, boss_sims[, boss3_sims]) for rsfight.RsFighter, sts2-rs's MCTS in our engine
 
 
 def new_planner(sim, seed, **kw):
@@ -362,7 +362,8 @@ def main():
     ap.add_argument("--mc-boss-acts", default=None, help='--mc-boss only at these acts\' bosses, e.g. "3"')
     ap.add_argument("--remove-defend-first", action="store_true", help="removals take Defends before Strikes")
     ap.add_argument("--rs-fight", default=None, help='our engine (needs Fix12), its fights played by sts2-rs\'s MCTS '
-                                                     '(rsfight.RsFighter): "SIMS,BOSS_SIMS", e.g. 1000,4000')
+                                                     '(rsfight.RsFighter): "SIMS,BOSS_SIMS[,BOSS3_SIMS]", e.g. 1000,4000 '
+                                                     '(BOSS3_SIMS: the act-3 bosses, default BOSS_SIMS)')
     ap.add_argument("--rs", default=None, help='play on sts2-rs (rssim.RsSim) instead of our engine: "SIMS,BOSS_SIMS" '
                                                'for its MCTS fights (e.g. 250,1000)')
     ap.add_argument("--unified", default=None, help="with --deck-sample: the unified transformer policy (upolicy.py) scores every deck decision")
