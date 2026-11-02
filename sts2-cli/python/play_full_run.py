@@ -46,7 +46,9 @@ def play_run(seed: str, character: str = "Ironclad", verbose: bool = True, log: 
     rng = random.Random(seed)
     logger = GameLogger(character, seed, enabled=log)
     proc = subprocess.Popen(
-        [DOTNET, "run", "--no-build", "--project", PROJECT],
+        # STS2_ENGINE_CONFIG picks the build configuration (e.g. Fix11); default as before
+        [DOTNET, "run", "--no-build", "--project", PROJECT]
+        + (["-c", os.environ["STS2_ENGINE_CONFIG"]] if os.environ.get("STS2_ENGINE_CONFIG") else []),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL if not verbose else None,

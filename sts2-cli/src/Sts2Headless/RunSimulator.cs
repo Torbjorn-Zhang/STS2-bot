@@ -3259,6 +3259,18 @@ public class RunSimulator
         WaitForActionExecutor();
         _syncCtx.Pump();
 
+        // Fix11: the chest's gold first, as NTreasureRoom.OpenChest does (DoNormalRewards before
+        // the relic collection opens). Granting the relic first let a Bowler Hat from the chest
+        // multiply the chest's own gold (lockstep vs sts2-rs, full_9: +43 instead of +35).
+        bool normalDone = false;
+        try
+        {
+            treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
+            _syncCtx.Pump();
+            normalDone = true;
+        }
+        catch (Exception ex) { Log($"Treasure gold (before relic): {ex.Message}"); }
+
         // TreasureRoom.EnterInternal opens a relic-picking session (BeginRelicPicking) that the
         // headless must drive, otherwise (a) no relic is ever awarded and (b) the session stays
         // open so the NEXT treasure room's BeginRelicPicking throws "relic picking session while
@@ -3311,8 +3323,11 @@ public class RunSimulator
 
         try
         {
-            treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
-            _syncCtx.Pump();
+            if (!normalDone)
+            {
+                treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
+                _syncCtx.Pump();
+            }
             treasureRoom.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
             _syncCtx.Pump();
         }
@@ -3324,7 +3339,7 @@ public class RunSimulator
             _syncCtx.Pump();
             try
             {
-                treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
+                if (!normalDone) treasureRoom.DoNormalRewards().GetAwaiter().GetResult();
                 _syncCtx.Pump();
                 treasureRoom.DoExtraRewardsIfNeeded().GetAwaiter().GetResult();
                 _syncCtx.Pump();

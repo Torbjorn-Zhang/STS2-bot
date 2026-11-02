@@ -222,6 +222,27 @@ index d8f9dfe..47bc9cf 100644
 +        on_after_player_turn_start_vexing_puzzlebox as AfterPlayerTurnStartFn,
      );
  }
+diff --git a/sts2-rs/crates/sts2-core/src/runstate.rs b/sts2-rs/crates/sts2-core/src/runstate.rs
+index 735d8be..ff13648 100644
+--- a/sts2-rs/crates/sts2-core/src/runstate.rs
++++ b/sts2-rs/crates/sts2-core/src/runstate.rs
+@@ -4819,6 +4819,16 @@ impl RunState {
+             self.gold = self.gold.saturating_add(delta);
+             return;
+         }
++        // Local patch (sts2-ai): C# `PlayerCmd.GainGold` runs `Hook.ModifyGoldGained` on every
++        // gain — Bowler Hat `amount * 1.25m`, then `(int)` truncation (`BowlerHat.cs:25-31`) —
++        // but only `gain_gold_in_combat` applied it, so chest / reward / event gold skipped the
++        // hat (lockstep vs the v0.111.0 DLL, full_9: treasure +43 vs +35). In-combat gold is
++        // written back as `rs.gold = combat.gold`, so nothing is multiplied twice.
++        let delta = if self.relics.contains(&crate::RelicId::BowlerHat) {
++            i32::try_from(i64::from(delta) * 5 / 4).unwrap_or(i32::MAX)
++        } else {
++            delta
++        };
+         if !crate::run_effects::dispatch_should_gain_gold(self, delta) {
+             return;
+         }
 diff --git a/sts2-rs/crates/sts2-py/Cargo.toml b/sts2-rs/crates/sts2-py/Cargo.toml
 index e15aa59..13a24c8 100644
 --- a/sts2-rs/crates/sts2-py/Cargo.toml
