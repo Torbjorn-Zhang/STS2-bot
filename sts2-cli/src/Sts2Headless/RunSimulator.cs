@@ -1318,7 +1318,34 @@ public partial class RunSimulator
 
         // Call EnterMapCoord directly (same as what MoveToMapCoordAction does in TestMode)
         // This avoids the action executor which can swallow errors silently.
-        RunManager.Instance.EnterMapCoord(coord).GetAwaiter().GetResult();
+        // Fix13: a shop's entry can ask for a card reward before the room shows (Lord's Parasol
+        // hands out the stock), and the selector's GetSelectedCardReward blocks its caller until
+        // the main loop resolves it: called from here it waited out its 5 minutes while the
+        // client timed out. A shop is entered on a background task, like the other entries that
+        // can prompt (event options, rest sites, relic purchases), yielding once a selection is
+        // pending (the selection resolvers settle the rest); every other room enters as before.
+        var map = _runState?.Map;
+        if (map != null && map.HasPoint(coord) && map.GetPoint(coord).PointType.ToString() == "Shop")
+        {
+            var task = Task.Run(() => RunManager.Instance.EnterMapCoord(coord));
+            _bgTask = task;
+            while (!task.IsCompleted)
+            {
+                _syncCtx.Pump();
+                if (SelectionPending())
+                {
+                    Log($"Shop entry ({col},{row}): yielded for a pending selection");
+                    return DetectDecisionPoint();
+                }
+                NapOn(task);
+            }
+            task.GetAwaiter().GetResult();
+            _bgTask = null;
+        }
+        else
+        {
+            RunManager.Instance.EnterMapCoord(coord).GetAwaiter().GetResult();
+        }
         _syncCtx.Pump();
         WaitForActionExecutor();
 

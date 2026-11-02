@@ -1307,7 +1307,10 @@ class Fleet:
     # Fix12 = Fix11 + the read-only "combat_wire" command (the full board in spire-mentor's wire
     # shape: piles in order, layered costs, move states, RNG cursors) that run.py --rs-fight
     # feeds to sts2-rs's MCTS; every other reply is Fix11's
-    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8", "Fix9", "Fix10", "Fix11", "Fix12")
+    # Fix13 = Fix12 + a shop is entered on a background task: Lord's Parasol hands out the stock
+    # as card rewards on entry, and the blocking card-reward selector deadlocked the main thread
+    # (the run was lost to a client timeout); other rooms enter as before, runs are identical
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8", "Fix9", "Fix10", "Fix11", "Fix12", "Fix13")
 
     def ensure_builds(self, h):
         if linux(h):
