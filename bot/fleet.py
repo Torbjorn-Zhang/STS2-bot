@@ -783,7 +783,9 @@ class XDeckRL:
                                  asc=mix[k % len(mix)])
             # run.py --rs: self-play on sts2-rs (rssim.RsSim), only where it is installed
             needs = ["rs"] if "--rs" in [str(a) for a in sp.get("sp_extra", [])] else None
-            jobs.append(fl.add_job(self.name, f"{self.name}{it}_sp{k}", "xselfplay", 1, argv,
+            # sp_prio: the queue rank of these chunks (lower runs first; sts2-rs self-play is ~20x
+            # cheaper than ours, so its chunks may go ahead of another pipeline's)
+            jobs.append(fl.add_job(self.name, f"{self.name}{it}_sp{k}", "xselfplay", sp.get("sp_prio", 1), argv,
                                    self.inputs(self.st["cur"], cfg), [rec, rows], needs=needs))
         self.st["sp"][str(it)] = {"jobs": jobs, "t0": time.time(), **({"early": True} if early else {})}
         if not early:
