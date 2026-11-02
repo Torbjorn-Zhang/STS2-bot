@@ -233,6 +233,9 @@ public class RunSimulator
     // Pending rewards for card selection (populated after combat, before proceeding)
     private List<Reward>? _pendingRewards;
     private CardReward? _pendingCardReward;
+    // Fix11: the card rewards after the first (Prayer Wheel's extra one, ...); before, only
+    // cardRewards[0] was ever offered and the rest were dropped with the reward set
+    private readonly Queue<CardReward> _moreCardRewards = new();
     private bool _rewardsProcessed;
     private int _goldBeforeCombat;
     private int _lastKnownHp;
@@ -1262,6 +1265,7 @@ public class RunSimulator
         _eventOptionChosen = false;
         _lastEventOptionCount = 0;
         _pendingRewards = null;
+        _moreCardRewards.Clear();
         _lastKnownHp = player.Creature?.CurrentHp ?? 0;
 
         var col = Convert.ToInt32(args["col"]);
@@ -2844,6 +2848,8 @@ public class RunSimulator
                 if (cardRewards.Count > 0)
                 {
                     _pendingCardReward = cardRewards[0];
+                    _moreCardRewards.Clear();
+                    foreach (var more in cardRewards.Skip(1)) _moreCardRewards.Enqueue(more);
                     _pendingRewards = rewards;
                     return CardRewardState(player, combatRoom);
                 }
@@ -2853,9 +2859,17 @@ public class RunSimulator
             catch (Exception ex) { Log($"Generate rewards: {ex.Message}"); }
         }
 
+        // Fix11: offer the next queued card reward of this combat before moving on
+        if (_pendingRewards != null && _pendingCardReward == null && _moreCardRewards.Count > 0)
+        {
+            _pendingCardReward = _moreCardRewards.Dequeue();
+            return CardRewardState(player, combatRoom);
+        }
+
         // No more pending rewards — proceed
         _pendingCardReward = null;
         _pendingRewards = null;
+        _moreCardRewards.Clear();
         _rewardsProcessed = true;
 
         // Boss → next act, OR final victory after the last act's boss (#81). Act index is
@@ -5036,6 +5050,7 @@ public class RunSimulator
         _eventOptionChosen = false;
         _lastEventOptionCount = 0;
         _pendingRewards = null;
+        _moreCardRewards.Clear();
         _pendingCardReward = null;
         _rewardsProcessed = false;
         _goldBeforeCombat = 0;

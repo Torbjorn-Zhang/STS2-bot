@@ -1,3 +1,37 @@
+diff --git a/sts2-rs/crates/sts2-content/src/cards/ironclad/thunderclap.rs b/sts2-rs/crates/sts2-content/src/cards/ironclad/thunderclap.rs
+index 9e4b285..3e6cb6e 100644
+--- a/sts2-rs/crates/sts2-content/src/cards/ironclad/thunderclap.rs
++++ b/sts2-rs/crates/sts2-content/src/cards/ironclad/thunderclap.rs
+@@ -15,15 +15,21 @@ use super::prelude::*;
+ pub(crate) fn play_thunderclap(state: &mut CombatState, _t: Option<CreatureUid>) -> EffectResult {
+     let dmg = current_damage(state);
+     let dmg_uids: Vec<CreatureUid> = state.enemy_uids.iter().copied().collect();
+-    for uid in dmg_uids {
+-        if state
+-            .creatures
+-            .iter()
+-            .any(|c| c.id == uid.0 && c.current_hp > 0)
+-        {
+-            let _ = deal_damage_player_to_enemy(state, uid, dmg);
++    // Local patch (sts2-ai): the hits are ONE `CreatureCmd.Damage` over all opponents, whose
++    // kills die after the last hit (`CreatureCmd.cs` Kill(killedCreatures)); without the
++    // deferral a killed Crusher's CrabRage gave the Rocket its 99 Block before the Rocket's
++    // own hit (lockstep vs the v0.111.0 DLL, full_5).
++    sts2_core::damage::with_deferred_enemy_deaths(state, |state| {
++        for uid in dmg_uids {
++            if state
++                .creatures
++                .iter()
++                .any(|c| c.id == uid.0 && c.current_hp > 0)
++            {
++                let _ = deal_damage_player_to_enemy(state, uid, dmg);
++            }
+         }
+-    }
++    });
+     // Re-snapshot AFTER damage: C# applies Vulnerable to `HittableEnemies`
+     // evaluated post-damage, so death-spawned minions are included and dead
+     // enemies excluded.
 diff --git a/sts2-rs/crates/sts2-content/src/events/shared_wave_b.rs b/sts2-rs/crates/sts2-content/src/events/shared_wave_b.rs
 index 41a93fd..f8f8b2a 100644
 --- a/sts2-rs/crates/sts2-content/src/events/shared_wave_b.rs
@@ -162,6 +196,32 @@ index d97491a..295452d 100644
      register_before_turn_end(
          RelicId::PaelsTears,
          on_before_turn_end_paels_tears as BeforeTurnEndFn,
+diff --git a/sts2-rs/crates/sts2-core/src/relic_effects/vexing_puzzlebox.rs b/sts2-rs/crates/sts2-core/src/relic_effects/vexing_puzzlebox.rs
+index d8f9dfe..47bc9cf 100644
+--- a/sts2-rs/crates/sts2-core/src/relic_effects/vexing_puzzlebox.rs
++++ b/sts2-rs/crates/sts2-core/src/relic_effects/vexing_puzzlebox.rs
+@@ -45,9 +45,19 @@ pub(crate) fn on_after_side_turn_start_vexing_puzzlebox(
+     EffectResult::Resolved
+ }
+ 
++/// Local patch (sts2-ai): C# fires this from `AfterPlayerTurnStart` (inside
++/// `SetupPlayerTurn`), BEFORE the side's `AfterSideTurnStart` walk, so its
++/// `CombatCardGeneration` draw precedes e.g. Crossbow's (an `AfterSideTurnStart`
++/// relic) whatever the relic order. Registered on the side channel, a Crossbow
++/// picked up earlier drew first and both generated cards changed (lockstep vs the
++/// v0.111.0 DLL, full_5).
++pub(crate) fn on_after_player_turn_start_vexing_puzzlebox(state: &mut CombatState) -> EffectResult {
++    on_after_side_turn_start_vexing_puzzlebox(state, Side::Player)
++}
++
+ pub(crate) fn install() {
+-    register_after_side_turn_start(
++    register_after_player_turn_start(
+         RelicId::VexingPuzzlebox,
+-        on_after_side_turn_start_vexing_puzzlebox as AfterSideTurnStartFn,
++        on_after_player_turn_start_vexing_puzzlebox as AfterPlayerTurnStartFn,
+     );
+ }
 diff --git a/sts2-rs/crates/sts2-py/Cargo.toml b/sts2-rs/crates/sts2-py/Cargo.toml
 index e15aa59..13a24c8 100644
 --- a/sts2-rs/crates/sts2-py/Cargo.toml

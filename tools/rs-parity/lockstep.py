@@ -371,6 +371,12 @@ def lockstep(seed, max_steps=3000):
                 if row0:
                     us.act(("move", row0[0][0], 0))   # sts2-rs skips the map step into the Ancient node
                     oa = us.obs()
+            if oa["kind"] == "map" and ob["kind"] == "event" and rs.g("current_event_name") == "FakeMerchant":
+                # our adapter cannot present the Fake Merchant's custom layout and walks out (known):
+                # take sts2-rs's Leave too
+                SOFT_SEEN[("fake_merchant_skipped", seed)] += 1
+                rs.act(("option", (ob.get("avail") or [0])[-1]))
+                ob = rs.obs()
             ancient = ob.pop("_rust_boss_relic", None)
             if oa["kind"] == "event" and ob["kind"] == "event":
                 xa = [nname(x) for x in oa.get("options", [])]
