@@ -1,0 +1,126 @@
+diff --git a/sts2-rs/crates/sts2-core/src/combat_loop.rs b/sts2-rs/crates/sts2-core/src/combat_loop.rs
+index a52c646..3e38ae7 100644
+--- a/sts2-rs/crates/sts2-core/src/combat_loop.rs
++++ b/sts2-rs/crates/sts2-core/src/combat_loop.rs
+@@ -1948,7 +1948,14 @@ pub(crate) fn run_turn_start_relic_tail(
+     }
+     if !side_turn_start_fired && !state.is_over {
+         crate::coop::run_seat_stage(state, crate::coop::SeatRun::Setup);
+-        if !state.is_over {
++        // Local patch (sts2-ai): C# `Hook.IterateCombatHookListeners` yields nothing
++        // once `CombatManager.IsOverOrEnding`, and a kill inside `SetupPlayerTurn`
++        // (Inferno / Crimson Mantle `AfterPlayerTurnStart`) ends the combat at once.
++        // `is_over` is only set by `check_combat_end`, so resolve it here: without
++        // this the walk still ran and Happy Flower counted the combat-ending turn
++        // (lockstep vs the v0.111.0 DLL, seed full_145).
++        let ended = matches!(check_combat_end(state), StepResult::CombatWon | StepResult::CombatLost);
++        if !ended && !state.is_over {
+             fire_after_side_turn_start(state);
+         }
+     }
+diff --git a/sts2-rs/crates/sts2-core/src/relic_effects/paels_tears.rs b/sts2-rs/crates/sts2-core/src/relic_effects/paels_tears.rs
+index d97491a..295452d 100644
+--- a/sts2-rs/crates/sts2-core/src/relic_effects/paels_tears.rs
++++ b/sts2-rs/crates/sts2-core/src/relic_effects/paels_tears.rs
+@@ -51,7 +51,25 @@ pub(crate) fn on_after_side_turn_start_paels_tears(
+     EffectResult::Resolved
+ }
+ 
++/// Local patch (sts2-ai): `PaelsTears.AfterCombatEnd` clears `HadLeftoverEnergy`
++/// (C# `MegaCrit.Sts2.Core.Models.Relics/PaelsTears.cs:136-139`, v0.111.0). The
++/// latch rides in `counter`, which the run flushes across combats, so a combat that
++/// ended on a skipped turn-start walk carried +2 energy into the next fight's turn 1
++/// (lockstep vs the v0.111.0 DLL, seed full_145).
++pub(crate) fn on_after_combat_end_paels_tears(state: &mut CombatState) -> EffectResult {
++    let Some(r) = paels_tears_relic_mut(state) else {
++        return EffectResult::NotImplemented;
++    };
++    r.counter = 0;
++    EffectResult::Resolved
++}
++
+ pub(crate) fn install() {
++    register_owned_after_combat_end(
++        RelicId::PaelsTears,
++        crate::RelicKind::PaelsTears,
++        on_after_combat_end_paels_tears as AfterCombatEndFn,
++    );
+     register_before_turn_end(
+         RelicId::PaelsTears,
+         on_before_turn_end_paels_tears as BeforeTurnEndFn,
+diff --git a/sts2-rs/crates/sts2-py/Cargo.toml b/sts2-rs/crates/sts2-py/Cargo.toml
+index e15aa59..13a24c8 100644
+--- a/sts2-rs/crates/sts2-py/Cargo.toml
++++ b/sts2-rs/crates/sts2-py/Cargo.toml
+@@ -90,7 +90,7 @@ sts2-runai = { workspace = true }
+ # Linked through sts2-runai / sts2-wire anyway; named here only so `src_hash()`
+ # can fold in its `SRC_HASH`.
+ sts2-vocab = { workspace = true }
+-pyo3 = { version = "0.24", features = ["abi3-py311"] }
++pyo3 = { version = "0.24", features = ["abi3-py39"] }  # local patch (sts2-ai): was abi3-py311; the Mac venv is 3.9
+ # `pythonize` 0.24 matches the pyo3 0.24 minor — required for converting
+ # the `serde_json::Value` returned by `sts2_core::parity::combat_state_to_bridge_state`
+ # into a Python `dict` without round-tripping through a JSON string.
+diff --git a/sts2-rs/crates/sts2-py/src/run_manager.rs b/sts2-rs/crates/sts2-py/src/run_manager.rs
+index 47c50f6..e16e836 100644
+--- a/sts2-rs/crates/sts2-py/src/run_manager.rs
++++ b/sts2-rs/crates/sts2-py/src/run_manager.rs
+@@ -188,6 +188,10 @@ impl PyRunManager {
+         // is applied below via `with_run_seed`; `effective_seed` is its i32
+         // view). An integer `seed` is a `uint` master in both builds.
+         let master_seed: u64 = match string_seed {
++            // Local patch (sts2-ai): STS2_RS_RAW_SEED=1 hashes the string as
++            // given, like C# `RunState.CreateForTest(seed:)` (our headless
++            // engine), which never canonicalises.
++            Some(s) if std::env::var_os("STS2_RS_RAW_SEED").is_some() => game_version.run_seed_hash(s),
+             Some(s) => game_version.run_seed_hash(&sts2_core::canonicalize_seed(s)),
+             None => u64::from(seed as u32),
+         };
+@@ -999,6 +1003,25 @@ impl PyRunManager {
+         emit_rm::relics(&self.inner)
+     }
+ 
++    /// Local patch (sts2-ai): relic counters for parity checks — the live
++    /// combat's relic rows during a fight (gated like `potions`), else the
++    /// run-side `relic_counters` map. Keys are the debug names.
++    fn relic_counters(&self) -> std::collections::BTreeMap<String, i32> {
++        let mut out = std::collections::BTreeMap::new();
++        if self.inner.phase() == sts2_core::run_manager::Phase::Combat {
++            if let Some(combat) = self.inner.combat.as_ref() {
++                for r in &combat.relics {
++                    out.insert(format!("{:?}", r.kind), r.counter);
++                }
++                return out;
++            }
++        }
++        for (id, v) in &self.inner.run_state.relic_counters {
++            out.insert(format!("{id:?}"), *v);
++        }
++        out
++    }
++
+     /// Potion belt — the potions the player currently holds, as
+     /// `PascalCase` `PotionKind` debug names (e.g. `"FirePotion"`). The
+     /// workbench's `display_maps.loc_id` normalizes these to the
+diff --git a/sts2-rs/crates/sts2-runai/src/arena.rs b/sts2-rs/crates/sts2-runai/src/arena.rs
+index ec003e1..862ecd5 100644
+--- a/sts2-rs/crates/sts2-runai/src/arena.rs
++++ b/sts2-rs/crates/sts2-runai/src/arena.rs
+@@ -1055,8 +1055,15 @@ pub(crate) fn new_arena_run_manager(
+     // Start at the Neow event like the real game (C# floor 1 = Neow;
+     // skipping it both forfeits the opening bonus and shifts the act-1
+     // event cursor) — 2026-06-12 anomaly triage on the M1 sweeps.
+-    let mut rm =
+-        new_run_manager_for_character_with_ascension(seed, character, ascension).with_neow_start();
++    // Local patch (sts2-ai): STS2_ARENA_GAME_VERSION=v0.111.0 picks the game
++    // build, chained right after the factory like the PyO3 binding does.
++    let game_version = std::env::var("STS2_ARENA_GAME_VERSION").map_or_else(
++        |_| sts2_core::GameVersion::default(),
++        |v| v.parse().expect("STS2_ARENA_GAME_VERSION: v0.107.1 or v0.111.0"),
++    );
++    let mut rm = new_run_manager_for_character_with_ascension(seed, character, ascension)
++        .with_game_version(game_version)
++        .with_neow_start();
+     rm.run_state.interactive_card_removal = true;
+     rm.run_state.interactive_card_upgrade = true;
+     rm.run_state.interactive_card_transform = true;

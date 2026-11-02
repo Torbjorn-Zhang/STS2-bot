@@ -2621,6 +2621,8 @@ public class RunSimulator
                 ["rarity"] = c.Rarity.ToString(),
                 ["can_play"] = c.CanPlay(out _, out _),
                 ["target_type"] = c.TargetType.ToString(),
+                // Fix11: the upgrade flag (stats are combat-modified, so they cannot tell Defend from Defend+)
+                ["upgraded"] = c.IsUpgraded,
                 ["stats"] = stats.Count > 0 ? stats : null,
                 ["description"] = _loc.Bilingual("cards", c.Id.Entry + ".description"),
             };
@@ -3472,6 +3474,8 @@ public class RunSimulator
                     ["name"] = _loc.Relic(r.Id.Entry),
                     ["description"] = _loc.Bilingual("relics", r.Id.Entry + ".description"),
                     ["vars"] = vars.Count > 0 ? vars : null,
+                    // Fix11: the relic's own counter (Happy Flower turns seen, Pen Nib attacks, ...)
+                    ["counter"] = r.ShowCounter ? r.DisplayAmount : null,
                 };
             }).ToList(),
             ["potions"] = player.Potions?.Select((p, i) =>
