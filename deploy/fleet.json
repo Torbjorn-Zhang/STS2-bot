@@ -29,7 +29,8 @@
    "gpu": true,
    "order": 3,
    "gpu_avoid": "A6000",
-   "gpu_order": 0
+   "gpu_order": 0,
+   "rs": true
   },
   "lab3": {
    "ssh": "lab3",
@@ -43,7 +44,8 @@
    "dynamic": true,
    "share": 0.5,
    "gpu": false,
-   "order": 4
+   "order": 4,
+   "rs": true
   },
   "lab2": {
    "ssh": "lab2",
@@ -57,7 +59,8 @@
    "dynamic": true,
    "share": 0.5,
    "gpu": false,
-   "order": 5
+   "order": 5,
+   "rs": true
   },
   "lab1": {
    "ssh": "lab1",
@@ -71,7 +74,8 @@
    "dynamic": true,
    "share": 0.5,
    "gpu": false,
-   "order": 6
+   "order": 6,
+   "rs": true
   },
   "apollo": {
    "ssh": "apollo",
