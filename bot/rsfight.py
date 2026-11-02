@@ -68,7 +68,8 @@ def same_board(a, b):
 
 
 class RsFighter:
-    def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False):
+    def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
+                 keep_host=False):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -76,7 +77,10 @@ class RsFighter:
         # reuse: one agent per fight under sts2-rs's tree reuse (GH #830): a search starts from the
         # subtree of the previous decision's move when the new board matches one of its nodes
         self.reuse, self.agent = reuse, None
-        self.cont = None      # reuse: the host after the agent's last move, kept while it matches our board
+        # keep_host (implied by reuse): search on the host that made the last move while it matches our
+        # board, so sts2-rs's own per-turn counters stay exact (combat_wire does not carry them)
+        self.keep = reuse or keep_host
+        self.cont = None      # keep: the host after the agent's last move, kept while it matches our board
         if reuse:
             want_override("tree_reuse=1")
         self.stats = Counter()
@@ -156,7 +160,7 @@ class RsFighter:
             if act is not None:
                 self.stats["searched"] += 1
                 self.host = rm   # took the same action on the true board: it answers the next prompt
-                if self.reuse:
+                if self.keep:
                     self.cont = rm
             return act
         if d == "card_select":
@@ -226,7 +230,7 @@ class RsFighter:
             return None
         if not pick:
             self.stats["prompt_skip"] += 1
-            if self.reuse:
+            if self.keep:
                 self.cont = rm
             return ("skip_select", {})
         used, idx = set(), []
@@ -239,7 +243,7 @@ class RsFighter:
             used.add(k)
             idx.append(str(ours[k].get("index", k)))
         self.stats["prompt_answered"] += 1
-        if self.reuse:
+        if self.keep:
             self.cont = rm
         return ("select_cards", {"indices": ",".join(idx)})
 

@@ -26,7 +26,7 @@ def _key(st):
 
 ROOM_PLANNER = {}   # run.py --room-planner: {room type: {"nodes": N, "rollouts": {...}}} overrides per fight
 RS_FIGHT = None   # run.py --rs-fight: (sims, boss_sims[, boss3_sims]) for rsfight.RsFighter, sts2-rs's MCTS in our engine
-RS_FIGHT_KW = {}  # --rs-elite-sims / --rs-reuse
+RS_FIGHT_KW = {}  # --rs-elite-sims / --rs-reuse / --rs-keep-host
 
 
 def new_planner(sim, seed, **kw):
@@ -367,6 +367,8 @@ def main():
                                                      '(BOSS3_SIMS: the act-3 bosses, default BOSS_SIMS)')
     ap.add_argument("--rs-elite-sims", type=int, default=None, help="with --rs-fight: the elite fights' budget (default SIMS)")
     ap.add_argument("--rs-reuse", action="store_true", help="with --rs-fight: one agent per fight under sts2-rs's tree reuse")
+    ap.add_argument("--rs-keep-host", action="store_true",
+                    help="with --rs-fight: search on sts2-rs's own host while it matches our board, without tree reuse")
     ap.add_argument("--rs", default=None, help='play on sts2-rs (rssim.RsSim) instead of our engine: "SIMS,BOSS_SIMS" '
                                                'for its MCTS fights (e.g. 250,1000)')
     ap.add_argument("--unified", default=None, help="with --deck-sample: the unified transformer policy (upolicy.py) scores every deck decision")
@@ -413,7 +415,7 @@ def main():
     if args.rs_fight:
         global RS_FIGHT
         RS_FIGHT = tuple(int(x) for x in args.rs_fight.split(","))
-        RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse})
+        RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse, "keep_host": args.rs_keep_host})
     if args.rs:
         import engine
         engine.RS = args.rs
