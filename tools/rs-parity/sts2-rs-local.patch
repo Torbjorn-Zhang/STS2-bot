@@ -44,6 +44,37 @@ index 41a93fd..f8f8b2a 100644
  }
  
  const SUNKEN_TREASURY_OPTIONS: &[EventOptionSpec] = &[
+diff --git a/sts2-rs/crates/sts2-content/src/run_bridge.rs b/sts2-rs/crates/sts2-content/src/run_bridge.rs
+index 48e8318..484f9e8 100644
+--- a/sts2-rs/crates/sts2-content/src/run_bridge.rs
++++ b/sts2-rs/crates/sts2-content/src/run_bridge.rs
+@@ -645,6 +645,26 @@ pub fn exit_combat(rs: &mut RunState, combat: &CombatState) {
+     } else {
+         1.0 - f64::from(combat.escaped_creatures) / total_monsters as f64
+     };
++    // Local patch (sts2-ai): wire the GremlinMercNormal override. Its roster is the
++    // only one with a GremlinMerc; only its FatGremlin flees (so any escape is the
++    // FatGremlin), and C# `MarkGoldStolen` fires when the Merc's Thievery took any
++    // gold (`SurprisePower.cs:161-164`) — the Thievery counters stay on the state.
++    // Lockstep vs the v0.111.0 DLL (full_5): C# 0 gold after a heist escape, the
++    // base formula paid 2/3 of the roll and shifted the card-reward stream.
++    if combat
++        .creatures
++        .iter()
++        .any(|c| c.species == Some(sts2_core::MonsterKind::GremlinMerc))
++    {
++        let stolen: i32 = combat
++            .powers
++            .iter()
++            .filter(|p| p.kind == sts2_core::PowerKind::Thievery)
++            .map(|p| p.counter.max(0))
++            .sum();
++        rs.last_combat_gold_proportion =
++            gremlin_merc_gold_proportion(combat.escaped_creatures > 0, stolen > 0);
++    }
+ 
+     // Bead `sts2-rs-RP17`: write back the combat-time gold (SealOfGold's
+     // per-turn `-5` spends). `enter_combat` snapshotted `rs.gold` in and nothing
 diff --git a/sts2-rs/crates/sts2-core/src/combat_loop.rs b/sts2-rs/crates/sts2-core/src/combat_loop.rs
 index a52c646..3e38ae7 100644
 --- a/sts2-rs/crates/sts2-core/src/combat_loop.rs
@@ -64,6 +95,43 @@ index a52c646..3e38ae7 100644
              fire_after_side_turn_start(state);
          }
      }
+diff --git a/sts2-rs/crates/sts2-core/src/lib.rs b/sts2-rs/crates/sts2-core/src/lib.rs
+index 163a3c3..c5bd67e 100644
+--- a/sts2-rs/crates/sts2-core/src/lib.rs
++++ b/sts2-rs/crates/sts2-core/src/lib.rs
+@@ -6315,9 +6315,24 @@ impl CombatState {
+         let uid = self.spawn_enemy_at_index(species, at);
+         self.set_creature_ai(uid, ai);
+         self.set_enemy_slot(uid, slot);
++        self.philosophers_stone_on_added(uid);
+         uid
+     }
+ 
++    /// Local patch (sts2-ai): C# `PhilosophersStone.AfterCreatureAddedToCombat` gives every
++    /// non-player-side creature added mid-combat `StrengthPower` 1
++    /// (`MegaCrit.Sts2.Core.Models.Relics/PhilosophersStone.cs:116-125`); the port only had
++    /// the combat-start leg (lockstep vs the v0.111.0 DLL, full_5: Ovicopter's Tough Eggs).
++    /// Gated on `round > 0` so roster setup before the start leg cannot double it.
++    fn philosophers_stone_on_added(&mut self, uid: CreatureUid) {
++        if self.round == 0 {
++            return;
++        }
++        if (&self.relics).into_iter().any(|r| r.kind == RelicKind::PhilosophersStone && !r.is_melted) {
++            crate::card_effects::apply_power_to_enemy(self, uid, PowerKind::Strength, 1);
++        }
++    }
++
+     /// Read the encounter slot index recorded for `uid`, if any. Bead
+     /// `sts2-rs-c8why`.
+     #[must_use]
+@@ -6652,6 +6667,7 @@ impl CombatState {
+         // not needed here.
+         let ctx = crate::hooks::CreatureAddedCtx::default();
+         crate::hooks::dispatch_after_creature_added_to_combat(self, &ctx);
++        self.philosophers_stone_on_added(uid);
+         uid
+     }
+ 
 diff --git a/sts2-rs/crates/sts2-core/src/relic_effects/paels_tears.rs b/sts2-rs/crates/sts2-core/src/relic_effects/paels_tears.rs
 index d97491a..295452d 100644
 --- a/sts2-rs/crates/sts2-core/src/relic_effects/paels_tears.rs

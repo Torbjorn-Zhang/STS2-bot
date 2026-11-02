@@ -40,11 +40,17 @@ def ncard(cid):
     return CARD_ALIAS.get(n, n) + ("+" if up else "")
 
 
-ALIAS = {"backattackleft": "backattack", "backattackright": "backattack"}   # sts2-rs power-id variants
+ALIAS = {"backattackleft": "backattack", "backattackright": "backattack",   # sts2-rs power-id variants
+         "battleworndummytimelimit": "timelimit"}
 
 
 def nname(s):
     n = "".join(ch for ch in str(s).lower() if ch.isalnum())
+    # ours falls back to the loc key for some powers ("MANGLE_POWER.title"); sts2-rs ids end in Power
+    for suf in ("powertitle", "power"):
+        if n.endswith(suf) and len(n) > len(suf):
+            n = n[: -len(suf)]
+            break
     return ALIAS.get(n, n)
 
 
@@ -115,6 +121,10 @@ class Ours:
             o["choices"] = sorted((c["col"], c["row"]) for c in s.get("choices", []))
         if k == "card_reward":
             o["cards"] = [ncard(c["id"]) for c in s.get("cards", [])]
+        self._bundle = k == "bundle"
+        if self._bundle:   # sts2-rs shows a bundle pick as a card reward of bundles
+            o["kind"] = "card_reward"
+            o["bundles"] = [[nname(c["name"]) for c in b.get("cards", [])] for b in s.get("bundles", [])]
         return o
 
     def _in_combat(self):
@@ -124,6 +134,9 @@ class Ours:
     def act(self, a):
         """a: an engine-neutral action from policy()."""
         t = a[0]
+        if t == "pick_reward" and getattr(self, "_bundle", False):
+            self.st = self.sim.act("select_bundle", bundle_index=a[1])
+            return
         if t in ("pick_reward", "skip_reward") and getattr(self, "_reward_is_select", False):
             if t == "pick_reward":
                 self.st = self.sim.act("select_cards", indices=str(self._sel_index[a[1]]))
@@ -244,7 +257,11 @@ class Rust:
         if k == "map":
             o["choices"] = sorted((a["col"], a.get("row")) for a in self.rm.available_actions() if a.get("action") == "move")
         if k == "card_reward":
-            o["cards"] = [ncard(c) for c in self.g("card_reward_option_ids")]
+            bundles = self.g("card_reward_bundles")
+            if bundles:
+                o["bundles"] = [[ncard(c) for c in b] for b in bundles]
+            else:
+                o["cards"] = [ncard(c) for c in self.g("card_reward_option_ids")]
         return o
 
     def act(self, a):
@@ -317,6 +334,8 @@ def policy(o):
                 return ("play", i, 0)
         return ("end_turn",)
     if k == "card_reward":
+        if o.get("bundles"):
+            return ("pick_reward", 0)
         return ("pick_reward", 0) if PICK == "first" and o.get("cards") else ("skip_reward",)
     if k == "rest":
         return ("option", 0)
