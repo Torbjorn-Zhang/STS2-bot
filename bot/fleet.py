@@ -781,8 +781,10 @@ class XDeckRL:
             argv = self.run_args(min(sp["runs"], s0 + sp["chunk"]), s0, f"{self.name}{it}", cfg, f"{self.name}{it}_sp{k}",
                                  ["--deck-sample", sp["temperature"], "--record", rec, "--no-combat-records"] + list(sp.get("sp_extra", [])),
                                  asc=mix[k % len(mix)])
+            # run.py --rs: self-play on sts2-rs (rssim.RsSim), only where it is installed
+            needs = ["rs"] if "--rs" in [str(a) for a in sp.get("sp_extra", [])] else None
             jobs.append(fl.add_job(self.name, f"{self.name}{it}_sp{k}", "xselfplay", 1, argv,
-                                   self.inputs(self.st["cur"], cfg), [rec, rows]))
+                                   self.inputs(self.st["cur"], cfg), [rec, rows], needs=needs))
         self.st["sp"][str(it)] = {"jobs": jobs, "t0": time.time(), **({"early": True} if early else {})}
         if not early:
             self.st["phase"] = "selfplay"
@@ -1160,11 +1162,13 @@ class Fleet:
             if i in self.jobs and self.jobs[i]["state"] in ("done", "failed"):
                 del self.jobs[i]
 
-    def add_job(self, pipe, jid, kind, prio, argv, inputs, outputs, gpu=False, only=None):
+    def add_job(self, pipe, jid, kind, prio, argv, inputs, outputs, gpu=False, only=None, needs=None):
+        """needs: host capabilities the job requires (e.g. ["rs"]: sts2-rs installed, for run.py --rs)."""
         self.seq += 1
         self.jobs[jid] = {"id": jid, "pipe": pipe, "kind": kind, "prio": prio, "seq": self.seq, "argv": argv,
                           "inputs": inputs, "outputs": outputs, "gpu": gpu, "state": "queued", "tries": 0,
-                          "host": None, "result": None, **({"only": only} if only else {})}
+                          "host": None, "result": None, **({"only": only} if only else {}),
+                          **({"needs": list(needs)} if needs else {})}
         return jid
 
     def cleanup(self, pattern, keep=None, local=True):
@@ -1293,7 +1297,11 @@ class Fleet:
     # discards it; restore -9%, same runs) + restore_prof (per-phase restore timings)
     # Fix10 = Fix9 + memoized loc strings + combat_play states carry a slim deck {id, type,
     # upgraded, stats} (no descriptions / after_upgrade clones): replies 13 -> 6 KB, runs -6..9%, same runs
-    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8", "Fix9", "Fix10")
+    # Fix11 = Fix10 + every card reward of a combat is offered (Prayer Wheel's second one was
+    # dropped), treasure gold is paid before the relic (as the game does), read-only reply fields
+    # (hand upgraded / x_cost, relic counter, reward cards upgraded) and card_db / relic_db
+    # (rssim's tables). Found by the sts2-rs lockstep parity runs
+    ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8", "Fix9", "Fix10", "Fix11")
 
     def ensure_builds(self, h):
         if linux(h):
@@ -1604,6 +1612,8 @@ class Fleet:
     def pick(self, job, hosts):
         if job.get("only"):   # e.g. a task whose data lives on one machine
             hosts = [h for h in hosts if h["name"] == job["only"]]
+        if job.get("needs"):   # capabilities set in deploy/fleet.json (e.g. "rs": true)
+            hosts = [h for h in hosts if all(h.get(c) for c in job["needs"])]
         if job["gpu"]:
             # gpu_idle (Linux polls): cards with no memory in use; with every card taken by other
             # users the job would only run on that host's CPU, so it goes where the CPU is best
@@ -1664,6 +1674,7 @@ class Fleet:
                 continue
             cand = sorted([j for j in self.jobs.values() if j["state"] == "running" and j["host"] != h["name"]
                            and not j.get("backup") and j["kind"] != "train" and not j.get("gpu_now") and not j.get("only")
+                           and all(h.get(c) for c in j.get("needs", []))
                            and time.time() - j.get("t_start", time.time()) > BACKUP_AFTER],
                           key=lambda j: j.get("t_start", 0))[:free]
             if cand:

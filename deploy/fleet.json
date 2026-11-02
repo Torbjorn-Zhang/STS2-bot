@@ -115,7 +115,8 @@
     "port": 8222,
     "key": "/scratch/xkzhang/slzhang_cvpr27/.ssh/id_lab0",
     "known_hosts": "/scratch/xkzhang/slzhang_cvpr27/.ssh/known_hosts"
-   }
+   },
+   "rs": true
   },
   "apollo2": {
    "ssh": "apollo",
@@ -159,7 +160,8 @@
     "port": 8222,
     "key": "/scratch/xkzhang/slzhang_cvpr27/.ssh/id_lab0",
     "known_hosts": "/scratch/xkzhang/slzhang_cvpr27/.ssh/known_hosts"
-   }
+   },
+   "rs": true
   },
   "apollo3": {
    "ssh": "apollo",
@@ -203,7 +205,8 @@
     "port": 8222,
     "key": "/scratch/xkzhang/slzhang_cvpr27/.ssh/id_lab0",
     "known_hosts": "/scratch/xkzhang/slzhang_cvpr27/.ssh/known_hosts"
-   }
+   },
+   "rs": true
   }
  }
 }
