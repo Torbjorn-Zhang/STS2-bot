@@ -44,6 +44,13 @@ def is_last_boss(ctx):
     return ctx.get("act") == 3 and ctx.get("room_type") == "Boss" and ctx.get("floor") == (16 if asc >= 10 else 15)
 
 
+def is_first_double_boss(ctx):
+    """The first act-3 boss under A10 DoubleBoss (floor 15): its end HP and potions are the
+    second boss's, with no rest between."""
+    return (int(ctx.get("ascension") or 0) >= 10 and ctx.get("act") == 3 and ctx.get("room_type") == "Boss"
+            and ctx.get("floor") == 15)
+
+
 def want_override(tok):
     """Add a "key=value" knob to STS2_RUNAI_MCTS_OVERRIDES unless the key is set (the agents
     read it when they are built)."""
@@ -69,7 +76,7 @@ def same_board(a, b):
 
 class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
-                 keep_host=False):
+                 keep_host=False, boss1_pow=None):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -83,6 +90,10 @@ class RsFighter:
         self.cont = None      # keep: the host after the agent's last move, kept while it matches our board
         if reuse:
             want_override("tree_reuse=1")
+        # boss1_pow k: the first boss of A10's double boss values a win at 0.5 + (the share of a full
+        # HP bar and belt it keeps)^k, as the second boss's win rate climbs steeply with its entry HP
+        # (sts2-rs win_carry_pow; the deployed value prices 1 HP at ~1/300 of the win)
+        self.boss1_pow = boss1_pow
         self.stats = Counter()
         self.fails = []       # the first failures of the run (kind, detail), for the run record
         self.k = 0            # decisions searched (the agent seed mixes it in)
@@ -98,6 +109,11 @@ class RsFighter:
         room = ctx.get("room_type")
         boss = self.boss3_sims if ctx.get("act") == 3 and room == "Boss" else self.boss_sims
         agent = sts2_rs.MctsCombatAgent(seed=s, sims=self.elite_sims if room == "Elite" else self.sims, boss_sims=boss)
+        if self.boss1_pow and is_first_double_boss(ctx):
+            # this agent only: the env bundle is shared by every worker thread of the process
+            cur = os.environ.get("STS2_RUNAI_MCTS_OVERRIDES", "").strip()
+            agent.set_mcts_overrides(",".join(x for x in (cur, f"win_carry_pow={self.boss1_pow}") if x))
+            self.stats["boss1_pow"] += 1
         if self.reuse:
             self.agent = agent
         return agent

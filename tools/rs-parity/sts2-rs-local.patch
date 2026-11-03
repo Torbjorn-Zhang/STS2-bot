@@ -130,7 +130,7 @@ index a52c646..3e38ae7 100644
          }
      }
 diff --git a/sts2-rs/crates/sts2-core/src/lib.rs b/sts2-rs/crates/sts2-core/src/lib.rs
-index 163a3c3..c5bd67e 100644
+index 163a3c3..6239774 100644
 --- a/sts2-rs/crates/sts2-core/src/lib.rs
 +++ b/sts2-rs/crates/sts2-core/src/lib.rs
 @@ -6315,9 +6315,24 @@ impl CombatState {
@@ -166,6 +166,29 @@ index 163a3c3..c5bd67e 100644
          uid
      }
  
+@@ -12578,6 +12594,22 @@ pub fn evaluate_victory_carry(state: &CombatState, hp_carry: f32, potion_carry:
+     norm.clamp(0.5, 1.0)
+ }
+ 
++/// Local patch (sts2-ai): the share of a full HP bar and belt a won fight
++/// carries on, raised to `k`, in `[0, 1]`:
++/// `((hp + λ·potions) / (max_hp + λ·max(3, potions)))^k`, λ the potion's
++/// HP price. For a fight whose end HP is the next fight's entry HP with no
++/// rest between (the first act-3 boss under A10 DoubleBoss), where the
++/// second boss's win rate climbs steeply with that HP.
++#[must_use]
++pub fn victory_carry_share_pow(state: &CombatState, k: f32) -> f32 {
++    let hp = state.player.current_hp.max(0) as f32;
++    let max_hp = (state.player.max_hp.max(1) as f32).max(hp);
++    let potions = state.player.potions.len() as f32;
++    let w = potion_weight();
++    let share = (hp + w * potions) / (max_hp + w * potions.max(3.0));
++    share.clamp(0.0, 1.0).powf(k)
++}
++
+ /// HP-equivalents → root-Q units at the victory band's exchange rate.
+ ///
+ /// [`evaluate_victory`] maps `raw = 100·(35 + hp + potions·λ − …)` onto
 diff --git a/sts2-rs/crates/sts2-core/src/relic_effects/paels_tears.rs b/sts2-rs/crates/sts2-core/src/relic_effects/paels_tears.rs
 index d97491a..295452d 100644
 --- a/sts2-rs/crates/sts2-core/src/relic_effects/paels_tears.rs
@@ -243,6 +266,50 @@ index 735d8be..ff13648 100644
          if !crate::run_effects::dispatch_should_gain_gold(self, delta) {
              return;
          }
+diff --git a/sts2-rs/crates/sts2-mcts/src/lib.rs b/sts2-rs/crates/sts2-mcts/src/lib.rs
+index 9cfdbc8..293a390 100644
+--- a/sts2-rs/crates/sts2-mcts/src/lib.rs
++++ b/sts2-rs/crates/sts2-mcts/src/lib.rs
+@@ -58,7 +58,8 @@ use sts2_core::StepResult;
+ use sts2_core::{
+     apply as core_apply, evaluate_victory, evaluate_victory_carry, is_terminal, legal_actions,
+     loot_at_risk_hp_equiv, persistent_gain_hp_equiv, state_hash, terminal_value,
+-    victory_hp_equiv_to_q, victory_hp_surplus, Action, CombatState, PersistentBaseline,
++    victory_carry_share_pow, victory_hp_equiv_to_q, victory_hp_surplus, Action, CombatState,
++    PersistentBaseline,
+ };
+ 
+ pub mod action_index;
+@@ -632,6 +633,11 @@ pub struct MctsConfig {
+     /// The same for held potions: 0 lets the run's last boss drink its belt
+     /// without the search pricing what it keeps. `None` ⇒ carry 1.
+     pub win_potion_carry: Option<f32>,
++    /// Local patch (sts2-ai): `Some(k)` values a win at
++    /// `0.5 + share^k` ([`sts2_core::victory_carry_share_pow`]), the share
++    /// of a full HP bar and belt it carries on, in place of the band and
++    /// both carries. `None` ⇒ the deployed win value.
++    pub win_carry_pow: Option<f32>,
+     /// KataGo's dynamic variance-scaled cPUCT: the exploration term is
+     /// multiplied by
+     /// `1 + cpuct_utility_stdev_scale · (σ_node / cpuct_utility_stdev_prior − 1)`,
+@@ -1277,6 +1283,7 @@ impl Default for MctsConfig {
+             removed_counts_forms: false,
+             win_hp_carry: None,
+             win_potion_carry: None,
++            win_carry_pow: None,
+             cpuct_utility_stdev_scale: 0.0,
+             // Our utility units, not KataGo's 0.40. Measured median root-node
+             // σ on the position book; see `mcts_node_stdev_probe`.
+@@ -6235,6 +6242,9 @@ pub fn terminal_state_value(
+ /// GH #771) the HP and potion terms are blended toward a full win and the
+ /// surplus is scaled by the HP carry.
+ fn win_value(state: &CombatState, cfg: &MctsConfig) -> f32 {
++    if let Some(k) = cfg.win_carry_pow {
++        return 0.5 + victory_carry_share_pow(state, k);
++    }
+     if cfg.win_hp_carry.is_none() && cfg.win_potion_carry.is_none() {
+         return 0.5 + evaluate_victory(state) + victory_hp_surplus(state);
+     }
 diff --git a/sts2-rs/crates/sts2-py/Cargo.toml b/sts2-rs/crates/sts2-py/Cargo.toml
 index e15aa59..13a24c8 100644
 --- a/sts2-rs/crates/sts2-py/Cargo.toml
@@ -275,7 +342,7 @@ index de215ac..d4f6d70 100644
          let value = parity::combat_state_to_bridge_state(&self.inner);
          pythonize::pythonize(py, &value)
 diff --git a/sts2-rs/crates/sts2-py/src/mcts_combat_agent.rs b/sts2-rs/crates/sts2-py/src/mcts_combat_agent.rs
-index ddcc440..c9f23da 100644
+index ddcc440..89d8570 100644
 --- a/sts2-rs/crates/sts2-py/src/mcts_combat_agent.rs
 +++ b/sts2-rs/crates/sts2-py/src/mcts_combat_agent.rs
 @@ -94,7 +94,11 @@ impl PyMctsCombatAgent {
@@ -291,6 +358,22 @@ index ddcc440..c9f23da 100644
              return Ok(None);
          };
          let action = actions[idx];
+@@ -339,6 +343,15 @@ impl PyMctsCombatAgent {
+         Ok(Some(out))
+     }
+ 
++    /// Local patch (sts2-ai): replace this agent's `STS2_RUNAI_MCTS_OVERRIDES`
++    /// bundle (read once when it was built) with `bundle`, same syntax, so
++    /// the threads of one process can give one fight's search its own knobs.
++    /// Call it before the agent's first search: a kept tree holds values
++    /// from the old bundle.
++    fn set_mcts_overrides(&mut self, bundle: &str) {
++        self.policy.set_mcts_overrides(bundle);
++    }
++
+     /// `(elite decisions, boss decisions, motif-tagged common decisions,
+     /// simulations requested)` over this agent's lifetime — the compute
+     /// readout for benchmark arms. Forced moves count as decisions but
 diff --git a/sts2-rs/crates/sts2-py/src/run_manager.rs b/sts2-rs/crates/sts2-py/src/run_manager.rs
 index 47c50f6..9c869cd 100644
 --- a/sts2-rs/crates/sts2-py/src/run_manager.rs
@@ -374,6 +457,82 @@ index ec003e1..862ecd5 100644
      rm.run_state.interactive_card_removal = true;
      rm.run_state.interactive_card_upgrade = true;
      rm.run_state.interactive_card_transform = true;
+diff --git a/sts2-rs/crates/sts2-runai/src/policy/mod.rs b/sts2-rs/crates/sts2-runai/src/policy/mod.rs
+index 947c6c4..155fc26 100644
+--- a/sts2-rs/crates/sts2-runai/src/policy/mod.rs
++++ b/sts2-rs/crates/sts2-runai/src/policy/mod.rs
+@@ -1170,6 +1170,7 @@ struct MctsKnobOverrides {
+     removed_counts_forms: Option<bool>,
+     win_hp_carry: Option<f32>,
+     win_potion_carry: Option<f32>,
++    win_carry_pow: Option<f32>,
+ }
+ 
+ /// The full set of knob names [`parse_mcts_overrides`] accepts, kept as
+@@ -1194,7 +1195,8 @@ const MCTS_OVERRIDE_KNOB_NAMES: &str = "chance_widening_c, chance_widening_alpha
+     attacks at their displayed number, GH #830), removed_counts_forms (true: the loss band's \
+     enemy-HP-removed term counts multi-form / reviving enemies' remaining forms, GH #830), \
+     win_hp_carry / win_potion_carry (f32 in [0, 1]: how much of a won fight's end HP / held \
+-    potions the win value counts; 0 = win probability alone, GH #771) \
++    potions the win value counts; 0 = win probability alone, GH #771), \
++    win_carry_pow (f32 > 0, local patch: a win is worth 0.5 + the carried HP-and-belt share ^ k) \
+     (sims and depth are NOT \
+     included here — combat budget is owned by CombatBudget / STS2_RUNAI_ROLLOUT_DEPTH)";
+ 
+@@ -1299,6 +1301,9 @@ impl MctsKnobOverrides {
+         if let Some(v) = self.win_potion_carry {
+             config.win_potion_carry = Some(v);
+         }
++        if let Some(v) = self.win_carry_pow {
++            config.win_carry_pow = Some(v);
++        }
+     }
+ 
+     /// Each slot of `self`, or `fallback`'s where `self` leaves it unset:
+@@ -1338,6 +1343,7 @@ impl MctsKnobOverrides {
+             removed_counts_forms,
+             win_hp_carry,
+             win_potion_carry,
++            win_carry_pow,
+         } = self;
+         Self {
+             chance_widening_c: chance_widening_c.or(fallback.chance_widening_c),
+@@ -1372,6 +1378,7 @@ impl MctsKnobOverrides {
+             removed_counts_forms: removed_counts_forms.or(fallback.removed_counts_forms),
+             win_hp_carry: win_hp_carry.or(fallback.win_hp_carry),
+             win_potion_carry: win_potion_carry.or(fallback.win_potion_carry),
++            win_carry_pow: win_carry_pow.or(fallback.win_carry_pow),
+         }
+     }
+ }
+@@ -1515,6 +1522,13 @@ fn parse_mcts_overrides(env_value: Option<&str>) -> MctsKnobOverrides {
+             "persistent_weight" => out.persistent_weight = Some(f32_of(key, val)),
+             "win_hp_carry" => out.win_hp_carry = Some(carry_of(key, val)),
+             "win_potion_carry" => out.win_potion_carry = Some(carry_of(key, val)),
++            "win_carry_pow" => match f32_of(key, val) {
++                k if k > 0.0 && k.is_finite() => out.win_carry_pow = Some(k),
++                _ => panic!(
++                    "STS2_RUNAI_MCTS_OVERRIDES: knob {key}={val:?} is not a number > 0 — \
++                     refusing to silently fall back and poison the run"
++                ),
++            },
+             "loss_gradient" => out.loss_gradient = Some(bool_of(key, val)),
+             "root_guards" => out.root_guards = Some(bool_of(key, val)),
+             "tie_rules" => {
+@@ -1788,6 +1802,13 @@ impl<M: RunPolicy> MctsCombatPolicy<M> {
+         self.last_root_filter.as_ref()
+     }
+ 
++    /// Local patch (sts2-ai): replace the `STS2_RUNAI_MCTS_OVERRIDES` bundle
++    /// read at construction with `bundle` (same syntax), so one process can
++    /// give one fight's search its own knobs without touching the env.
++    pub fn set_mcts_overrides(&mut self, bundle: &str) {
++        self.overrides = parse_mcts_overrides(Some(bundle));
++    }
++
+     /// What `tree_reuse` (GH #830) did over this policy's lifetime. All
+     /// zero unless `STS2_RUNAI_MCTS_OVERRIDES` sets `tree_reuse=1`.
+     #[must_use]
 diff --git a/sts2-rs/crates/sts2-wire/src/emit/run_manager.rs b/sts2-rs/crates/sts2-wire/src/emit/run_manager.rs
 index ff21497..957ebf8 100644
 --- a/sts2-rs/crates/sts2-wire/src/emit/run_manager.rs
