@@ -19,6 +19,7 @@ Records are run.py --record rows written with DeckNets (the extras carry the opt
 """
 import argparse
 import glob
+import gzip
 import json
 import math
 import os
@@ -332,7 +333,7 @@ def load_records(files):
     outcomes {run key: row}."""
     decs, outcome = [], {}
     for f in files:
-        for l in open(f):
+        for l in (gzip.open(f, "rt") if f.endswith(".gz") else open(f)):
             r = json.loads(l)
             key = f"{os.path.basename(f)}/{r.get('seed')}"
             if r.get("k") == "o":
