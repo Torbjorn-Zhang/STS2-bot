@@ -129,6 +129,13 @@ class DeckNets:
                 z = self.unified.score(f"sel_{pur}", st, [("card", t) for t in toks])
                 i, lp, tx = self._pick(sim, z, [("select_cards", {"indices": str(j)}) for j in idx])
                 return ("select_cards", {"indices": str(idx[i])}), {"copts": toks, "cpur": pur, "ck": i, "clp": lp, **tx}
+        if d == "map_select":
+            # act start: walk into the Ancient (its opening heal and relic are never worth
+            # skipping). The teacher never labels this walk (sts2-rs offers the relics first),
+            # so a network imitating it has no say here and used to skip it.
+            anc = [c for c in st.get("choices") or [] if c.get("type") == "Ancient"]
+            if anc:
+                return ("select_map_node", {"col": anc[0]["col"], "row": anc[0]["row"]}), {}
         if d == "map_select" and self.map is not None and len(st.get("choices") or []) > 1:
             chs, descs, z = self.map.scores(sim, st)
             if z is not None and self.unified is not None:
