@@ -391,6 +391,9 @@ def train(args):
     net = Net(enc).to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
     A = np.array([d[3] for d in decs])
+    # what the validation scores against: the teacher's pick where it labelled (DAgger records
+    # played ours), else the played option
+    T = np.array([int(np.argmax(d[7])) if d[7] is not None else d[3] for d in decs])
     TP = [d[7] for d in decs] if args.soft else None   # soft targets: the teacher's probabilities
     W = torch.tensor(w, device=dev)
     R = torch.tensor([ret[d[6]] for d in decs], dtype=torch.float32, device=dev)
@@ -404,7 +407,7 @@ def train(args):
                 b = idx[i:i + 512]
                 z = net(collate([items[j] for j in b], dev))
                 lp = torch.log_softmax(z, -1)
-                a = torch.tensor(A[b], device=dev)
+                a = torch.tensor(T[b], device=dev)
                 nll += float(-lp.gather(1, a[:, None]).sum())
                 ok = (z.argmax(-1) == a).cpu().numpy()
                 for j, o in zip(b, ok):

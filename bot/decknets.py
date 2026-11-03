@@ -59,12 +59,17 @@ class DeckNets:
 
     def _pick(self, sim, z, cands, smith=None):
         """-> (option index, log-prob, record extras): the teacher's best option when it scores
-        this decision, else a sample of z."""
+        this decision (with probability teacher.play; otherwise a sample of z, still labelled), else
+        a sample of z."""
         if self.teacher is not None:
             t = self.teacher.choose(sim, cands, smith)
             if t is not None:
                 i, tp = t
-                return i, 0.0, {"teach": 1, "tp": [round(x, 4) for x in tp]}
+                x = {"teach": 1, "tp": [round(v, 4) for v in tp]}
+                if self.teacher.play >= 1 or self.rng.random() < self.teacher.play:
+                    return i, 0.0, x
+                j, lp = self._sample(z)   # DAgger: our pick plays, the teacher's label is kept
+                return j, lp, {**x, "tplay": 0}
         i, lp = self._sample(z)
         return i, lp, {}
 

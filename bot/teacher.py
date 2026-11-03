@@ -17,8 +17,10 @@ _LOCAL = threading.local()
 
 
 class PpoTeacher:
-    def __init__(self, model, features="card_mods,reward_upgrade"):
-        self.model, self.features = model, features
+    def __init__(self, model, features="card_mods,reward_upgrade", play=1.0):
+        # play: probability its pick is played at a decision it labels (< 1: DAgger, our pick
+        # plays otherwise and the record keeps its label, x.tplay = 0)
+        self.model, self.features, self.play = model, features, play
 
     def _agent(self):
         a = getattr(_LOCAL, "agent", None)

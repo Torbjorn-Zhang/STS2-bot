@@ -374,6 +374,9 @@ def main():
     ap.add_argument("--teacher", default=None,
                     help="with --rs and --deck-sample: spire-mentor's PPO run policy (.onnx) makes the deck decisions "
                          "it scores; --record marks them (x.teach, x.tp) for upolicy.py train --teacher-only")
+    ap.add_argument("--teacher-play", type=float, default=1.0,
+                    help="with --teacher: probability its pick is played at each decision it labels; below 1 our "
+                         "pick plays otherwise and keeps its label (DAgger: teacher labels on our states)")
     ap.add_argument("--rs", default=None, help='play on sts2-rs (rssim.RsSim) instead of our engine: "SIMS,BOSS_SIMS" '
                                                'for its MCTS fights (e.g. 250,1000)')
     ap.add_argument("--unified", default=None, help="with --deck-sample: the unified transformer policy (upolicy.py) scores every deck decision")
@@ -589,7 +592,8 @@ def main():
     teacher = None
     if args.teacher:
         from teacher import PpoTeacher
-        teacher = PpoTeacher(args.teacher if os.path.isabs(args.teacher) else os.path.join(HERE, args.teacher))
+        teacher = PpoTeacher(args.teacher if os.path.isabs(args.teacher) else os.path.join(HERE, args.teacher),
+                             play=args.teacher_play)
 
     def worker(chunk):
         sim = fresh_sim()
