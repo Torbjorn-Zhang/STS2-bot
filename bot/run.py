@@ -371,6 +371,9 @@ def main():
                     help="with --rs-fight: search on sts2-rs's own host while it matches our board, without tree reuse")
     ap.add_argument("--rs-boss1-pow", type=float, default=None,
                     help="with --rs-fight: A10's first act-3 boss values a win at 0.5 + kept HP-and-belt share ^ K")
+    ap.add_argument("--teacher", default=None,
+                    help="with --rs and --deck-sample: spire-mentor's PPO run policy (.onnx) makes the deck decisions "
+                         "it scores; --record marks them (x.teach, x.tp) for upolicy.py train --teacher-only")
     ap.add_argument("--rs", default=None, help='play on sts2-rs (rssim.RsSim) instead of our engine: "SIMS,BOSS_SIMS" '
                                                'for its MCTS fights (e.g. 250,1000)')
     ap.add_argument("--unified", default=None, help="with --deck-sample: the unified transformer policy (upolicy.py) scores every deck decision")
@@ -583,6 +586,11 @@ def main():
     lock = threading.Lock()
     rec_lock = threading.Lock()
 
+    teacher = None
+    if args.teacher:
+        from teacher import PpoTeacher
+        teacher = PpoTeacher(args.teacher if os.path.isabs(args.teacher) else os.path.join(HERE, args.teacher))
+
     def worker(chunk):
         sim = fresh_sim()
         res = []
@@ -602,7 +610,7 @@ def main():
                                 paths = (cfg.get("card"), cfg.get("rest"), cfg.get("event"), cfg.get("map"))
                                 shop = cfg.get("shop")
                                 unified = unified or cfg.get("unified")   # xdeckrl kind "unified": the network being trained
-                            dn = DeckNets(*paths, args.deck_sample, seed=s, shop=shop, unified=unified)
+                            dn = DeckNets(*paths, args.deck_sample, seed=s, shop=shop, unified=unified, teacher=teacher)
                         rec = None
                         if args.record:
                             from record import GameRecorder

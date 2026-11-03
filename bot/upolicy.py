@@ -328,7 +328,8 @@ def load_net(blob):
 
 
 def load_records(files):
-    """-> decisions [(dec, s, opts, chosen, route, behavior lp, run key)], outcomes {run key: row}."""
+    """-> decisions [(dec, s, opts, chosen, route, behavior lp, run key, teacher probs or None)],
+    outcomes {run key: row}."""
     decs, outcome = [], {}
     for f in files:
         for l in open(f):
@@ -345,7 +346,9 @@ def load_records(files):
             a = chosen_of(r, opts)
             if a is None or a < 0 or a >= len(opts):
                 continue
-            decs.append((kind_of(r), r["s"], opts, a, (r.get("x") or {}).get("route"), behavior_lp(r), key))
+            x = r.get("x") or {}
+            tp = x.get("tp") if x.get("teach") and len(x.get("tp") or []) == len(opts) else None
+            decs.append((kind_of(r), r["s"], opts, a, x.get("route"), behavior_lp(r), key, tp))
     return decs, outcome
 
 
@@ -360,6 +363,8 @@ def train(args):
     from nets import final_progress
     decs, outcome = load_records(expand(args.files))
     decs = [d for d in decs if d[6] in outcome]
+    if args.teacher_only:   # run.py --teacher records: the teacher's decisions only
+        decs = [d for d in decs if d[7] is not None]
     ret = {k: final_progress(o) for k, o in outcome.items()}
     by = defaultdict(list)
     for d in decs:
@@ -385,6 +390,7 @@ def train(args):
     net = Net(enc).to(dev)
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
     A = np.array([d[3] for d in decs])
+    TP = [d[7] for d in decs] if args.soft else None   # soft targets: the teacher's probabilities
     W = torch.tensor(w, device=dev)
     R = torch.tensor([ret[d[6]] for d in decs], dtype=torch.float32, device=dev)
 
@@ -414,7 +420,14 @@ def train(args):
             z, v = net(collate([items[j] for j in b], dev), with_value=True)
             lp = torch.log_softmax(z, -1)
             a = torch.tensor(A[b], device=dev)
-            loss = -(W[b] * lp.gather(1, a[:, None]).squeeze(1)).mean() + 0.5 * ((v - R[b] / 100.0) ** 2).mean()
+            if TP is not None:
+                q = torch.zeros_like(lp)
+                for r_, j in enumerate(b):
+                    q[r_, :len(TP[j])] = torch.tensor(TP[j], dtype=lp.dtype, device=dev)
+                pol = -(q * lp.masked_fill(q <= 0, 0.0)).sum(-1)
+            else:
+                pol = -lp.gather(1, a[:, None]).squeeze(1)
+            loss = (W[b] * pol).mean() + 0.5 * ((v - R[b] / 100.0) ** 2).mean()
             opt.zero_grad()
             loss.backward()
             nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -675,6 +688,8 @@ def main():
                     help="rl: mean return at the same (asc, act, floor), the value head, their mean, or (auto) whichever "
                          "explains more of the return's variance in this data")
     ap.add_argument("--awr", action="store_true")
+    ap.add_argument("--teacher-only", action="store_true", help="train: only the decisions a teacher made (x.teach)")
+    ap.add_argument("--soft", action="store_true", help="train: fit the teacher's probabilities (x.tp), not its pick")
     ap.add_argument("--beta", type=float, default=1.0)
     ap.add_argument("--wmax", type=float, default=20.0)
     ap.add_argument("--seed", type=int, default=0)

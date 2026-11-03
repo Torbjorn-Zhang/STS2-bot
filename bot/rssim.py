@@ -608,6 +608,47 @@ class RsSim:
             return self._render()
         return {"type": "error", "message": f"rssim: unsupported action {name}"}
 
+    def resolve(self, name, args):
+        """The sts2-rs action dict _action would take for one of our out-of-combat actions, without
+        taking it (None when it is not one step: the Ancient walk, multi-card picks). For a teacher
+        policy on the same RunManager (teacher.py)."""
+        acts, phase = self._acts(), self._g("phase")
+
+        def find(pred):
+            return next((a for a in acts if pred(a)), None)
+
+        i = args.get("option_index", args.get("card_index", args.get("bundle_index", args.get("relic_index",
+                     args.get("potion_index", 0)))))
+        if name == "choose_option" and phase == "boss_relic":
+            return find(lambda a: a.get("action") == "pick_boss_relic" and a.get("idx") == int(i))
+        if name == "choose_option":
+            return find(lambda a: a.get("action") in ("event_choice", "rest_option", "pick_boss_relic") and a.get("idx") == int(i))
+        if name == "select_map_node":
+            return None if phase == "boss_relic" else find(lambda a: a.get("action") == "move" and a.get("col") == int(args["col"]))
+        if name in ("select_card_reward", "select_bundle"):
+            return find(lambda a: a.get("action") == "pick_card_reward" and a.get("idx") == int(i))
+        if name == "skip_card_reward":
+            return find(lambda a: a.get("action") == "pick_card_reward" and a.get("idx") is None)
+        if name == "select_cards" and phase != "combat":
+            idx = [int(x) for x in str(args.get("indices", "")).split(",") if x != ""]
+            if len(idx) != 1:
+                return None
+            if any(a.get("action") == "smith_card" for a in acts):
+                return find(lambda a: a.get("action") == "smith_card" and a.get("idx") == idx[0])
+            if phase == "card_reward" and self._g("card_offer_choose_screen"):
+                return find(lambda a: a.get("action") == "pick_card_reward" and a.get("idx") == idx[0])
+            if self._deck_prompt() == "grant":
+                return find(lambda a: a.get("action") == "grant_deck_card" and a.get("idx") == idx[0])
+            return find(lambda a: str(a.get("action", "")).endswith("_deck_card") and a.get("idx") == idx[0])
+        if name == "leave_room":
+            return find(lambda a: a.get("action") == "leave_shop")
+        if name in ("buy_card", "buy_relic", "buy_potion"):
+            kind = {"buy_card": "shop_buy_card", "buy_relic": "shop_buy_relic", "buy_potion": "shop_buy_potion"}[name]
+            return find(lambda a: a.get("action") == kind and a.get("idx") == int(i))
+        if name == "remove_card":
+            return find(lambda a: a.get("action") == "shop_remove_card")
+        return None
+
     # ── combat by sts2-rs's MCTS ────────────────────────────────────────────
     def play_combat(self, st, on_state=None, on_step=None):
         """Play the current fight to its end with MctsCombatAgent; on_state gets a light combat

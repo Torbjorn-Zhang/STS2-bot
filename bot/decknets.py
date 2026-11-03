@@ -15,8 +15,12 @@ import numpy as np
 
 
 class DeckNets:
-    def __init__(self, card=None, rest=None, event=None, mapp=None, temperature=1.0, seed=0, shop=None, unified=None):
+    def __init__(self, card=None, rest=None, event=None, mapp=None, temperature=1.0, seed=0, shop=None, unified=None,
+                 teacher=None):
         self.card = self.rest = self.event = self.map = self.shop = None
+        # teacher (teacher.PpoTeacher, on sts2-rs): its best option is played instead of ours and the
+        # record says so (x.teach, x.tp: its probabilities over our options), for imitation
+        self.teacher = teacher
         # unified (upolicy.UPolicy): one transformer re-scores every decision's options; the separate
         # networks above still build the option descriptors (the record format)
         self.unified = None
@@ -53,6 +57,17 @@ class DeckNets:
         i = self.rng.choices(range(len(z)), weights=p.tolist())[0]
         return i, float(math.log(max(p[i], 1e-12)))
 
+    def _pick(self, sim, z, cands, smith=None):
+        """-> (option index, log-prob, record extras): the teacher's best option when it scores
+        this decision, else a sample of z."""
+        if self.teacher is not None:
+            t = self.teacher.choose(sim, cands, smith)
+            if t is not None:
+                i, tp = t
+                return i, 0.0, {"teach": 1, "tp": [round(x, 4) for x in tp]}
+        i, lp = self._sample(z)
+        return i, lp, {}
+
     def decide(self, sim, st):
         """-> (action, extra) or (None, None) when no network covers this decision."""
         import policy
@@ -65,27 +80,28 @@ class DeckNets:
                 opts = [("card", card_tok(by_index[a[1]["card_index"]])) if a[0] == "select_card_reward" else ("skip", None)
                         for a in acts]
                 z = self.unified.score("card_reward", st, opts)
-            i, lp = self._sample(z)
-            return acts[i], {"lp": lp, "T": self.temperature}
+            i, lp, tx = self._pick(sim, z, acts)
+            return acts[i], {"lp": lp, "T": self.temperature, **tx}
         if d == "rest_site" and self.rest is not None:
             keys, ks, z, route = self.rest.scores(sim, st)
             if len(ks) >= 2 and self.unified is not None:
                 z = self.unified.score("rest_site", st, [("rest", k) for k in ks], route)
             if len(ks) >= 2:
-                i, lp = self._sample(z)
+                i, lp, tx = self._pick(sim, z, [("choose_option", {"option_index": keys[k][0]}) for k in ks],
+                                       {j: keys[k][1] for j, k in enumerate(ks) if k.startswith("SMITH")})
                 idx, tok = keys[ks[i]]
                 policy._LAST_REST.option = ks[i].split(":")[0]
                 policy._REST_PICK.token = tok
-                return ("choose_option", {"option_index": idx}), {"rlp": lp, "rkeys": ks, "rk": ks[i], "route": route}
+                return ("choose_option", {"option_index": idx}), {"rlp": lp, "rkeys": ks, "rk": ks[i], "route": route, **tx}
         if d == "event_choice" and self.event is not None:
             opts, descs, z, route = self.event.scores(sim, st)
             if z is not None and self.unified is not None and len(descs) >= 2:
                 z = self.unified.score("event_choice", st, [("event", x) for x in descs], route)
             if z is not None:
-                i, lp = self._sample(z)
+                i, lp, tx = self._pick(sim, z, [("choose_option", {"option_index": o["index"]}) for o in opts])
                 policy._remember_event(opts[i])
                 return ("choose_option", {"option_index": opts[i]["index"]}), \
-                    {"eopts": descs, "ek": i, "elp": lp, "route": route}
+                    {"eopts": descs, "ek": i, "elp": lp, "route": route, **tx}
         if d == "shop" and self.shop is not None and sim is not None:
             ctx = st.get("context") or {}
             visit = self.visits.setdefault((ctx.get("act"), ctx.get("floor")), {"removed": False, "bought": 0})
@@ -94,26 +110,26 @@ class DeckNets:
             if len(opts) >= 2 and self.unified is not None:
                 z = self.unified.score("shop", st, [("shop", o) for o, _ in opts], route)
             if len(opts) >= 2:
-                i, lp = self._sample(z)
+                i, lp, tx = self._pick(sim, z, [a for _, a in opts])
                 a = opts[i][1]
                 if a[0] == "remove_card":
                     visit["removed"] = True
                 elif a[0].startswith("buy_"):
                     visit["bought"] += 1
-                return a, {"sopts": [o for o, _ in opts], "sk": i, "slp": lp, "route": route, "smemo": before}
+                return a, {"sopts": [o for o, _ in opts], "sk": i, "slp": lp, "route": route, "smemo": before, **tx}
         if d == "card_select" and self.unified is not None:
             sel = policy.select_options(st)   # single-card prompts outside combat
             if sel is not None and f"sel_{sel[2]}" in self.unified.kinds:
                 toks, idx, pur = sel
                 z = self.unified.score(f"sel_{pur}", st, [("card", t) for t in toks])
-                i, lp = self._sample(z)
-                return ("select_cards", {"indices": str(idx[i])}), {"copts": toks, "cpur": pur, "ck": i, "clp": lp}
+                i, lp, tx = self._pick(sim, z, [("select_cards", {"indices": str(j)}) for j in idx])
+                return ("select_cards", {"indices": str(idx[i])}), {"copts": toks, "cpur": pur, "ck": i, "clp": lp, **tx}
         if d == "map_select" and self.map is not None and len(st.get("choices") or []) > 1:
             chs, descs, z = self.map.scores(sim, st)
             if z is not None and self.unified is not None:
                 z = self.unified.score("map_select", st, [("map", x) for x in descs])
             if z is not None:
-                i, lp = self._sample(z)
+                i, lp, tx = self._pick(sim, z, [("select_map_node", {"col": c["col"], "row": c["row"]}) for c in chs])
                 return ("select_map_node", {"col": chs[i]["col"], "row": chs[i]["row"]}), \
-                    {"mopts": descs, "mk": i, "mlp": lp}
+                    {"mopts": descs, "mk": i, "mlp": lp, **tx}
         return None, None
