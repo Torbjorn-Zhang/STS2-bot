@@ -1688,11 +1688,18 @@ class Fleet:
             free = self.free_slots(h)
             if free <= 0:
                 continue
-            cand = sorted([j for j in self.jobs.values() if j["state"] == "running" and j["host"] != h["name"]
-                           and not j.get("backup") and j["kind"] != "train" and not j.get("gpu_now") and not j.get("only")
-                           and all(h.get(c) for c in j.get("needs", []))
-                           and time.time() - j.get("t_start", time.time()) > BACKUP_AFTER],
-                          key=lambda j: j.get("t_start", 0))[:free]
+            # a copy keeps its primary's width (j["w"]): only copies that fit the free slots, or the
+            # share guard stops them at the next poll and they are started again (11-04: an 8-slot
+            # task copied onto lab0 every 20 s for an hour)
+            cand = []
+            for j in sorted([j for j in self.jobs.values() if j["state"] == "running" and j["host"] != h["name"]
+                             and not j.get("backup") and j["kind"] != "train" and not j.get("gpu_now") and not j.get("only")
+                             and all(h.get(c) for c in j.get("needs", []))
+                             and time.time() - j.get("t_start", time.time()) > BACKUP_AFTER],
+                            key=lambda j: j.get("t_start", 0)):
+                if j.get("w", 1) <= free:
+                    cand.append(j)
+                    free -= j.get("w", 1)
             if cand:
                 for j in cand:
                     j["backup"] = h["name"]
