@@ -9,7 +9,10 @@ MctsCombatAgent, K times (other agent seeds), the whole fight inside sts2-rs as 
   rsfight's per-decision import loses); about equal -> it is in the run (decks, maps, events).
 
     transplant.py TAG --extract      # runs/TAG.jsonl -> runs/TAG_w0.jsonl.gz (the fights with a wire)
-    transplant.py TAG [--k 4] [--sims 1000 --boss-sims 4000] [--start I --end J] [--out OUT] [--workers W]
+    transplant.py TAG [--k 4] [--sims 1000 --boss-sims 4000] [--rooms Boss] [--start I --end J] [--reuse] [--out OUT] [--workers W]
+
+A --rs --rs-dump-wires eval dumps sts2-rs's own boards ("state"): replaying those is the null control
+(this host vs the fight inside the sts2-rs run).
 
 Rows -> runs/OUT.jsonl (default TAG_tp), one per fight: the run seed, act, floor, room, enemies,
 ours (hp_before, hp_after, won) and rs: [{hp, won, steps, error}] per replay.
@@ -40,8 +43,11 @@ def host(w0):
     """The fight's entry board as a fresh sts2-rs run in it (RsFighter._host)."""
     ctx = w0["ctx"]
     asc = int(ctx.get("ascension") or 0)
-    wire = {**w0["wire"], "game_version": GAME_VERSION}
-    cs = sts2_rs.state_from_dict(adapter.translate(wire, character="Ironclad", ascension=asc))
+    if "state" in w0:   # an sts2-rs run's own board (run.py --rs --rs-dump-wires): the null control
+        cs = sts2_rs.state_from_dict(w0["state"])
+    else:
+        wire = {**w0["wire"], "game_version": GAME_VERSION}
+        cs = sts2_rs.state_from_dict(adapter.translate(wire, character="Ironclad", ascension=asc))
     rm = sts2_rs.RunManager(seed=0, character="Ironclad", ascension_level=asc, game_version=GAME_VERSION)
     if w0.get("last_boss"):
         col, row = last_boss_node(asc)
@@ -95,6 +101,7 @@ def main():
     ap.add_argument("--k", type=int, default=4, help="replays per fight")
     ap.add_argument("--sims", type=int, default=1000)
     ap.add_argument("--boss-sims", type=int, default=4000)
+    ap.add_argument("--rooms", default=None, help="only these room types (e.g. Boss); --start/--end index the kept fights")
     ap.add_argument("--start", type=int, default=0, help="first fight of runs/TAG_w0.jsonl.gz")
     ap.add_argument("--end", type=int, default=None, help="end fight, exclusive")
     ap.add_argument("--reuse", action="store_true", help="sts2-rs's tree reuse in the replays (as --rs-reuse)")
@@ -106,7 +113,10 @@ def main():
     if args.reuse:
         want_override("tree_reuse=1")
     with gzip.open(os.path.join(HERE, "runs", f"{args.tag}_w0.jsonl.gz"), "rt") as fh:
-        fights = [json.loads(line) for line in fh][args.start:args.end]
+        fights = [json.loads(line) for line in fh]
+    if args.rooms:
+        fights = [f for f in fights if f["wire0"]["ctx"].get("room_type") in args.rooms.split(",")]
+    fights = fights[args.start:args.end]
     jobs = [(f["wire0"], args.k, args.sims, args.boss_sims) for f in fights]
     path = os.path.join(HERE, "runs", f"{args.out or args.tag + '_tp'}.jsonl")
     t0, n = time.time(), 0

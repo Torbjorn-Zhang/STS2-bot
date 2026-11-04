@@ -176,6 +176,25 @@ def boss_mc(sim, st, planner, seed, enemy_max):
     return shares
 
 
+RS_DUMP_NATIVE = False   # --rs with --rs-dump-wires: every elite / boss fight's entry board (sts2-rs state_to_dict)
+
+
+def native_board(sim, st, room):
+    """An sts2-rs run's elite / boss entry board as transplant.py replays it ("state" in place of
+    rsfight's combat wire): the null control for replays of our engine's boards."""
+    if not RS_DUMP_NATIVE or room not in ("Elite", "Boss") or getattr(sim, "rm", None) is None:
+        return None
+    from rsfight import is_last_boss
+    from rssim import sts2_rs
+    ctx = st.get("context") or {}
+    try:
+        state = sts2_rs.state_to_dict(sim.rm.combat_state())
+    except Exception:  # noqa: BLE001
+        return None
+    return {"ctx": {k: ctx.get(k) for k in ("act", "floor", "room_type", "ascension")}, "last_boss": is_last_boss(ctx),
+            "state": state}
+
+
 def rs_fidelity(planner):
     """--rs-fight's per-fight fidelity counts (rsfight.RsFighter.fight / .diffs) for the fight log."""
     f = getattr(planner, "rs_fighter", None)
@@ -226,6 +245,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
             names = [e.get("name") for e in st.get("enemies") or []]
             enemy_max = sum((e.get("max_hp") or 0) for e in st.get("enemies") or [])
             floor0 = (st.get("context") or {}).get("floor")
+            native0 = native_board(sim, st, room)
             last_enemies = {}
             def watch(s):  # remember the last enemy HP we saw (for deaths)
                 if s.get("enemies") is not None:
@@ -262,7 +282,8 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                            "won": st.get("decision") != "game_over" or bool(st.get("victory")),
                            "enemy_hp_left": last_enemies.get("hp"), "rounds": last_enemies.get("round"),
                            "potions_before": pots0, "potions_left": last_enemies.get("potions"),
-                           **({"deck": deck_stats} if deck_stats else {}), **rs_fidelity(planner)})
+                           **({"deck": deck_stats} if deck_stats else {}), **rs_fidelity(planner),
+                           **({"wire0": native0} if native0 else {})})
             if st.get("decision") == "combat_play":
                 stuck = True   # play_combat hit its action cap: give up on the run
                 break
@@ -450,6 +471,8 @@ def main():
     if args.rs:
         import engine
         engine.RS = args.rs
+        global RS_DUMP_NATIVE
+        RS_DUMP_NATIVE = args.rs_dump_wires
     if args.engine_config:
         import engine
         engine.ENGINE_CONFIG = args.engine_config
