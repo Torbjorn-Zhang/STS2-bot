@@ -412,6 +412,9 @@ def main():
                          "(rsfight._view; sts2-rs's live get_state misses them, so such a host was always rebuilt)")
     ap.add_argument("--rs-dump-wires", action="store_true",
                     help="with --rs-fight: each elite / boss fight's first combat_wire in its fight-log entry (transplant.py)")
+    ap.add_argument("--rs-carry", action="store_true",
+                    help="with --rs-fight: a host rebuilt from the wire takes the hidden state the wire lacks (enemy move "
+                         "machines, relic latches, turn tallies) from the last host (CombatState.transplant_hidden)")
     ap.add_argument("--rs-boss1-pow", type=float, default=None,
                     help="with --rs-fight: A10's first act-3 boss values a win at 0.5 + kept HP-and-belt share ^ K")
     ap.add_argument("--teacher", default=None,
@@ -468,7 +471,7 @@ def main():
         RS_FIGHT = tuple(int(x) for x in args.rs_fight.split(","))
         RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse, "keep_host": args.rs_keep_host,
                             "boss1_pow": args.rs_boss1_pow, "true_view": args.rs_true_view,
-                            "dump_wires": args.rs_dump_wires})
+                            "dump_wires": args.rs_dump_wires, "carry": args.rs_carry})
     if args.rs:
         import engine
         engine.RS = args.rs

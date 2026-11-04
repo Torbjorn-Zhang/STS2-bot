@@ -158,7 +158,7 @@ def same_board(a, b, view=False):
 
 class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
-                 keep_host=False, boss1_pow=None, true_view=False, dump_wires=False):
+                 keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -174,6 +174,12 @@ class RsFighter:
         # dump_wires: each elite / boss fight's first combat_wire (and its context) in self.wire0, for
         # the fight log (transplant.py replays the fight from it inside sts2-rs)
         self.dump_wires, self.wire0 = dump_wires, None
+        # carry: a host rebuilt from the wire takes what the wire cannot say from the last host that
+        # searched (CombatState.transplant_hidden, as sts2-rs's own CombatMirror): each enemy's move
+        # machine (state log, counter, first-move flags), undisclosed relic latches, the turn's hidden
+        # tallies, the draw pins. Without it every rebuild (after nearly every enemy turn) restarts the
+        # bosses' move machines blank. The RNG cursors stay the world's (the wire carries them)
+        self.carry, self.prev = carry, None
         if reuse:
             want_override("tree_reuse=1")
         # boss1_pow k: the first boss of A10's double boss values a win at 0.5 + (the share of a full
@@ -218,13 +224,39 @@ class RsFighter:
             self.stats["retained_visits"] += int(rec["retained_visits"])
         return rec
 
-    def _host(self, st, wire):
+    def _carry(self, cs, carried, imported):
+        """transplant_hidden from the carried host's board onto the fresh import cs. Enemies are
+        matched by kind in order (a corpse one side keeps and the other reaps shifts the slots);
+        relic counters carry for the relics the wire left at None."""
+        try:
+            new = sts2_rs.state_to_dict(cs).get("encounter") or []
+            old = sts2_rs.state_to_dict(carried).get("encounter") or []
+            used, slots = set(), []
+            for e in new:
+                cand = [j for j, o in enumerate(old) if j not in used and o.get("kind") == e.get("kind")]
+                j = next((j for j in cand if bool(old[j].get("is_dead")) == bool(e.get("is_dead"))), cand[0] if cand else None)
+                if j is not None:
+                    used.add(j)
+                slots.append(j)
+            hidden = [r.get("id") for r in (imported.get("player") or {}).get("relics") or [] if r.get("counter") is None]
+            cs.transplant_hidden(carried, enemy_slots=slots, carry_rng=False, carry_relic_counters=hidden)
+            self.stats["carried"] += 1
+        except Exception as e:  # noqa: BLE001  (the fresh import still stands)
+            self.stats["carry_fail"] += 1
+            self.stats["carry_fail:" + type(e).__name__] += 1
+            if self.stats["carry_fail"] <= 3:
+                self._fail("carry", f"{type(e).__name__}: {str(e)[:200]}")
+
+    def _host(self, st, wire, carried=None):
         ctx = st.get("context") or {}
         asc = int(ctx.get("ascension") or 0)
         wire = {**wire, "game_version": GAME_VERSION}
         # character: the adapter otherwise infers the class from card ids, which fails for a
         # deck with no Ironclad-prefixed card left
-        cs = sts2_rs.state_from_dict(adapter.translate(wire, character="Ironclad", ascension=asc))
+        imported = adapter.translate(wire, character="Ironclad", ascension=asc)
+        cs = sts2_rs.state_from_dict(imported)
+        if carried is not None:
+            self._carry(cs, carried, imported)
         rm = sts2_rs.RunManager(seed=0, character="Ironclad", ascension_level=asc, game_version=GAME_VERSION)
         if is_last_boss(ctx):
             # the run's last fight: stand the host on its last boss node, so the agent searches
@@ -249,8 +281,9 @@ class RsFighter:
                 self.wire0 = {"ctx": {k: ctx.get(k) for k in ("act", "floor", "room_type", "ascension")},
                               "last_boss": is_last_boss(ctx), "wire": wire}
             cont, self.cont = self.cont, None
+            src = cont if cont is not None else self.prev
             try:
-                rm = self._host(st, wire)
+                rm = self._host(st, wire, src.combat_state() if self.carry and src is not None else None)
             except (UnsupportedStateError, ValueError, KeyError, TypeError, IndexError) as e:
                 self.stats["import_fail"] += 1
                 self.stats["import_fail:" + type(e).__name__] += 1
@@ -291,7 +324,7 @@ class RsFighter:
             act = self._ours(st, rec["action"])
             if act is not None:
                 self.stats["searched"] += 1
-                self.host = rm   # took the same action on the true board: it answers the next prompt
+                self.host = self.prev = rm   # took the same action on the true board: it answers the next prompt
                 if self.keep:
                     self.cont = rm
                     hand = st.get("hand") or []
@@ -392,7 +425,7 @@ class RsFighter:
         """Play until the combat ends (TurnPlanner.play_combat's contract); decisions the agent
         cannot take go to fallback.plan(state)'s first action (or end_turn / skip)."""
         n = 0
-        self.agent = self.cont = None   # a fight's own agent and host (reuse)
+        self.agent = self.cont = self.prev = None   # a fight's own agent and host (reuse, carry)
         self.fight, self.diffs, self.cont_move, self.wire0, self.tdiffs = Counter(), [], None, None, []
         if on_state:
             on_state(state)
@@ -424,5 +457,5 @@ class RsFighter:
             for k, v in self.agent.tree_reuse_stats().items():
                 if isinstance(v, int) and k not in ("reused", "retained_visits"):
                     self.stats["tr_" + k] += v
-        self.agent = self.cont = None
+        self.agent = self.cont = self.prev = None
         return state
