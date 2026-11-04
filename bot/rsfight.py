@@ -158,7 +158,7 @@ def same_board(a, b, view=False):
 
 class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
-                 keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False):
+                 keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False, carry_rooms=None):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -180,6 +180,8 @@ class RsFighter:
         # tallies, the draw pins. Without it every rebuild (after nearly every enemy turn) restarts the
         # bosses' move machines blank. The RNG cursors stay the world's (the wire carries them)
         self.carry, self.prev = carry, None
+        # carry_rooms: carry only in these room types (e.g. {"Boss"}); None: every fight
+        self.carry_rooms = set(carry_rooms) if carry_rooms else None
         if reuse:
             want_override("tree_reuse=1")
         # boss1_pow k: the first boss of A10's double boss values a win at 0.5 + (the share of a full
@@ -290,7 +292,8 @@ class RsFighter:
             cont, self.cont = self.cont, None
             src = cont if cont is not None else self.prev
             try:
-                rm = self._host(st, wire, src.combat_state() if self.carry and src is not None else None)
+                carry = self.carry and src is not None and (self.carry_rooms is None or ctx.get("room_type") in self.carry_rooms)
+                rm = self._host(st, wire, src.combat_state() if carry else None)
             except (UnsupportedStateError, ValueError, KeyError, TypeError, IndexError) as e:
                 self.stats["import_fail"] += 1
                 self.stats["import_fail:" + type(e).__name__] += 1

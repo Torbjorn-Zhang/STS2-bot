@@ -415,6 +415,7 @@ def main():
     ap.add_argument("--rs-carry", action="store_true",
                     help="with --rs-fight: a host rebuilt from the wire takes the hidden state the wire lacks (enemy move "
                          "machines, relic latches, turn tallies) from the last host (CombatState.transplant_hidden)")
+    ap.add_argument("--rs-carry-rooms", default=None, help="with --rs-carry: only in these room types, e.g. Boss or Boss,Elite")
     ap.add_argument("--rs-boss1-pow", type=float, default=None,
                     help="with --rs-fight: A10's first act-3 boss values a win at 0.5 + kept HP-and-belt share ^ K")
     ap.add_argument("--teacher", default=None,
@@ -471,7 +472,8 @@ def main():
         RS_FIGHT = tuple(int(x) for x in args.rs_fight.split(","))
         RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse, "keep_host": args.rs_keep_host,
                             "boss1_pow": args.rs_boss1_pow, "true_view": args.rs_true_view,
-                            "dump_wires": args.rs_dump_wires, "carry": args.rs_carry})
+                            "dump_wires": args.rs_dump_wires, "carry": args.rs_carry,
+                            "carry_rooms": args.rs_carry_rooms.split(",") if args.rs_carry_rooms else None})
     if args.rs:
         import engine
         engine.RS = args.rs
