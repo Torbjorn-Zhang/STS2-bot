@@ -225,16 +225,23 @@ class RsFighter:
         return rec
 
     def _carry(self, cs, carried, imported):
-        """transplant_hidden from the carried host's board onto the fresh import cs. Enemies are
-        matched by kind in order (a corpse one side keeps and the other reaps shifts the slots);
-        relic counters carry for the relics the wire left at None."""
+        """transplant_hidden from the carried host's board onto the fresh import cs. Each enemy takes
+        the closest unused carried enemy of its kind (dead or alive, HP, powers): a corpse one side
+        keeps and the other reaps shifts the slots, and same-kind enemies change places (a
+        reattached Decimillipede segment comes back elsewhere in the host than in the game, so
+        matching in order swapped their move machines). Relic counters carry for the relics the
+        wire left at None."""
+        def far(o, e):
+            pw = lambda x: sorted((p.get("name"), p.get("amount")) for p in x.get("powers") or [])
+            return (1000 * (bool(o.get("is_dead")) != bool(e.get("is_dead"))) + abs((o.get("hp") or 0) - (e.get("hp") or 0))
+                    + 10 * (pw(o) != pw(e)))
         try:
             new = sts2_rs.state_to_dict(cs).get("encounter") or []
             old = sts2_rs.state_to_dict(carried).get("encounter") or []
             used, slots = set(), []
             for e in new:
                 cand = [j for j, o in enumerate(old) if j not in used and o.get("kind") == e.get("kind")]
-                j = next((j for j in cand if bool(old[j].get("is_dead")) == bool(e.get("is_dead"))), cand[0] if cand else None)
+                j = min(cand, key=lambda j: (far(old[j], e), j)) if cand else None
                 if j is not None:
                     used.add(j)
                 slots.append(j)
