@@ -64,6 +64,56 @@ def _piles(rm):
     return {k: sorted((c.get("id"), c.get("upgraded")) for c in v) for k, v in d.items() if isinstance(v, list)}
 
 
+def _piles_any(rm):
+    """_piles that also keeps the deck's non-card lists (_piles raises on them, so same_board says
+    "differs" there; left as it is, the diagnostic must not)."""
+    d = sts2_rs.state_to_dict(rm.combat_state()).get("deck") or {}
+    return {k: sorted((c.get("id"), c.get("upgraded")) for c in v) if all(isinstance(c, dict) for c in v) else v
+            for k, v in d.items() if isinstance(v, list)}
+
+
+def _diff(a, b, path="", out=None, limit=6):
+    """Paths (with both values, short) where two nested dicts/lists differ, at most `limit`."""
+    out = [] if out is None else out
+    if len(out) >= limit:
+        return out
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b), key=str):
+            _diff(a.get(k), b.get(k), f"{path}.{k}", out, limit)
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for i, (x, y) in enumerate(zip(a, b)):
+            _diff(x, y, f"{path}[{i}]", out, limit)
+    elif a != b:
+        out.append(f"{path}: {str(a)[:40]} | {str(b)[:40]}")
+    return out
+
+
+def _norm(x, key=None):
+    """A board without the differences that are only representation: power lists in another order,
+    dead enemies the host still lists (our engine drops them)."""
+    if isinstance(x, dict):
+        return {k: _norm(v, k) for k, v in x.items()}
+    if isinstance(x, list):
+        xs = [_norm(v) for v in x]
+        if key == "enemies":
+            xs = [e for e in xs if not (isinstance(e, dict) and (e.get("hp") or 0) <= 0)]
+        if xs and all(isinstance(v, dict) and "id" in v for v in xs) and key != "enemies":
+            xs = sorted(xs, key=lambda v: (str(v.get("id")), str(v.get("amount"))))
+        return xs
+    return x
+
+
+def board_diff(host, real):
+    """Where the host that took a move shows another board than the true one after the same move
+    (same_board's fields): host value | true value per path."""
+    try:
+        ga, gb = _norm(host.combat_state().get_state()), _norm(real.combat_state().get_state())
+        return (_diff(ga, gb, "board") + _diff(_piles_any(host), _piles_any(real), "piles")
+                + _diff(host.potions(), real.potions(), "potions") + _diff(host.relic_counters(), real.relic_counters(), "relics"))[:6]
+    except Exception as e:  # noqa: BLE001  (a diagnostic only)
+        return [f"diff failed: {type(e).__name__}: {str(e)[:120]}"]
+
+
 def same_board(a, b):
     """Two hosts show the same board: the visible state, potions, relic counters and the cards
     of every pile (the draw order is not compared: the search never reads it)."""
@@ -98,6 +148,10 @@ class RsFighter:
         self.fails = []       # the first failures of the run (kind, detail), for the run record
         self.k = 0            # decisions searched (the agent seed mixes it in)
         self.host = None      # host RunManager after the last searched play (answers its prompt)
+        # fidelity diagnostic, per fight (play_combat resets it): after a move that is not end_turn
+        # (no enemy turn in between), does the host that made it show the true board? A port or
+        # import mismatch shows as "mid_diff" on enemy fields; a draw the host guessed, on the piles
+        self.fight, self.diffs, self.cont_move = Counter(), [], None
 
     # ── one decision ────────────────────────────────────────────────────────
     def _agent(self, st):
@@ -163,10 +217,21 @@ class RsFighter:
                 # the host that made the last move carries what the wire lacks (cards played, HP
                 # lost, hits this turn...), which tree reuse's node match reads: go on with it
                 # while it shows the board we have (a chance edge, e.g. the enemy turn, mostly differs)
+                mid = self.cont_move is not None and self.cont_move[0] != "end_turn"
                 if same_board(cont, rm):
+                    if mid:
+                        self.fight["mid_same"] += 1
                     rm = cont
                     self.stats["host_kept"] += 1
                 else:
+                    if mid:
+                        diff = board_diff(cont, rm)
+                        if not diff:
+                            self.fight["mid_repr"] += 1   # only power order / dead enemies listed
+                        else:
+                            self.fight["mid_diff"] += 1
+                            if len(self.diffs) < 3:
+                                self.diffs.append({"move": list(self.cont_move), "diff": diff})
                     self.stats["host_rebuilt"] += 1
             rec = self._step(st, rm)
             if rec is None or not rec.get("is_combat"):
@@ -178,6 +243,10 @@ class RsFighter:
                 self.host = rm   # took the same action on the true board: it answers the next prompt
                 if self.keep:
                     self.cont = rm
+                    hand = st.get("hand") or []
+                    i = rec["action"].get("hand_idx")
+                    self.cont_move = (rec["action"].get("action"),
+                                      hand[i].get("id") if i is not None and 0 <= i < len(hand) else None)
             return act
         if d == "card_select":
             return self._answer_prompt(st)
@@ -273,6 +342,7 @@ class RsFighter:
         cannot take go to fallback.plan(state)'s first action (or end_turn / skip)."""
         n = 0
         self.agent = self.cont = None   # a fight's own agent and host (reuse)
+        self.fight, self.diffs, self.cont_move = Counter(), [], None
         if on_state:
             on_state(state)
         while state.get("decision") in ("combat_play", "card_select") and n < max_actions:

@@ -176,6 +176,14 @@ def boss_mc(sim, st, planner, seed, enemy_max):
     return shares
 
 
+def rs_fidelity(planner):
+    """--rs-fight's per-fight fidelity counts (rsfight.RsFighter.fight / .diffs) for the fight log."""
+    f = getattr(planner, "rs_fighter", None)
+    if f is None or not getattr(f, "fight", None):
+        return {}
+    return {"rs_mid": dict(f.fight), **({"rs_diffs": f.diffs} if f.diffs else {})}
+
+
 def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0, rollouts=None,
              rec=None, explore=0.0, decknets=None, combat_records=True):
     """rec: optional record.GameRecorder (self-play data for the policy and value nets).
@@ -253,7 +261,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                            "won": st.get("decision") != "game_over" or bool(st.get("victory")),
                            "enemy_hp_left": last_enemies.get("hp"), "rounds": last_enemies.get("round"),
                            "potions_before": pots0, "potions_left": last_enemies.get("potions"),
-                           **({"deck": deck_stats} if deck_stats else {})})
+                           **({"deck": deck_stats} if deck_stats else {}), **rs_fidelity(planner)})
             if st.get("decision") == "combat_play":
                 stuck = True   # play_combat hit its action cap: give up on the run
                 break
