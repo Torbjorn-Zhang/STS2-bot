@@ -181,7 +181,8 @@ def rs_fidelity(planner):
     f = getattr(planner, "rs_fighter", None)
     if f is None or not getattr(f, "fight", None):
         return {}
-    return {"rs_mid": dict(f.fight), **({"rs_diffs": f.diffs} if f.diffs else {})}
+    return {"rs_mid": dict(f.fight), **({"rs_diffs": f.diffs} if f.diffs else {}),
+            **({"wire0": f.wire0} if getattr(f, "wire0", None) else {})}
 
 
 def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0, rollouts=None,
@@ -379,6 +380,11 @@ def main():
     ap.add_argument("--rs-reuse", action="store_true", help="with --rs-fight: one agent per fight under sts2-rs's tree reuse")
     ap.add_argument("--rs-keep-host", action="store_true",
                     help="with --rs-fight: search on sts2-rs's own host while it matches our board, without tree reuse")
+    ap.add_argument("--rs-true-view", action="store_true",
+                    help="with --rs-keep-host / --rs-reuse: match the kept host with the powers it gained in the fight "
+                         "(rsfight._view; sts2-rs's live get_state misses them, so such a host was always rebuilt)")
+    ap.add_argument("--rs-dump-wires", action="store_true",
+                    help="with --rs-fight: each elite / boss fight's first combat_wire in its fight-log entry (transplant.py)")
     ap.add_argument("--rs-boss1-pow", type=float, default=None,
                     help="with --rs-fight: A10's first act-3 boss values a win at 0.5 + kept HP-and-belt share ^ K")
     ap.add_argument("--teacher", default=None,
@@ -434,7 +440,8 @@ def main():
         global RS_FIGHT
         RS_FIGHT = tuple(int(x) for x in args.rs_fight.split(","))
         RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse, "keep_host": args.rs_keep_host,
-                            "boss1_pow": args.rs_boss1_pow})
+                            "boss1_pow": args.rs_boss1_pow, "true_view": args.rs_true_view,
+                            "dump_wires": args.rs_dump_wires})
     if args.rs:
         import engine
         engine.RS = args.rs

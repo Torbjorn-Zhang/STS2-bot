@@ -103,22 +103,37 @@ def _norm(x, key=None):
     return x
 
 
+def _view(rm):
+    """rm's visible state as a copy rebuilt from its state_to_dict shows it. sts2-rs's live
+    get_state() keeps listing the powers the fight was imported with and none gained since
+    (Inflame's STRENGTH, Battle Trance's NO_DRAW, a potion's...), though the fight itself has them
+    (state_to_dict does, and so does the copy's get_state)."""
+    cs = rm.combat_state()
+    try:
+        return sts2_rs.state_from_dict(sts2_rs.state_to_dict(cs)).get_state()
+    except Exception:  # noqa: BLE001  (a board state_from_dict refuses, e.g. a cost that expires on play)
+        return cs.get_state()
+
+
 def board_diff(host, real):
     """Where the host that took a move shows another board than the true one after the same move
-    (same_board's fields): host value | true value per path."""
+    (same_board's fields, the visible state as _view shows it): host value | true value per path."""
     try:
-        ga, gb = _norm(host.combat_state().get_state()), _norm(real.combat_state().get_state())
+        ga, gb = _norm(_view(host)), _norm(_view(real))
         return (_diff(ga, gb, "board") + _diff(_piles_any(host), _piles_any(real), "piles")
                 + _diff(host.potions(), real.potions(), "potions") + _diff(host.relic_counters(), real.relic_counters(), "relics"))[:6]
     except Exception as e:  # noqa: BLE001  (a diagnostic only)
         return [f"diff failed: {type(e).__name__}: {str(e)[:120]}"]
 
 
-def same_board(a, b):
+def same_board(a, b, view=False):
     """Two hosts show the same board: the visible state, potions, relic counters and the cards
-    of every pile (the draw order is not compared: the search never reads it)."""
+    of every pile (the draw order is not compared: the search never reads it). view: the visible
+    state as _view shows it (with the powers gained in the fight; the live one misses them, so a
+    host that gained one never matched)."""
     try:
-        return (a.combat_state().get_state() == b.combat_state().get_state() and a.potions() == b.potions()
+        state = _view if view else (lambda rm: rm.combat_state().get_state())
+        return (state(a) == state(b) and a.potions() == b.potions()
                 and a.relic_counters() == b.relic_counters() and _piles(a) == _piles(b))
     except Exception:
         return False
@@ -126,7 +141,7 @@ def same_board(a, b):
 
 class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
-                 keep_host=False, boss1_pow=None):
+                 keep_host=False, boss1_pow=None, true_view=False, dump_wires=False):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -138,6 +153,10 @@ class RsFighter:
         # board, so sts2-rs's own per-turn counters stay exact (combat_wire does not carry them)
         self.keep = reuse or keep_host
         self.cont = None      # keep: the host after the agent's last move, kept while it matches our board
+        self.true_view = true_view   # keep: match the host's board with the powers it gained (_view)
+        # dump_wires: each elite / boss fight's first combat_wire (and its context) in self.wire0, for
+        # the fight log (transplant.py replays the fight from it inside sts2-rs)
+        self.dump_wires, self.wire0 = dump_wires, None
         if reuse:
             want_override("tree_reuse=1")
         # boss1_pow k: the first boss of A10's double boss values a win at 0.5 + (the share of a full
@@ -205,6 +224,10 @@ class RsFighter:
             if wire.get("type") != "combat_wire":
                 self.stats["wire_error"] += 1
                 return None
+            ctx = st.get("context") or {}
+            if self.dump_wires and self.wire0 is None and ctx.get("room_type") in ("Elite", "Boss"):
+                self.wire0 = {"ctx": {k: ctx.get(k) for k in ("act", "floor", "room_type", "ascension")},
+                              "last_boss": is_last_boss(ctx), "wire": wire}
             cont, self.cont = self.cont, None
             try:
                 rm = self._host(st, wire)
@@ -218,7 +241,7 @@ class RsFighter:
                 # lost, hits this turn...), which tree reuse's node match reads: go on with it
                 # while it shows the board we have (a chance edge, e.g. the enemy turn, mostly differs)
                 mid = self.cont_move is not None and self.cont_move[0] != "end_turn"
-                if same_board(cont, rm):
+                if same_board(cont, rm, self.true_view):
                     if mid:
                         self.fight["mid_same"] += 1
                     rm = cont
@@ -342,7 +365,7 @@ class RsFighter:
         cannot take go to fallback.plan(state)'s first action (or end_turn / skip)."""
         n = 0
         self.agent = self.cont = None   # a fight's own agent and host (reuse)
-        self.fight, self.diffs, self.cont_move = Counter(), [], None
+        self.fight, self.diffs, self.cont_move, self.wire0 = Counter(), [], None, None
         if on_state:
             on_state(state)
         while state.get("decision") in ("combat_play", "card_select") and n < max_actions:

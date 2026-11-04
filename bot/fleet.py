@@ -820,7 +820,9 @@ class XDeckRL:
         for k, s0 in enumerate(range(0, sp["eval_runs"], sp["eval_chunk"])):
             out = f"runs/{self.name}_ev{it}_c{k}.jsonl"
             rec = f"fleetdata/{self.name}_ev{it}_c{k}_rec.jsonl"   # greedy-play records (value-network data)
-            argv = self.run_args(min(sp["eval_runs"], s0 + sp["eval_chunk"]), s0, "full", cfg, f"{self.name}_ev{it}_c{k}",
+            # eval_prefix: the benchmark's seeds (default full_*; val_* are seeds no model was picked on)
+            argv = self.run_args(min(sp["eval_runs"], s0 + sp["eval_chunk"]), s0, sp.get("eval_prefix", "full"), cfg,
+                                 f"{self.name}_ev{it}_c{k}",
                                  ["--record", rec, "--no-combat-records"])
             jobs.append(fl.add_job(self.name, f"{self.name}{it}_ev{k}", "xeval", sp.get("eval_prio", 0.95), argv,
                                    self.inputs(models, cfg), [out, rec]))
