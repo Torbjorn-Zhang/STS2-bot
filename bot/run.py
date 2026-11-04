@@ -201,6 +201,7 @@ def rs_fidelity(planner):
     if f is None or not getattr(f, "fight", None):
         return {}
     return {"rs_mid": dict(f.fight), **({"rs_diffs": f.diffs} if f.diffs else {}),
+            **({"rs_tdiffs": f.tdiffs} if getattr(f, "tdiffs", None) else {}),
             **({"wire0": f.wire0} if getattr(f, "wire0", None) else {})}
 
 

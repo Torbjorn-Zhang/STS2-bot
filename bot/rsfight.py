@@ -126,6 +126,23 @@ def board_diff(host, real):
         return [f"diff failed: {type(e).__name__}: {str(e)[:120]}"]
 
 
+def turn_diff(host, real):
+    """After end_turn: where the host's own enemy turn (and the next turn's start) left another board
+    than the true one, on the fields no draw decides: each enemy's hp / block / intent / powers, the
+    player's hp / block / energy / powers. [(path, host value, true value)]"""
+    try:
+        ga, gb = _norm(_view(host)), _norm(_view(real))
+    except Exception as e:  # noqa: BLE001  (a diagnostic only)
+        return [("failed", type(e).__name__, str(e)[:60])]
+    ea, eb = ga.get("enemies") or [], gb.get("enemies") or []
+    if [e.get("id") for e in ea] != [e.get("id") for e in eb]:
+        return [("enemies", [e.get("id") for e in ea], [e.get("id") for e in eb])]
+    out = [(f"{x.get('id')}.{k}", x.get(k), y.get(k)) for x, y in zip(ea, eb)
+           for k in ("hp", "block", "intent", "intent_damage", "intent_hits", "powers") if x.get(k) != y.get(k)]
+    pa, pb = ga.get("player") or {}, gb.get("player") or {}
+    return out + [(f"player.{k}", pa.get(k), pb.get(k)) for k in ("hp", "block", "energy", "powers") if pa.get(k) != pb.get(k)]
+
+
 def same_board(a, b, view=False):
     """Two hosts show the same board: the visible state, potions, relic counters and the cards
     of every pile (the draw order is not compared: the search never reads it). view: the visible
@@ -171,6 +188,9 @@ class RsFighter:
         # (no enemy turn in between), does the host that made it show the true board? A port or
         # import mismatch shows as "mid_diff" on enemy fields; a draw the host guessed, on the piles
         self.fight, self.diffs, self.cont_move = Counter(), [], None
+        # and after end_turn: did the host's own enemy turn leave the true board (turn_diff)? The
+        # search plays every later turn on sts2-rs's enemies, so a boss it models wrong shows here
+        self.tdiffs = []
 
     # ── one decision ────────────────────────────────────────────────────────
     def _agent(self, st):
@@ -241,6 +261,14 @@ class RsFighter:
                 # lost, hits this turn...), which tree reuse's node match reads: go on with it
                 # while it shows the board we have (a chance edge, e.g. the enemy turn, mostly differs)
                 mid = self.cont_move is not None and self.cont_move[0] != "end_turn"
+                if self.cont_move is not None and not mid:
+                    td = turn_diff(cont, rm)
+                    self.fight["turn_diff" if td else "turn_same"] += 1
+                    for p, _, _ in td:
+                        self.fight["td:" + p] += 1
+                    if td and len(self.tdiffs) < 8:
+                        self.tdiffs.append({"round": st.get("round"),
+                                            "diff": [[p, str(a)[:60], str(b)[:60]] for p, a, b in td[:6]]})
                 if same_board(cont, rm, self.true_view):
                     if mid:
                         self.fight["mid_same"] += 1
@@ -365,7 +393,7 @@ class RsFighter:
         cannot take go to fallback.plan(state)'s first action (or end_turn / skip)."""
         n = 0
         self.agent = self.cont = None   # a fight's own agent and host (reuse)
-        self.fight, self.diffs, self.cont_move, self.wire0 = Counter(), [], None, None
+        self.fight, self.diffs, self.cont_move, self.wire0, self.tdiffs = Counter(), [], None, None, []
         if on_state:
             on_state(state)
         while state.get("decision") in ("combat_play", "card_select") and n < max_actions:
