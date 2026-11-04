@@ -132,7 +132,7 @@ def decision_return(o, act):
     plays did not make them."""
     if RETURN in ("smc", "smcb") and (act or 1) >= ((o.get("mc") or {}).get("act") or 3):
         prog = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
-        return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * bool(o.get("victory"))) + \
+        return 100.0 * (FLOOR_W * prog / (3 * FLOORS_PER_ACT + 2) + (1 - FLOOR_W) * bool(o.get("victory"))) + \
             (BOSS3_BONUS * boss3_real(o) if RETURN == "smcb" else 0.0)
     return final_progress(o)
 

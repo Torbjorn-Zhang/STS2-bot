@@ -942,6 +942,9 @@ def ancient_pick(opts, net_choice):
     return None
 
 
+ANCIENT_AVOID = set()   # run.py --ancient-avoid: relic titles the event net may not take while another option is open
+
+
 FORCE_NEOW = None   # Neow lab (run.py --force-neow K): take option K of the opening choice
 
 
@@ -970,6 +973,10 @@ def choose_event(st, sim=None):
         eo, _, z, _ = EVENT_NET.scores(sim, st)
         if z is not None:
             best = eo[int(np.argmax(z))]
+            if ANCIENT_AVOID and best.get("title") in ANCIENT_AVOID:
+                ok = [i for i, o in enumerate(eo) if o.get("title") not in ANCIENT_AVOID]
+                if ok:
+                    best = eo[max(ok, key=lambda i: z[i])]
             if ANCIENT_RULE:
                 best = ancient_pick(opts, best) or best
             _remember_event(best)
