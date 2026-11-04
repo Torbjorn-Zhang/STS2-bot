@@ -196,7 +196,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
     policy.ASCENSION = ascension
     planner = new_planner(sim, seed, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
     st = sim.send({"cmd": "start_run", "character": character, "seed": seed, "ascension": ascension})
-    t0, steps, fights, hp_log = time.perf_counter(), 0, 0, []
+    t0, steps, fights, hp_log, ev_log = time.perf_counter(), 0, 0, [], []
     dead_ends, loops, memo, stuck = {}, 0, {}, False
     boss_dmg = 0.0   # sum over boss fights of the share of boss HP removed (a win = 1), as selfplay.py
     mc_boss = []     # per boss fight: the MC_BOSS replay shares
@@ -280,6 +280,11 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
             extra = {**(extra or {}), "explore": True}
         if rec:
             rec.decision(st, legal_actions(st), a, extra)
+        if d == "event_choice" and a[0] == "choose_option":   # which events each engine shows, and what we take
+            ctx0 = st.get("context") or {}
+            ev_log.append({"act": act, "floor": ctx0.get("floor"), "event": st.get("event_name"),
+                           "options": [o.get("title") for o in st.get("options") or []],
+                           "pick": a[1].get("option_index"), "hp": (st.get("player") or {}).get("hp")})
         nxt = sim.act(a[0], **a[1])
         steps += 1
         if nxt.get("type") != "error" and _key(nxt) == _key(st):
@@ -306,7 +311,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         "act_states": act_states, **({"mc_save": mc_save} if mc_save else {}),
         "planner": dict(planner.stats), **({"rs_fight": dict(planner.rs_fighter.stats), "rs_fight_fails": planner.rs_fighter.fails}
            if getattr(planner, "rs_fighter", None) else {}),
-        "dead_end_actions": loops, "fight_log": hp_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
+        "dead_end_actions": loops, "fight_log": hp_log, "event_log": ev_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
     }
     if rec and not (MC_K and mc_save):   # with act-start rollouts pending, the worker finishes the record
         rec.finish(res)
