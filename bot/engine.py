@@ -2,6 +2,8 @@
 
 import os
 import sys
+import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "harness"))
 
@@ -21,12 +23,45 @@ ENGINE_CONFIG = os.environ.get("STS2_ENGINE_CONFIG", "Release")
 RS = os.environ.get("STS2_RS")
 
 
+# run.py --run-timeout: a wall-clock deadline for the run each worker thread is playing. Every
+# engine call checks it, so a run that never ends (11-04: seed up83_2400 kept a chunk busy ~13 h,
+# both processes busy, no output) raises RunTimeout and the worker records it and moves on.
+_DEADLINE = threading.local()
+
+
+class RunTimeout(Exception):
+    pass
+
+
+def set_deadline(seconds):
+    """This thread's engine calls raise RunTimeout once `seconds` from now have passed (None or 0: never)."""
+    _DEADLINE.t = time.time() + seconds if seconds else None
+
+
+class _Guarded:
+    def send(self, cmd):
+        t = getattr(_DEADLINE, "t", None)
+        if t is not None and time.time() > t:
+            raise RunTimeout("run wall-clock limit reached")
+        return super().send(cmd)
+
+
+class GuardedSim(_Guarded, Sim):
+    pass
+
+
+_RS_SIM = None
+
+
 def fresh_sim():
+    global _RS_SIM
     if RS:
-        from rssim import RsSim
+        if _RS_SIM is None:
+            from rssim import RsSim
+            _RS_SIM = type("GuardedRsSim", (_Guarded, RsSim), {})
         sims, boss = (int(x) for x in str(RS).split(","))
-        return RsSim(sims=sims, boss_sims=boss)
-    return Sim(ENGINE_CONFIG, timeout=60)
+        return _RS_SIM(sims=sims, boss_sims=boss)
+    return GuardedSim(ENGINE_CONFIG, timeout=60)
 
 
 def maybe_recycle(sim):

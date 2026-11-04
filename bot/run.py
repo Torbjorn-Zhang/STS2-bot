@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import policy
 from combat import TurnPlanner, potion_actions
-from engine import fresh_sim, legal_actions, maybe_recycle
+from engine import RunTimeout, fresh_sim, legal_actions, maybe_recycle, set_deadline
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -321,6 +321,8 @@ def main():
     ap.add_argument("--model", default=None, help="value model (models/value.pkl); default: hand-written evaluation")
     ap.add_argument("--rollouts", default=None, help='JSON rollout config, e.g. {"k":4,"m":3,"turns":2}')
     ap.add_argument("--no-deck-test", action="store_true", help="pick card rewards by the tier list only")
+    ap.add_argument("--run-timeout", type=float, default=float(os.environ.get("STS2_RUN_TIMEOUT", "1800")),
+                    help="give up a run (and its --mc-k plays) after this many seconds, error RunTimeout (0: never)")
     ap.add_argument("--record", default=None, help="append self-play records to this .jsonl (record.py)")
     ap.add_argument("--no-combat-records", action="store_true", help="--record without combat steps (deck RL)")
     ap.add_argument("--weights", default=None, help="JSON overrides for combat.W (e.g. graded rollout deaths)")
@@ -602,6 +604,7 @@ def main():
             for s in chunk:
                 sim = maybe_recycle(sim)
                 for attempt in range(2):   # an engine that dies mid-run (a few per 240 runs) gets one more go
+                    set_deadline(args.run_timeout)
                     try:
                         dn = None
                         if args.deck_sample is not None:
@@ -636,6 +639,7 @@ def main():
                             r["retried"] = attempt
                         break
                     except Exception as e:  # engine hang/crash: record it, restart the engine, go on
+                        set_deadline(None)
                         r = {"seed": s, "character": args.character, "ascension": args.ascension, "cleared_acts": 0,
                              "victory": False, "died": False, "act": None, "floor": None, "room": None, "hp": None,
                              "max_hp": None, "deck_size": None, "fights": 0, "seconds": 0, "planner": {},
@@ -645,6 +649,10 @@ def main():
                         except Exception:
                             pass
                         sim = fresh_sim()
+                        if isinstance(e, RunTimeout):   # a run that loops forever does so again: no second go
+                            r["error"] = f"RunTimeout: over {args.run_timeout:g} s"
+                            break
+                set_deadline(None)
                 with lock:
                     with open(out_path, "a") as f:
                         f.write(json.dumps(r) + "\n")
