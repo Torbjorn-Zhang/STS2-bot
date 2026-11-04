@@ -1416,7 +1416,11 @@ class Fleet:
                                  capture_output=True, text=True, timeout=60, errors="replace")
             out = (res.stdout + res.stderr).replace("\r", "")
             m = re.search(r"^Phase:\s+(\S+)", out, re.M)
-            if m and m.group(1) != "Failed":
+            # a keeper that exited at 160 h can come back as a 2nd pod of the same workload ("Running
+            # Pods: 1/2", apollo 11-03, apollo2 11-04): the phase stays Running, but runai exec without
+            # --pod reaches the first, terminated one, so the host never answers. Same cure as Failed
+            second = re.search(r"Running Pods:\s+\d+/([2-9])", out)
+            if m and m.group(1) != "Failed" and not second:
                 return
             if not m and "not found" not in out.lower():
                 log(f"{h['name']}: runai describe: {out.strip()[:120]}")   # e.g. the login expired
