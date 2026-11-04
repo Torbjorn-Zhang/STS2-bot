@@ -73,6 +73,8 @@ RETURN = os.environ.get("STS2_RETURN", "progress")   # "win": 100 x the run's wi
 # 0..2 at Ascension 10's double boss): at A10 almost no run wins, so smc is nearly floors only and
 # says nothing about how close the deck came in act 3, where runs end
 BOSS3_BONUS = float(os.environ.get("STS2_BOSS3_BONUS", "10"))
+# STS2_FLOOR_W: smc/smcb's weight on the floor share (the rest goes to the win estimate)
+FLOOR_W = float(os.environ.get("STS2_FLOOR_W", "0.5"))
 
 
 def boss3_real(o):
@@ -147,7 +149,7 @@ def final_progress(o):
         return dv_return(o)
     if RETURN in ("smc", "smcb"):   # sm with the win share from the act-3-start plays (run.py --mc-k): same mean, far less noise
         prog = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
-        return 100.0 * (0.5 * prog / (3 * FLOORS_PER_ACT + 2) + 0.5 * win_estimate(o)) + \
+        return 100.0 * (FLOOR_W * prog / (3 * FLOORS_PER_ACT + 2) + (1 - FLOOR_W) * win_estimate(o)) + \
             (BOSS3_BONUS * boss3_estimate(o) if RETURN == "smcb" else 0.0)
     if RETURN == "sm":   # spire-mentor's return: 0.5 x share of the run's floors + 0.5 x won (scaled x100)
         prog = 3 * FLOORS_PER_ACT + 2 if o.get("victory") else progress(o.get("act"), o.get("floor"))
