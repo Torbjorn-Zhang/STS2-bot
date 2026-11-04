@@ -1031,6 +1031,10 @@ def select_purpose(st):
             return "add"
         if re.search(r"upgrade|duplicate|copy|clone|enchant", t):
             return "upgrade"
+    # sts2-rs's Neow options carry no description text: rssim names its own prompt's kind instead
+    p = st.get("purpose")
+    if p in ("remove", "transform", "upgrade", "add", "enchant"):
+        return "upgrade" if p == "enchant" else p
     return "other"
 
 

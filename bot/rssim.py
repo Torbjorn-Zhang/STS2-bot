@@ -346,7 +346,7 @@ class RsSim:
             # Neow / event "choose a card" screens: our engine shows a (skippable) card_select
             skip = bool(self._g("card_offer_can_skip"))
             return self._base("card_select", cards=[card_entry(c, u, i) for i, (c, u) in enumerate(zip(ids, ups))],
-                              min_select=0 if skip else 1, max_select=1)
+                              min_select=0 if skip else 1, max_select=1, purpose="add")
         if not ids:
             if acts:
                 self.rm.take_action(acts[0])
