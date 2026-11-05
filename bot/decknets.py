@@ -102,6 +102,10 @@ class DeckNets:
             opts, descs, z, route = self.event.scores(sim, st)
             if z is not None and self.unified is not None and len(descs) >= 2:
                 z = self.unified.score("event_choice", st, [("event", x) for x in descs], route)
+            bad = [k for k, o in enumerate(opts) if o.get("title") in policy.ANCIENT_AVOID]
+            if z is not None and bad and len(bad) < len(opts):   # run.py --ancient-avoid, as in policy.choose_event
+                z = np.asarray(z, dtype=np.float64).copy()
+                z[bad] = -1e9
             if z is not None:
                 i, lp, tx = self._pick(sim, z, [("choose_option", {"option_index": o["index"]}) for o in opts])
                 policy._remember_event(opts[i])
