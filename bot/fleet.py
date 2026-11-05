@@ -1455,7 +1455,8 @@ class Fleet:
     def start_agent(self, h):
         rl, root = h["relay"], h["root"].rstrip("/")
         try:
-            out = lx(h, f"cp {root}/bot/podrelay.py /tmp/podrelay.py && cd /tmp && setsid nohup python3 /tmp/podrelay.py agent "
+            # the relay's copy (relay_setup writes it at each coordinator start): the pod's synced code may lag
+            out = lx(h, f"{relay_rsync(h, '@podrelay.py', '/tmp/podrelay.py')} && cd /tmp && setsid nohup python3 /tmp/podrelay.py agent "
                         f"{h['name']} {rl['target']} {rl['port']} {rl['key']} {rl['known_hosts']} {rl['rel']} "
                         f">> /tmp/podrelay_agent.log 2>&1 < /dev/null & echo started", timeout=120)
             log(f"{h['name']}: relay agent {out.strip()[-40:]}")

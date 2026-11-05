@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 
-ALIVE_MAX = 45      # s: an agent heard from within this is up (it pushes every 2-6 s)
+ALIVE_MAX = 45      # s: an agent heard from within this is up (a heartbeat every 15 s)
 OUT_MAX = 4 << 20   # bytes of stdout kept (the fleet's polls print a few kB)
 
 
@@ -134,7 +134,7 @@ def agent(pod, target, port, key, kh, rel):
          f"-o ConnectTimeout=20")
     remote = f"{target}:{rel}/q/{pod}/" if target != "-" else f"{rel}/q/{pod}/"   # "-": a local directory (tests)
     ssh = ["-e", e] if target != "-" else []
-    last, fails = 0.0, 0
+    last, fails, pushed = 0.0, 0, 0.0
     log = lambda s: print(time.strftime("%m-%d %H:%M:%S"), s, flush=True)
     log(f"agent for {pod} up ({remote})")
     while True:
@@ -169,13 +169,17 @@ def agent(pod, target, port, key, kh, rel):
             fails += 1
             if fails in (1, 10) or fails % 100 == 0:
                 log(f"pull failed ({fails}): {r.stderr.decode(errors='replace').strip()[-200:]}")
+        ready = [f for f in os.listdir(out) if f.endswith(".json")]
+        if not ready and time.time() - pushed < 15:   # a push per result, else a heartbeat every 15 s
+            time.sleep(max(0.2, (1.5 if time.time() - last < 120 else 5.0) - (time.time() - t0)))
+            continue
         with open(os.path.join(out, "alive.tmp"), "w") as fh:
             fh.write(f"{time.time():.3f}")
         os.rename(os.path.join(out, "alive.tmp"), os.path.join(out, "alive"))
-        ready = [f for f in os.listdir(out) if f.endswith(".json")]
         r = subprocess.run(["rsync", "-a", "--exclude=*.tmp", "--exclude=*.o", "--exclude=*.e"] + ssh + [out + "/",
                             remote + "done/"], stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
         if r.returncode == 0:
+            pushed = time.time()
             for f in ready:
                 os.remove(os.path.join(out, f))
         elif fails == 0:
