@@ -62,6 +62,10 @@ TRAIN_SLOTS = 6
 # an update on a GPU host: the card does the work, so it takes 2 slots (4 threads for data loading)
 # instead of waiting for 6 to free on a busy lab0 (6-17 min waits for a 3-4 min update, 11-06)
 GPU_TRAIN_SLOTS = 2
+# an update still queued this long while its GPU host is full stops that host's lowest-priority,
+# newest jobs to free the slots: lab0 filled with fresh 40-min chunks just before up913_train was
+# queued, so it fell back to 1 slot on lab3's CPU and took 66 min instead of 3.5 (11-06)
+TRAIN_PREEMPT_AFTER = 120
 FETCH_TRIES = 3    # a failed result fetch is retried on the next polls before the jobs are rerun
 TRAIN_WAIT = 900   # a queued train job holds its host this long for TRAIN_SLOTS free slots (pipelined self-play keeps every slot busy)
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10"]
@@ -1736,6 +1740,22 @@ class Fleet:
         for j in sorted([j for j in self.jobs.values() if j["state"] == "queued"], key=lambda j: (j["prio"], j["seq"])):
             j.setdefault("queued_since", time.time())
             h, gpu = self.pick(j, [x for x in hosts if x["name"] not in held])
+            if j["kind"] == "train" and j.get("gpu") and time.time() - j["queued_since"] >= TRAIN_PREEMPT_AFTER:
+                gpus = sorted([x for x in hosts if x.get("gpu") and x.get("gpu_idle", 1) > 0 and x["name"] not in held],
+                              key=lambda x: x.get("gpu_order", x.get("order", 9)))
+                g = gpus[0] if gpus else None
+                if g is not None and not any(x.get("gpu_now") for x in self.running_on(g)):
+                    n = min(GPU_TRAIN_SLOTS, self.cap(g)) - self.free_slots(g)
+                    vic = sorted([x for x in self.running_on(g) if x["kind"] != "train" and not x.get("only") and x.get("w", 1) == 1],
+                                 key=lambda x: (-x["prio"], -x.get("t_start", 0)))[:max(0, n)]
+                    for v in vic:
+                        self.kill_job(g["name"], v["id"])
+                        if not self.drop_copy(v, g["name"]):
+                            v["state"], v["host"] = "queued", None
+                    if vic:
+                        log(f"{g['name']}: stopped {', '.join(v['id'] for v in vic)} for {j['id']} "
+                            f"(queued {round(time.time() - j['queued_since'])} s)")
+                        h, gpu = self.pick(j, [x for x in hosts if x["name"] not in held])
             if j["kind"] == "train" and time.time() - j["queued_since"] < TRAIN_WAIT:
                 # with the next self-play already queued, a slot freed here would go to it at once:
                 # hold the update's host (its GPU machine while that is busy) until it has the slots
