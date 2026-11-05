@@ -121,6 +121,14 @@ class DeckNets:
             if len(opts) >= 2:
                 i, lp, tx = self._pick(sim, z, [a for _, a in opts])
                 a = opts[i][1]
+                if a[0] == "leave_room" and policy.SHOP_POTIONS:
+                    # run.py --shop-potions, as in policy.decide: the net is done, its leftover gold
+                    # fills free potion slots (shopnet's options never offered potions: the state
+                    # lists filled slots only). No sopts: the RL trainers skip this record
+                    pa = policy.shop_potion(st)
+                    if pa is not None:
+                        visit["bought"] += 1
+                        return pa, {"shop_potion": 1}
                 if a[0] == "remove_card":
                     visit["removed"] = True
                 elif a[0].startswith("buy_"):
