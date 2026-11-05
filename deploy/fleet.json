@@ -169,6 +169,7 @@
   },
   "apollo3": {
    "ssh": "apollo",
+   "pod_agent": true,
    "os": "linux",
    "root": "/scratch/xkzhang/slzhang_cvpr27/pod3/sts2",
    "slots": 28,

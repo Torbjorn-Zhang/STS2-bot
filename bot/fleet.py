@@ -52,6 +52,10 @@ DOWN_GRACE = 1200
 # 504s, ~24 min twice on 11-06) while the pods compute on, so their jobs wait longer before moving;
 # a pod that really failed is resubmitted by runai_revive, which moves its jobs at once
 RUNAI_DOWN_GRACE = 3600
+# pods with "pod_agent" (deploy/fleet.json) run podrelay.py's agent: when runai exec fails and the
+# agent is heard from, the fleet talks to the pod through the relay; runai exec is tried again
+# every RELAY_PROBE s (Apollo's control plane was down 41 % of 11-05/06 while the pods computed on)
+RELAY_PROBE = 600
 GPU_BUSY = 40        # % GPU utilisation by other programs that makes a yield_gpu host yield
 YIELD_QUIET = 600    # seconds of a quiet GPU before such a host gets work again
 MAX_TRIES = 4
@@ -106,6 +110,10 @@ def remote_argv(host, cmd):
     """ssh argv running `cmd` on the host. Hosts with "via" (lab2/lab3: this Mac's key is not
     authorised there) are reached by running ssh on the jump host with its own key. "runai"
     hosts (a CPU pod on Apollo) take no stdin: their files go through the relay (below)."""
+    if host.get("runai") and host.get("relay_mode"):   # the control plane is down: podrelay.py's agent
+        rl = host["relay"]
+        b64 = base64.b64encode((POD_PRE + cmd).encode()).decode()
+        return SSH + [rl["host"], f"python3 {rl['dir']}/podrelay.py call {host['name']} {rl['dir']} {b64} 1200"]
     if host.get("runai"):
         r = host["runai"]
         return [RUNAI, "training", "exec", r["workload"], "-p", r["project"], "--", "bash", "-c", POD_PRE + cmd]
@@ -381,6 +389,7 @@ per_cpu = max(1, (b[0] - a[0]) / ncpu)
 busy = ((b[0] - a[0]) - (b[1] - a[1])) / per_cpu
 mine = max(0, b[2] - a[2]) / per_cpu
 print(json.dumps({"pause": os.path.exists(root + "/PAUSE"), "jobs": jobs, "gpu": None, "gpus": gpus, "ours": len(alive),
+                  "agent": any("podrelay.py agent" in c for c in cmd.values()),
                   "load": float(open("/proc/loadavg").read().split()[0]), "ncpu": ncpu,
                   "others_now": round(max(0.0, busy - mine), 2), "ours_cpu": round(mine, 2)}))
 """
@@ -1411,7 +1420,49 @@ class Fleet:
             log(f"{h['name']}: back in the fleet ({why}){'' if ok else ' (code sync failed: ' + msg + ')'}")
             h["drain"] = None
 
+    def agent_alive(self, h):
+        rl = h["relay"]
+        try:
+            return subprocess.run(SSH + [rl["host"], f"python3 {rl['dir']}/podrelay.py alive {h['name']} {rl['dir']}"],
+                                  capture_output=True, timeout=30).returncode == 0
+        except Exception:
+            return False
+
     def poll(self, h):
+        if h.get("runai") and h.get("pod_agent") and os.path.exists(os.path.join(FLEET, "relay", h["name"])):
+            # runs/fleet/relay/<host>: the relay only (a canary, or runai exec misbehaving)
+            if not h.get("relay_mode"):
+                log(f"{h['name']}: relay forced ({FLEET}/relay/{h['name']})")
+            h["relay_mode"], h["relay_t"] = True, time.time()
+            return self.poll1(h)
+        r = self.poll1(h)
+        if not (h.get("runai") and h.get("pod_agent")):
+            return r
+        if "error" in r and not h.get("relay_mode") and self.agent_alive(h):
+            h["relay_mode"], h["relay_t"] = True, time.time()
+            log(f"{h['name']}: runai exec failing ({r['error'][:80]}); talking through the relay agent")
+            r = self.poll1(h)
+        elif h.get("relay_mode") and time.time() - h.get("relay_t", 0) > RELAY_PROBE:
+            h["relay_t"], h["relay_mode"] = time.time(), False
+            r2 = self.poll1(h)
+            if "error" in r2:
+                h["relay_mode"] = True
+            else:
+                log(f"{h['name']}: runai exec back; leaving the relay agent")
+                r = r2
+        return r
+
+    def start_agent(self, h):
+        rl, root = h["relay"], h["root"].rstrip("/")
+        try:
+            out = lx(h, f"cp {root}/bot/podrelay.py /tmp/podrelay.py && cd /tmp && setsid nohup python3 /tmp/podrelay.py agent "
+                        f"{h['name']} {rl['target']} {rl['port']} {rl['key']} {rl['known_hosts']} {rl['rel']} "
+                        f">> /tmp/podrelay_agent.log 2>&1 < /dev/null & echo started", timeout=120)
+            log(f"{h['name']}: relay agent {out.strip()[-40:]}")
+        except Exception as e:
+            log(f"{h['name']}: relay agent start failed: {str(e)[:150]}")
+
+    def poll1(self, h):
         ids = [j["id"] for j in self.running_on(h)]
         if h["state"] == "down":
             ids += [i for i in h.get("moved_ids", []) if i not in ids]
@@ -1510,6 +1561,9 @@ class Fleet:
                 self.runai_revive(h)
             return
         h["fails"] = 0
+        if h.get("pod_agent") and h["state"] == "up" and not r.get("agent") and time.time() - h.get("agent_t", 0) > 300:
+            h["agent_t"] = time.time()
+            self.start_agent(h)
         if h["state"] != "up":
             log(f"{h['name']}: up")
             if h["state"] == "down" and h.get("moved", True):
@@ -1937,8 +1991,25 @@ class Fleet:
                 log(f"pipeline {spec['spec']['tag']} ({spec['type']}) submitted")
             os.remove(p)
 
+    def relay_setup(self):
+        """podrelay.py and the pods' queue directories on the relay (lab0), for pods with pod_agent."""
+        src = open(os.path.join(HERE, "podrelay.py"), "rb").read()
+        for h in self.hosts.values():
+            if h.get("runai") and h.get("pod_agent"):
+                rl = h["relay"]
+                q = shlex.quote(rl["dir"] + "/q")
+                try:
+                    res = subprocess.run(SSH + [rl["host"], f"mkdir -p {q}/{h['name']}/done && chmod 700 {q} && "
+                                                            f"cat > {shlex.quote(rl['dir'] + '/podrelay.py')}"],
+                                         input=src, capture_output=True, timeout=60)
+                    if res.returncode != 0:
+                        log(f"{h['name']}: relay setup rc {res.returncode}: {res.stderr.decode(errors='replace')[-150:]}")
+                except Exception as e:
+                    log(f"{h['name']}: relay setup failed: {e}")
+
     def loop(self):
         log("coordinator started: " + ", ".join(self.hosts))
+        self.relay_setup()
         self.compact()
         last_compact = time.time()
         import signal
