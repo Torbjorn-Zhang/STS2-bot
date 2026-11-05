@@ -48,6 +48,10 @@ DOWN_AFTER = 3       # failed polls before a host counts as gone
 # a host that stops answering usually comes back within minutes (this Mac's Wi-Fi, ssh hiccups)
 # with our jobs still running: they move to other hosts only after DOWN_GRACE seconds away
 DOWN_GRACE = 1200
+# Apollo's pods: runai exec fails whenever the cluster's control plane does (cluster-api/status
+# 504s, ~24 min twice on 11-06) while the pods compute on, so their jobs wait longer before moving;
+# a pod that really failed is resubmitted by runai_revive, which moves its jobs at once
+RUNAI_DOWN_GRACE = 3600
 GPU_BUSY = 40        # % GPU utilisation by other programs that makes a yield_gpu host yield
 YIELD_QUIET = 600    # seconds of a quiet GPU before such a host gets work again
 MAX_TRIES = 4
@@ -1234,9 +1238,9 @@ class Fleet:
                 j["tries"] += 1
             log(f"  requeued {j['id']} ({why})")
 
-    def kill_job(self, host, jid):
+    def kill_job(self, host, jid, force=False):
         h = self.hosts.get(host)
-        if h and h["state"] == "up":
+        if h and (h["state"] == "up" or force):
             try:
                 if linux(h):   # the job runs in its own session (setsid): stop the whole process group
                     pat = lx_pat(h["root"].rstrip("/") + "/bot/fleet/jobs/" + jid + ".sh")
@@ -1396,6 +1400,8 @@ class Fleet:
 
     def poll(self, h):
         ids = [j["id"] for j in self.running_on(h)]
+        if h["state"] == "down":
+            ids += [i for i in h.get("moved_ids", []) if i not in ids]
         try:
             if linux(h):
                 out = lx(h, LX_POLL.replace("%ROOT%", json.dumps(h["root"].rstrip("/"))).replace("%IDS%", json.dumps(ids)),
@@ -1433,6 +1439,10 @@ class Fleet:
             if not m and "not found" not in out.lower():
                 log(f"{h['name']}: runai describe: {out.strip()[:120]}")   # e.g. the login expired
                 return
+            if not h.get("moved", True):   # its jobs die with the pod: no waiting out RUNAI_DOWN_GRACE
+                self.requeue(h, f"{h['name']} workload {'failed' if m else 'gone'}")
+                h["moved"] = True
+            h["moved_ids"] = []
             if m:
                 subprocess.run([RUNAI, "training", "delete", r["workload"], "-p", r["project"]],
                                capture_output=True, timeout=120)
@@ -1445,13 +1455,42 @@ class Fleet:
         except Exception as e:
             log(f"{h['name']}: revive failed: {str(e)[:120]}")
 
+    def take_back(self, h, r):
+        """A host back after DOWN_GRACE moved its jobs (Apollo's pods compute on through runai outages):
+        a moved job still queued whose process went on there, or finished there, is its job again; one
+        started elsewhere since keeps this copy as its backup (the first to finish wins); the others
+        are stopped. -> how many it kept (0: nothing to keep, kill everything as before)."""
+        ids, h["moved_ids"] = h.get("moved_ids", []), []
+        if not ids:
+            return 0
+        jobs, back, backup, stop = r.get("jobs") or {}, [], [], []
+        for jid in ids:
+            j, jr = self.jobs.get(jid), jobs.get(jid) or {}
+            went_on = jr.get("state") == "running" or (jr.get("state") == "done" and str(jr.get("rc")) == "0")
+            if j and went_on and j["state"] == "queued":
+                j["state"], j["host"] = "running", h["name"]
+                back.append(jid)
+            elif j and jr.get("state") == "running" and j["state"] == "running" and j["host"] != h["name"] \
+                    and not j.get("backup") and j.get("w", 1) == 1:
+                j["backup"] = h["name"]
+                backup.append(jid)
+            elif jr.get("state") == "running":
+                stop.append(jid)
+        for jid in stop:
+            self.kill_job(h["name"], jid, force=True)
+        log(f"{h['name']}: back; took back {len(back)} moved jobs that went on there, kept {len(backup)} "
+            f"as backups of their restarted copies, stopped {len(stop)}")
+        return len(back) + len(backup)
+
     def handle_poll(self, h, r):
         if "error" in r:
             h["fails"] += 1
             if h["state"] != "down" and h["fails"] >= DOWN_AFTER:
                 log(f"{h['name']}: not answering ({r['error'][:80]}); marked down")
                 h["state"], h["down_since"], h["moved"] = "down", time.time(), False
-            if h["state"] == "down" and not h.get("moved", True) and time.time() - h.get("down_since", 0) >= DOWN_GRACE:
+            grace = RUNAI_DOWN_GRACE if h.get("runai") else DOWN_GRACE
+            if h["state"] == "down" and not h.get("moved", True) and time.time() - h.get("down_since", 0) >= grace:
+                h["moved_ids"] = [j["id"] for j in self.running_on(h)]
                 self.requeue(h, f"{h['name']} down")
                 h["moved"] = True
             if h.get("runai") and h["state"] == "down" and not h["drain"]:
@@ -1461,8 +1500,10 @@ class Fleet:
         if h["state"] != "up":
             log(f"{h['name']}: up")
             if h["state"] == "down" and h.get("moved", True):
-                self.kill(h)          # leftovers of jobs that were moved elsewhere
-                self.requeue(h, "rejoin")
+                if not self.take_back(h, r):
+                    self.kill(h)          # leftovers of jobs that were moved elsewhere
+                    self.requeue(h, "rejoin")
+                h["moved"] = False
             elif h["state"] == "down":
                 log(f"{h['name']}: back after {time.time() - h.get('down_since', time.time()):.0f} s; its jobs went on")
             if os.path.exists(os.path.join(FLEET, "drain", h["name"])):
@@ -1691,6 +1732,7 @@ class Fleet:
             if want:   # the slots it may use (fewer when it lands on a busy host)
                 j["w"] = max(1, min(want, self.free_slots(h)))
             j["state"], j["host"], j["gpu_now"] = "running", h["name"], gpu
+            j.pop("queued_since", None)   # a requeue waits afresh (up97_train started at w=1 on lab2, 11-06)
             plan.setdefault(h["name"], []).append(j)
         for name, js in plan.items():
             self.launch(self.hosts[name], js)
