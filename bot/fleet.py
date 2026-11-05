@@ -66,7 +66,12 @@ GPU_TRAIN_SLOTS = 2
 # newest jobs to free the slots: lab0 filled with fresh 40-min chunks just before up913_train was
 # queued, so it fell back to 1 slot on lab3's CPU and took 66 min instead of 3.5 (11-06)
 TRAIN_PREEMPT_AFTER = 120
-FETCH_TRIES = 3    # a failed result fetch is retried on the next polls before the jobs are rerun
+FETCH_TRIES = 3
+# idle-class jobs (prio above IDLE_PRIO, the pipelines' self-play prio) only fill gaps: RL or eval
+# work queued IDLE_PREEMPT_AFTER with nowhere to go stops the newest of them, one per waiting job
+# (a prio-1.1 hold eval took 110 slots in a 3-min RL gap and stalled up9 for ~1.5 h, 11-06)
+IDLE_PRIO = 1.0
+IDLE_PREEMPT_AFTER = 300    # a failed result fetch is retried on the next polls before the jobs are rerun
 TRAIN_WAIT = 900   # a queued train job holds its host this long for TRAIN_SLOTS free slots (pipelined self-play keeps every slot busy)
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10"]
 
@@ -1775,6 +1780,7 @@ class Fleet:
             plan.setdefault(h["name"], []).append(j)
         for name, js in plan.items():
             self.launch(self.hosts[name], js)
+        self.preempt_idle(hosts)
         # backups: with nothing left in the queue, an idle slot runs a copy of the oldest
         # job still running elsewhere (stragglers on the slower machine end an iteration late)
         if any(j["state"] == "queued" for j in self.jobs.values()):
@@ -1799,6 +1805,25 @@ class Fleet:
                 for j in cand:
                     j["backup"] = h["name"]
                 self.launch(h, cand, backup=True)
+
+    def preempt_idle(self, hosts):
+        now = time.time()
+        up = {h["name"] for h in hosts}
+        # single-slot work only (a multi-slot task waits for a whole free host; one stop would not place it)
+        waiting = [j for j in self.jobs.values() if j["state"] == "queued" and j["prio"] <= IDLE_PRIO and j["kind"] != "train"
+                   and not j.get("only") and not j.get("slots") and now - j.get("queued_since", now) >= IDLE_PREEMPT_AFTER]
+        if not waiting:
+            return
+        fits = lambda h: any(all(h.get(c) for c in w.get("needs", [])) for w in waiting)
+        idle = sorted([j for j in self.jobs.values() if j["state"] == "running" and j["prio"] > IDLE_PRIO
+                       and j["host"] in up and fits(self.hosts[j["host"]])], key=lambda j: -j.get("t_start", 0))[:len(waiting)]
+        for v in idle:
+            for hn in {v["host"], v.get("backup")} - {None}:
+                self.kill_job(hn, v["id"])
+            v["state"], v["host"], v["backup"] = "queued", None, None
+        if idle:
+            log(f"stopped {len(idle)} idle-class jobs ({', '.join(v['id'] for v in idle[:6])}{' ...' if len(idle) > 6 else ''}) "
+                f"for {len(waiting)} waiting")
 
     def launch(self, h, js, backup=False):
         lines, made = [], set()
