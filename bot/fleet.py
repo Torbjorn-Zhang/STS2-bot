@@ -1798,6 +1798,16 @@ class Fleet:
                 log(f"pipeline {tag} cancelled ({n} queued jobs dropped, {k} running ones stopped)")
                 os.remove(p)
                 continue
+            if spec["type"] == "prio":   # re-rank a pipeline's queued jobs (set/sp_prio only reach jobs queued later)
+                tag, to, kind = spec["spec"]["tag"], spec["spec"]["prio"], spec["spec"].get("kind")
+                n = 0
+                for j in self.jobs.values():
+                    if j["pipe"] == tag and j["state"] == "queued" and kind in (None, j["kind"]):
+                        j["prio"] = to
+                        n += 1
+                log(f"pipeline {tag}: {n} queued jobs{f' ({kind})' if kind else ''} now prio {to}")
+                os.remove(p)
+                continue
             if spec["type"] == "set":   # change a live pipeline's spec (e.g. xdeckrl lr_scale from its next update)
                 tag, kv = spec["spec"]["tag"], spec["spec"]["set"]
                 for x in self.pipes:
@@ -1900,7 +1910,8 @@ def main():
     os.makedirs(os.path.join(HERE, "fleetdata"), exist_ok=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["run", "status", "drain", "undrain", "stop", "deckrl", "xdeckrl", "expert", "bench",
-                                    "cancel", "task", "set"])
+                                    "cancel", "task", "set", "prio"])
+    ap.add_argument("--kind", help="prio: only queued jobs of this kind (e.g. xselfplay)")
     ap.add_argument("host", nargs="?")
     ap.add_argument("--until-done", action="store_true", help="run: exit once every pipeline has finished")
     ap.add_argument("--tag")
@@ -2010,6 +2021,8 @@ def main():
                         "prio": 0.5 if args.prio is None else args.prio, **({"slots": args.slots} if args.slots else {})})
     elif args.cmd == "cancel":
         submit("cancel", {"tag": args.tag})
+    elif args.cmd == "prio":
+        submit("prio", {"tag": args.tag, "prio": args.prio, "kind": args.kind})
     elif args.cmd == "set":
         submit("set", {"tag": args.tag, "set": json.loads(args.set)})
     elif args.cmd == "bench":
