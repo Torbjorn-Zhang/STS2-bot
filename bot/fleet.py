@@ -440,11 +440,19 @@ def code_sig():
     return hs.hexdigest()
 
 
+def job_argv(host, job):
+    """job["argv"] with "%W%" -> one slot's workers and "%WT%" -> all the job's slots' workers (host
+    workers x the slots it got, w): a multi-slot task sizes its process pool with %WT%, so a task that
+    lands on fewer free slots than it asked for runs fewer processes (lab share)."""
+    w = str(host["workers"] * job.get("w", 1))
+    return [str(host["workers"]) if a == "%W%" else w if a == "%WT%" else str(a) for a in job["argv"]]
+
+
 def job_sh(host, job):
     """Linux job script: env on the data disk (HOME too), below-normal CPU and idle IO come from the launcher."""
     R = host["root"].rstrip("/")
     jid = job["id"]
-    argv = [str(host["workers"]) if a == "%W%" else str(a) for a in job["argv"]]
+    argv = job_argv(host, job)
     env = {"HOME": f"{R}/home", "DOTNET": f"{R}/dotnet/dotnet", "DOTNET_ROOT": f"{R}/dotnet", "DOTNET_CLI_HOME": f"{R}/cache/dotnethome",
            "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "OMP_NUM_THREADS": "1", "XDG_CACHE_HOME": f"{R}/cache", "NETS_DEVICE": "cpu",
            "PYTHONUNBUFFERED": "1", "NETS_THREADS": str(host["workers"] * job.get("w", 1))}
@@ -474,7 +482,7 @@ def job_cmd(host, job):
            "OMP_NUM_THREADS": "1", "NETS_DEVICE": "cuda" if job.get("gpu_now") else "cpu", "PYTHONUNBUFFERED": "1",
            "NETS_THREADS": str(host["workers"] * job.get("w", 1))}
     jid = job["id"]
-    argv = [str(host["workers"]) if a == "%W%" else str(a) for a in job["argv"]]
+    argv = job_argv(host, job)
     lines = ["@echo off"] + [f"set {k}={v}" for k, v in env.items()] + [f"cd /d {root}\\bot"] + [
         f'if exist "{o.replace("/", chr(92))}" del /q "{o.replace("/", chr(92))}"' for o in job["outputs"]] + [
         f'"{py}" {subprocess.list2cmdline(argv)} > fleet\\jobs\\{jid}.out 2> fleet\\jobs\\{jid}.err',
