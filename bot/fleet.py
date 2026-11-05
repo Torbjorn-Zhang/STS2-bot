@@ -59,6 +59,10 @@ BACKUP_AFTER = 120   # a job running this long while the queue is empty gets a b
 # a CPU training job takes up to this many slots (workers threads each): with 2 torch threads it was
 # a third of each iteration (750 s on lab0); without "overlap" the pipeline's self-play waits for it
 TRAIN_SLOTS = 6
+# an update on a GPU host: the card does the work, so it takes 2 slots (4 threads for data loading)
+# instead of waiting for 6 to free on a busy lab0 (6-17 min waits for a 3-4 min update, 11-06)
+GPU_TRAIN_SLOTS = 2
+FETCH_TRIES = 3    # a failed result fetch is retried on the next polls before the jobs are rerun
 TRAIN_WAIT = 900   # a queued train job holds its host this long for TRAIN_SLOTS free slots (pipelined self-play keeps every slot busy)
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10"]
 
@@ -1647,14 +1651,25 @@ class Fleet:
                 sftp(h, lines)
                 for j in fetch:
                     j["state"] = "done"
+                    j.pop("fetch_tries", None)
                     for o in j["outputs"]:
                         lo = os.path.join(HERE, o)
                         h["files"][o] = [os.path.getsize(lo), int(os.path.getmtime(lo))]
                     log(f"{h['name']}: {j['id']} done in {round(j['t_end'] - j['t_start'])} s")
             except Exception as e:
-                log(f"{h['name']}: fetch failed ({e}); rerunning")
+                # the outputs are still on the host (a relay or runai exec hiccup): the job stays
+                # running there and the next poll fetches it again; only after FETCH_TRIES is it rerun
+                # (one failure used to rerun 47 and 54 finished chunks, 11-06)
+                again = 0
                 for j in fetch:
-                    j["state"], j["host"] = "queued", None
+                    j["fetch_tries"] = j.get("fetch_tries", 0) + 1
+                    if j["fetch_tries"] < FETCH_TRIES:
+                        j["state"] = "running"
+                        again += 1
+                    else:
+                        j["state"], j["host"] = "queued", None
+                        j.pop("fetch_tries", None)
+                log(f"{h['name']}: fetch failed ({e}); {again} to fetch again, {len(fetch) - again} rerunning")
 
     def remote_clean(self, h):
         if linux(h):
@@ -1696,6 +1711,9 @@ class Fleet:
             if any(h.get("gpu") and h.get("gpu_idle", 1) > 0 for h in hosts) and time.time() - job.get("queued_since", time.time()) < 600:
                 return None, False
         cand = [h for h in hosts if self.free_slots(h) > 0]
+        if job["kind"] == "train":
+            # never an Apollo pod: CPU updates there vanished within a minute 8 times (11-05/06)
+            cand = [h for h in cand if not h.get("runai")]
         if job["kind"] == "train" and cand:
             # a CPU update: the host that can give it the most of its TRAIN_SLOTS, then the biggest
             need = lambda h: min(TRAIN_SLOTS, self.cap(h))
@@ -1723,12 +1741,13 @@ class Fleet:
                 # hold the update's host (its GPU machine while that is busy) until it has the slots
                 gpus = sorted([x for x in hosts if x.get("gpu") and x.get("gpu_idle", 1) > 0], key=lambda x: x.get("gpu_order", x.get("order", 9)))
                 tgt = h or (gpus[0] if gpus else None)
-                if tgt is not None and (h is None or self.free_slots(tgt) < min(TRAIN_SLOTS, self.cap(tgt))):
+                need = GPU_TRAIN_SLOTS if (gpu or (h is None and tgt in gpus)) else TRAIN_SLOTS
+                if tgt is not None and (h is None or self.free_slots(tgt) < min(need, self.cap(tgt))):
                     held.add(tgt["name"])
                     continue
             if h is None:
                 continue
-            want = TRAIN_SLOTS if j["kind"] == "train" else j.get("slots")
+            want = (GPU_TRAIN_SLOTS if gpu else TRAIN_SLOTS) if j["kind"] == "train" else j.get("slots")
             if want:   # the slots it may use (fewer when it lands on a busy host)
                 j["w"] = max(1, min(want, self.free_slots(h)))
             j["state"], j["host"], j["gpu_now"] = "running", h["name"], gpu
