@@ -43,7 +43,14 @@ class _Guarded:
         t = getattr(_DEADLINE, "t", None)
         if t is not None and time.time() > t:
             raise RunTimeout("run wall-clock limit reached")
-        return super().send(cmd)
+        r = super().send(cmd)
+        tr = getattr(self, "trace", None)   # run.py --repro: every reply's game-state signature
+        if tr is not None and isinstance(r, dict) and r.get("decision") is not None:
+            p, ctx = r.get("player") or {}, r.get("context") or {}
+            tr.append([cmd.get("action") or cmd.get("cmd"), ctx.get("act"), ctx.get("floor"), r.get("decision"),
+                       p.get("hp"), p.get("gold"), len(p.get("deck") or []), r.get("round"),
+                       sum((e.get("hp") or 0) for e in r.get("enemies") or [])])
+        return r
 
 
 class GuardedSim(_Guarded, Sim):

@@ -55,6 +55,83 @@ MC_BOSS_ACTS = None   # --mc-boss-acts: replay only these acts' bosses (the reco
 # real outcome, and a "future value" label for that deck (cmpwin.py)
 MC_ACT, MC_K, MC_DIR = 0, 0, None
 STOP_AT_ACT = 0   # --stop-at-act A: end the run at act A's first map node (after recording act_states)
+# --repro K (with --stop-at-act A --mc-k 1 --mc-act A): is act A's save a faithful copy of the live run?
+# MC plays from it win less than the real continuation (up9 it27-31: real - MC +1.88 +- 0.34 pp, every
+# act-3 floor a bit deadlier). See repro().
+REPRO = 0
+
+
+def _json_diff(a, b, path="", out=None, cap=40):
+    """Paths where two JSON values differ (at most cap)."""
+    out = [] if out is None else out
+    if len(out) >= cap:
+        return out
+    if isinstance(a, dict) and isinstance(b, dict):
+        for k in sorted(set(a) | set(b), key=str):
+            if k not in a or k not in b:
+                out.append(f"{path}/{k}: {json.dumps(a.get(k))[:100] if k in a else '-'} -> "
+                           f"{json.dumps(b.get(k))[:100] if k in b else '-'}")
+            else:
+                _json_diff(a[k], b[k], f"{path}/{k}", out, cap)
+    elif isinstance(a, list) and isinstance(b, list) and len(a) == len(b):
+        for i, (x, y) in enumerate(zip(a, b)):
+            _json_diff(x, y, f"{path}[{i}]", out, cap)
+    elif a != b:
+        out.append(f"{path}: {json.dumps(a)[:100]} -> {json.dumps(b)[:100]}")
+    return out
+
+
+def repro(sim, st, path, seed, acts, max_nodes, model=None, value_weight=None, rollouts=None, decknets=None):
+    """Play the rest of the run from act STOP_AT_ACT's first map node with fresh, identically seeded
+    planners and deck-net rngs: "L" on the live engine (as the real run goes on), "D0".."D{K-1}" each
+    on a fresh engine after load_save of the save written there, no determinize_run. Fix13 and the
+    fighters are seeded, so D0 == D1 says the stack is deterministic and then L == D0 iff the save
+    is a faithful copy; the first differing engine reply locates what the save loses. Also diffs
+    the run checksum dump and the observation right after the load against the live ones."""
+    out = {}
+    live_ck = sim.send({"cmd": "checksum", "dump": True})
+    plays, traces = {}, {}
+    for name in ["L"] + [f"D{i}" for i in range(REPRO)]:
+        s, st0 = sim, st
+        try:
+            if name != "L":
+                s = fresh_sim()
+                st0 = s.send({"cmd": "load_save", "path": path})
+                if name == "D0":
+                    ck = s.send({"cmd": "checksum", "dump": True})
+                    out["ck_equal"] = ck.get("run") == live_ck.get("run")
+                    if not out["ck_equal"] and ck.get("run_dump") and live_ck.get("run_dump"):
+                        out["run_diff"] = _json_diff(json.loads(live_ck["run_dump"]), json.loads(ck["run_dump"]))
+                    out["obs_diff"] = _json_diff(st, st0)
+            planner = new_planner(s, f"{seed}/repro", max_nodes=max_nodes, value=model, value_weight=value_weight,
+                                  rollouts=rollouts)
+            if decknets is not None:
+                decknets.rng, decknets.visits = random.Random(f"{seed}/repro"), {}
+            s.trace = []
+            bd = {}
+            end = continue_run(s, st0, planner, acts, decknets=decknets, boss_dmg=bd, stuck_limit=50)
+            ctx = end.get("context") or {}
+            plays[name] = {"win": int(bool(end.get("victory"))), "act": ctx.get("act"), "floor": ctx.get("floor"),
+                           "hp": (end.get("player") or {}).get("hp"), "bdmg": round(sum(bd.values()), 3)}
+        except Exception as e:
+            plays[name] = {"err": f"{type(e).__name__}: {e}"[:200]}
+        traces[name] = getattr(s, "trace", None) or []
+        s.trace = None
+        plays[name]["n"] = len(traces[name])
+        if s is not sim:
+            s.close()
+
+    def first_div(a, b):
+        for i, (x, y) in enumerate(zip(a, b)):
+            if x != y:
+                return {"i": i, "a": x, "b": y, "before": a[max(0, i - 3):i]}
+        return None if len(a) == len(b) else {"i": min(len(a), len(b)), "len": [len(a), len(b)]}
+    out["plays"] = plays
+    if "D0" in traces:
+        out["div_L_D0"] = first_div(traces["L"], traces["D0"])
+    for i in range(1, REPRO):
+        out[f"div_D0_D{i}"] = first_div(traces["D0"], traces[f"D{i}"])
+    return out
 
 
 def act_state(st):
@@ -352,6 +429,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
         "boss_dmg": round(boss_dmg, 3), "boss_mc": [[round(x, 3) for x in m] for m in mc_boss] if MC_BOSS else None,
         **({"boss_mc_acts": mc_boss_acts} if MC_BOSS_ACTS is not None else {}),
         "act_states": act_states, **({"mc_save": mc_save} if mc_save else {}),
+        **({"stop_state": st} if REPRO and STOP_AT_ACT else {}),   # the worker's repro() pops it
         "planner": dict(planner.stats), **({"rs_fight": dict(planner.rs_fighter.stats), "rs_fight_fails": planner.rs_fighter.fails}
            if getattr(planner, "rs_fighter", None) else {}),
         "dead_end_actions": loops, "fight_log": hp_log, "event_log": ev_log, "stuck": stuck, "error": st.get("message") if st.get("type") == "error" else None,
@@ -460,6 +538,8 @@ def main():
     ap.add_argument("--vine-rollouts", default='{"k":4,"m":4,"turns":2}')
     ap.add_argument("--vine-models", default="models/dz_boss_s0.pt,models/dz_boss_s1.pt,models/dz_boss_s2.pt,models/dz_boss_s3.pt")
     ap.add_argument("--stop-at-act", type=int, default=0, help="end runs at this act's first map node (deck-building benches)")
+    ap.add_argument("--repro", type=int, default=0,
+                    help="with --stop-at-act A --mc-k 1 --mc-act A: replay the rest of the run live and from A's save K times (repro())")
     ap.add_argument("--mc-act", type=int, default=3, help="--mc-k: the act whose first map node the rollouts start from")
     ap.add_argument("--mc-k", type=int, default=0, help="K plays of the rest of the run from act --mc-act's start (cmpwin.py)")
     ap.add_argument("--mc-drop-saves", action="store_true", help="--mc-k: delete each act-start save after its plays (self-play)")
@@ -559,8 +639,8 @@ def main():
         import nets
         nets.SKIP_BIAS = args.skip_bias
         nets.SKIP_BIAS_MIN_ACT = args.skip_bias_from_act
-    global MC_BOSS, MC_BOSS_ACTS, MC_ACT, MC_K, MC_DIR, STOP_AT_ACT, ROOM_PLANNER
-    STOP_AT_ACT = args.stop_at_act
+    global MC_BOSS, MC_BOSS_ACTS, MC_ACT, MC_K, MC_DIR, STOP_AT_ACT, ROOM_PLANNER, REPRO
+    STOP_AT_ACT, REPRO = args.stop_at_act, args.repro
     if args.room_planner:
         ROOM_PLANNER = json.loads(args.room_planner)
     if args.mc_boss:
@@ -697,6 +777,10 @@ def main():
                         r = play_run(sim, s, args.character, args.acts, args.nodes, model, args.value_weight, args.ascension,
                                      json.loads(args.rollouts) if args.rollouts else None, rec=rec,
                                      explore=args.explore, decknets=dn, combat_records=not args.no_combat_records)
+                        stop_state = r.pop("stop_state", None)
+                        if REPRO and stop_state and r.get("mc_save") and not r.get("error"):
+                            r["repro"] = repro(sim, stop_state, r["mc_save"], s, args.acts, args.nodes, model, args.value_weight,
+                                               json.loads(args.rollouts) if args.rollouts else None, decknets=dn)
                         if MC_K and r.get("mc_save") and not r.get("error"):
                             sim, r["mc"] = mc_rollouts(sim, r["mc_save"], s, args.acts, args.nodes, model, args.value_weight,
                                                        json.loads(args.rollouts) if args.rollouts else None, decknets=dn)
