@@ -368,6 +368,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 mc_boss_acts.append(act)
             rp = ROOM_PLANNER.get(room) or {}   # e.g. a deeper search for boss fights only
             planner.max_nodes, planner.rollouts = rp.get("nodes", max_nodes), rp.get("rollouts", rollouts)
+            key0 = _key(st)
             st = fight(sim, st, planner, on_state=watch, on_step=on_step)
             if rec:
                 rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"),
@@ -390,7 +391,11 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
             if st.get("decision") == "combat_play":
                 stuck = True   # play_combat hit its action cap: give up on the run
                 break
-            continue
+            if _key(st) != key0:
+                continue
+            # no progress: the fighter handed back the decision unchanged (a card_select left in the Boss
+            # room after a boss; up932_1046 looped here 4900 times, boss_dmg 4900): the policy below takes
+            # it, as continue_run does
         if d == "card_reward":
             import vine
             if vine.CFG is not None:
