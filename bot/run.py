@@ -317,6 +317,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
     t0, steps, fights, hp_log, ev_log = time.perf_counter(), 0, 0, [], []
     dead_ends, loops, memo, stuck = {}, 0, {}, False
     boss_dmg = 0.0   # sum over boss fights of the share of boss HP removed (a win = 1), as selfplay.py
+    boss_counted = set()   # (act, floor): one share per boss fight, as continue_run
     mc_boss = []     # per boss fight: the MC_BOSS replay shares
     mc_boss_acts = []
     act_states, mc_save = {}, None
@@ -372,7 +373,10 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                 rec.fight_end(st, hp0, st.get("decision") != "game_over", last_enemies.get("round"),
                               last_enemies.get("php"))
             fights += 1
-            if room == "Boss":
+            # a card_select left in the Boss room after a boss comes back through here: count once
+            # (up9 it28-31: 5-8 act-3 boss deaths per iteration had a phantom extra "won" boss)
+            if room == "Boss" and (act, floor0) not in boss_counted:
+                boss_counted.add((act, floor0))
                 won = st.get("decision") != "game_over" or bool(st.get("victory"))
                 left = sum(h or 0 for h in last_enemies.get("hp") or [])
                 boss_dmg += 1.0 if won else max(0.0, 1 - left / max(1, enemy_max))

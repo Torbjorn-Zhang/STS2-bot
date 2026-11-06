@@ -5,8 +5,13 @@ ever winning. Wins are the goal but are rare (~1.5% at A10), so one outcome per 
 noisy. Runs made with run.py --mc-k K carry K extra plays of the rest of the run from act
 --mc-act's first map node, each with a fresh hidden future. Per seed
     W = 1{reached that act} * (real win + MC wins) / (1 + K)
-is an unbiased estimate of the seed's win chance with far less variance. The table shows W
-(in %), raw wins, and paired differences with standard errors."""
+estimates the seed's win chance with far less variance, but NOT unbiased: MC plays from the
+act-3 save win less than the real continuation from the same state (up9 it27-31 A10: real - MC
++1.88 +- 0.34 pp; evals ev6..ev30 -2.7..+4.7, heterogeneous; cause under study, run.py --repro).
+So each arm also prints `gap` = mean over runs with MC of (real win - mean MC win), and every
+pair prints the difference of the arms' gaps. Pre-registered (11-07): when |gap diff| > 2 SE the
+W comparison is not trusted; decide by raw and enlarge the sample (e.g. 1920 seeds). The table
+shows W (in %), raw wins, and paired differences with standard errors."""
 import json
 import statistics as S
 import sys
@@ -28,6 +33,11 @@ def se(x):
     return S.stdev(x) / len(x) ** 0.5 if len(x) > 1 else 0.0
 
 
+def gap(rows):
+    """Per run with MC plays: real win - mean MC win (0 in expectation if MC plays were exchangeable)."""
+    return [float(r["victory"]) - S.mean(r["mc"]["win"]) for r in rows if (r.get("mc") or {}).get("win")]
+
+
 tags = sys.argv[1:]
 D = {t: load(t) for t in tags}
 base = D[tags[0]]
@@ -41,11 +51,18 @@ for t in tags:
     line = (f"{t:22s} n {len(rows):4d} reach3 {reach / len(rows):5.1%} wins {int(sum(raw)):3d} ({S.mean(raw):.2%}) | "
             f"W {100 * S.mean(est):.2f}%±{100 * se(est):.2f} (mc runs {len(mcs)}, k {k:.1f}, "
             f"err {sum(m.get('err', 0) for m in mcs)})")
+    gaps = gap(rows)
+    if gaps:
+        line += f" | gap {100 * S.mean(gaps):+.2f}±{100 * se(gaps):.2f}"
     if t != tags[0]:
         s = [x for x in base if x in D[t]]
         dw = [w_est(D[t][x])[0] - w_est(base[x])[0] for x in s]
         dr = [float(D[t][x]["victory"]) - float(base[x]["victory"]) for x in s]
         line += f" | paired n {len(s)} dW {100 * S.mean(dw):+.2f}±{100 * se(dw):.2f} raw {100 * S.mean(dr):+.2f}±{100 * se(dr):.2f}"
+        g0, g1 = gap([base[x] for x in s]), gap([D[t][x] for x in s])
+        if len(g0) > 1 and len(g1) > 1:
+            gd, gs = S.mean(g1) - S.mean(g0), (se(g0) ** 2 + se(g1) ** 2) ** 0.5
+            line += f" | gap diff {100 * gd:+.2f}±{100 * gs:.2f}" + ("  ** W UNTRUSTED: decide by raw **" if abs(gd) > 2 * gs else "")
     print(line)
     if mcs and len(rows) > 1:
         v_raw, v_w = S.pvariance(raw), S.pvariance(est)
