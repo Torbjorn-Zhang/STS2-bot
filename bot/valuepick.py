@@ -28,6 +28,7 @@ def main():
     ap.add_argument("net")
     ap.add_argument("files", nargs="+")
     ap.add_argument("--margin", type=float, default=2.0, help="return points: the pick is 'rated below' the best by more")
+    ap.add_argument("--win", action="store_true", help="a winvalue.py network: values are win points (100 * sigmoid)")
     args = ap.parse_args()
     blob = torch.load(os.path.join(HERE, args.net), map_location="cpu", weights_only=False)
     enc, (net, _) = Enc(blob=blob["enc"]), load_net(blob)
@@ -66,7 +67,7 @@ def main():
             with torch.no_grad():
                 z, v = net(collate(items, torch.device("cpu")), with_value=True)
             p = torch.softmax(z[-1][:len(opts)], -1).numpy()
-            cases.append((key, r["s"].get("act"), a, p, 100.0 * v[:-1].numpy()))
+            cases.append((key, r["s"].get("act"), a, p, 100.0 * (torch.sigmoid(v[:-1]) if args.win else v[:-1]).numpy()))
     if not cases:
         print(json.dumps({"cases": 0, "skipped": dict(skipped)}))
         return
