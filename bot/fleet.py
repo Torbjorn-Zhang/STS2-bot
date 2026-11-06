@@ -144,11 +144,12 @@ def parse_batch(lines):
     return puts, gets, dirs
 
 
-def puts_tar(puts):
+def puts_tar(puts, gz=False):
+    """gz: gzip level 1 (~9x on the jsonl records; this Mac's link to lab0 moves ~2.6 MB/s)."""
     import io
     import tarfile
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w") as tf:
+    with tarfile.open(fileobj=buf, mode="w:gz", compresslevel=1) if gz else tarfile.open(fileobj=buf, mode="w") as tf:
         for loc, rem in puts:
             tf.add(loc, arcname=rem.lstrip("/"), recursive=False)
     return buf.getvalue()
@@ -159,7 +160,7 @@ def untar_gets(data, want):
     import io
     import tarfile
     got = 0
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r") as tf:
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as tf:   # plain or gzip
         for mem in tf.getmembers():
             if mem.isfile() and mem.name in want:
                 os.makedirs(os.path.dirname(want[mem.name]) or ".", exist_ok=True)
@@ -174,16 +175,19 @@ def mkdirs_cmd(dirs):
 
 
 def sftp_via(host, lines, timeout=900):
-    """sftp batch lines as tar streams through the jump host."""
+    """sftp batch lines as gzip tar streams over ssh (through the jump host for "via" hosts).
+    Every Linux host but the pods goes this way: sftp -C pushed lab0 ~1 MB/s, 20x slower than one
+    gzip stream (10 records: 18 s vs 0.9 s, 11-06), and each update's ~260 records held the
+    coordinator for 10 min (up923/924_train)."""
     puts, gets, dirs = parse_batch(lines)
     if puts or dirs:
-        res = subprocess.run(remote_argv(host, mkdirs_cmd(dirs) + "tar -xf - -C /"), input=puts_tar(puts),
+        res = subprocess.run(remote_argv(host, mkdirs_cmd(dirs) + "tar -xzf - -C /"), input=puts_tar(puts, gz=True),
                              capture_output=True, timeout=timeout)
         if res.returncode != 0:
             raise RuntimeError(f"put via rc {res.returncode}: {res.stderr.decode(errors='replace')[-300:]}")
     if gets:
         want = {rem.lstrip("/"): loc for rem, loc in gets}
-        res = subprocess.run(remote_argv(host, "tar -cf - -C / " + " ".join(shlex.quote(r) for r in want)),
+        res = subprocess.run(remote_argv(host, "tar -czf - -C / " + " ".join(shlex.quote(r) for r in want)),
                              capture_output=True, timeout=timeout)
         got = untar_gets(res.stdout, want)
         if res.returncode != 0 or got < len(want):
@@ -268,7 +272,7 @@ def sftp(host, lines, timeout=900):
         return
     if host.get("runai"):
         return sftp_relay(host, lines, timeout)
-    if host.get("via"):
+    if host.get("via") or linux(host):
         return sftp_via(host, lines, timeout)
     with tempfile.NamedTemporaryFile("w", suffix=".sftp", delete=False) as fh:
         fh.write("\n".join(lines) + "\n")
