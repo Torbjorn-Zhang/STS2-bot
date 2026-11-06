@@ -68,12 +68,14 @@ def act_state(st):
             "potions": [pot_tok(x) for x in p.get("potions") or [] if x], "boss": (ctx.get("boss") or {}).get("id")}
 
 
-def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg=None):
+def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg=None, stuck_limit=None):
     """Play on from st with the bot (as play_run, without records) until the run ends.
     decknets: the deck networks the run itself played with (else the --deck-nets rules).
     boss_dmg: optional dict, gets {act: sum over that act's boss fights of the boss-HP share
-    removed (a win = 1)}, as play_run's boss_dmg."""
-    dead_ends, memo, steps, counted = {}, {}, 0, set()
+    removed (a win = 1)}, as play_run's boss_dmg.
+    stuck_limit: raise after this many passes in a row without progress (the play is broken, its
+    outcome unknown: the caller drops it instead of scoring the max_steps cutoff as a loss)."""
+    dead_ends, memo, steps, counted, stuck = {}, {}, 0, set(), 0
     while steps < max_steps:
         d = st.get("decision")
         ctx = st.get("context") or {}
@@ -82,10 +84,10 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg
         if d == "combat_play" or (d == "card_select" and ctx.get("room_type") in ("Monster", "Elite", "Boss")):
             boss = boss_dmg is not None and ctx.get("room_type") == "Boss"
             emax = sum((e.get("max_hp") or 0) for e in st.get("enemies") or [])
-            # one boss fight = one share: RsSim.play_combat returns at once outside its combat phase, so a
-            # card_select left in a Boss room looped here, adding a "won" boss per pass without a step
-            # (up927_4049: bdmg 3963 in 1492 s; up8 it16+, --rs-carry). Count each fight once, and count steps
-            fid = (ctx.get("act"), ctx.get("floor"), tuple(sorted(str(e.get("name") or e.get("id")) for e in st.get("enemies") or [])))
+            # one boss fight = one share: a card_select left in the Boss room after a boss (A10's act-3 bosses
+            # are floors 15 and 16) came back from the fighter unchanged and looped here, adding a "won" boss
+            # per pass without a step (up927_4049: bdmg 3963 in 1492 s; up8 it16+). Once per (act, floor)
+            fid = (ctx.get("act"), ctx.get("floor"))
             last = {}
             def watch(s):
                 if s.get("enemies") is not None:
@@ -93,7 +95,7 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg
             key0 = _key(st)
             nst = fight(sim, st, planner, on_state=watch if boss else None)
             steps += 1
-            if boss and fid not in counted and (last or _key(nst) != key0):
+            if boss and fid not in counted and last:   # last: the fighter saw enemies
                 counted.add(fid)
                 won = nst.get("decision") not in ("game_over", "combat_play") or bool(nst.get("victory"))
                 left = sum(h or 0 for h in last.get("hp") or [])
@@ -105,6 +107,13 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg
                     break   # the planner's action cap: counts as a loss
                 continue
             # no progress: the fighter cannot take this decision; the policy below does
+            stuck += 1
+            if stuck_limit is not None and stuck >= stuck_limit:
+                p = st.get("player") or {}
+                raise RuntimeError("continue_run stuck: " + json.dumps(
+                    {"d": d, "room": ctx.get("room_type"), "act": ctx.get("act"), "floor": ctx.get("floor"),
+                     "purpose": st.get("purpose"), "n": len(st.get("cards") or []), "min": st.get("min_select"),
+                     "max": st.get("max_select"), "deck": len(p.get("deck") or [])}, separators=(",", ":")))
         a = decknets.decide(sim, st)[0] if decknets is not None else None
         if a is None or json.dumps(a, sort_keys=True) in dead_ends.get(_key(st), ()):
             a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
@@ -115,6 +124,8 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg
             dead_ends.setdefault(_key(st), set()).add(json.dumps(a, sort_keys=True))
             if nxt.get("type") == "error":
                 continue
+        if _key(nxt) != _key(st):
+            stuck = 0
         st = nxt
     return st
 
@@ -139,7 +150,7 @@ def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None,
             if decknets is not None:
                 decknets.rng, decknets.visits = random.Random(f"{seed}/mc{MC_ACT}/{j}"), {}
             bd = {}
-            end = continue_run(sim, st, planner, acts, decknets=decknets, boss_dmg=bd)
+            end = continue_run(sim, st, planner, acts, decknets=decknets, boss_dmg=bd, stuck_limit=50)
         except Exception as e:
             out["err"] += 1
             out.setdefault("errors", []).append(f"{type(e).__name__}: {e}"[:200])
