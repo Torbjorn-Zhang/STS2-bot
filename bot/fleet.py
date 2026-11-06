@@ -2121,7 +2121,9 @@ def main():
     ap.add_argument("--eval-init", action="store_true", help="deckrl: evaluate the starting networks first")
     ap.add_argument("--deck-nets")
     ap.add_argument("--n", type=int, default=240)
-    ap.add_argument("--expert-chunk", type=int, default=8)
+    ap.add_argument("--expert-chunk", type=int, default=None,
+                    help="runs per job (default 8; 2 for an idle-class expert eval, --prio > 1: those are stopped "
+                         "whenever other work queues, and 8-run chunks lost 52-83 copy-hours to restarts, 11-06)")
     ap.add_argument("--prefix", default="full")
     ap.add_argument("--rollouts", default='{"k":6,"m":4,"turns":3}')
     ap.add_argument("--missing", action="store_true", help="expert: only seeds without a row in runs/<tag>.jsonl yet")
@@ -2144,6 +2146,8 @@ def main():
     ap.add_argument("--reward", default=None, help='xdeckrl: JSON env overrides of the RL return (fleetjob.py --reward)')
     ap.add_argument("--set", default=None, help='set: JSON {spec key: value} for the live pipeline --tag')
     args = ap.parse_args()
+    if args.expert_chunk is None:
+        args.expert_chunk = 2 if args.cmd == "expert" and args.prio is not None and args.prio > 1.0 else 8
     if args.cmd == "run":
         lock = os.path.join(FLEET, "coordinator.pid")
         if os.path.exists(lock):

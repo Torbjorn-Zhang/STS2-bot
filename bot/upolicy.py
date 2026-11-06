@@ -450,7 +450,9 @@ def grad_cosines(net, items, decs, A, LPP, IW, ADV, T, dev, batch):
     PPO loss's gradient at ratio 1) of two random halves of the runs, and their cosine: near 0 =
     the batch is too small for its noise (more runs per update would help), clearly positive = the
     halves agree (the limit is elsewhere: reward, capacity). Also for the A10 runs alone, and for
-    pairs of single minibatches (the per-step noise)."""
+    pairs of single minibatches (the per-step noise). gcos_q_*: the mean cosine of the two quarter
+    pairs inside those halves (the halves are their sums, so no extra passes); under pure sampling
+    noise SNR grows with the runs, c/(1-c) doubling from quarters to halves."""
     def grad(idx):
         net.zero_grad()
         for i in range(0, len(idx), batch):
@@ -468,10 +470,17 @@ def grad_cosines(net, items, decs, A, LPP, IW, ADV, T, dev, batch):
         if len(keys) < 20:
             continue
         rng.shuffle(keys)
-        half = set(keys[:len(keys) // 2])
-        ia = [i for i, d in enumerate(decs) if sel(d) and d[6] in half]
-        ib = [i for i, d in enumerate(decs) if sel(d) and d[6] not in half]
-        out[f"gcos_{name}"] = cos(grad(ia), grad(ib))
+        h = len(keys) // 2   # halves keys[:h] / keys[h:] as before; each split in two
+        cut = [0, h // 2, h, h + (len(keys) - h) // 2, len(keys)]
+        where = {k: q for q in range(4) for k in keys[cut[q]:cut[q + 1]]}
+        idxs = [[] for _ in range(4)]
+        for i, d in enumerate(decs):
+            q = where.get(d[6]) if sel(d) else None
+            if q is not None:
+                idxs[q].append(i)
+        g = [grad(ix) * len(ix) for ix in idxs]   # grad() averages over its indices: back to sums
+        out[f"gcos_{name}"] = cos(g[0] + g[1], g[2] + g[3])
+        out[f"gcos_q_{name}"] = round((cos(g[0], g[1]) + cos(g[2], g[3])) / 2, 4)
         out[f"runs_{name}"] = len(keys)
     idx = list(range(len(decs)))
     pairs = []
