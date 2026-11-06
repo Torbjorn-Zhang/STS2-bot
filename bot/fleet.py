@@ -825,8 +825,15 @@ class XDeckRL:
             # asc_mix: self-play chunk k plays ascension asc_mix[k % len] (spire-mentor: a uniform A0-A10 mix,
             # so real wins exist to learn from; the evaluation stays at A10)
             mix = sp.get("asc_mix") or [10]
+            # replicas: R plays of each game seed (run.py --replicas), for the leave-one-out baseline
+            # (reward {"NETS_BASELINE": "loo_value"}); a chunk holds whole groups, so they share its ascension
+            R = int(sp.get("replicas") or 1)
+            if R > 1 and sp["chunk"] % R:
+                log(f"{self.name}: chunk {sp['chunk']} is not a multiple of replicas {R}: playing without replicas")
+                R = 1
             argv = self.run_args(min(sp["runs"], s0 + sp["chunk"]), s0, f"{self.name}{it}", cfg, f"{self.name}{it}_sp{k}",
-                                 ["--deck-sample", sp["temperature"], "--record", rec, "--no-combat-records"] + list(sp.get("sp_extra", [])),
+                                 ["--deck-sample", sp["temperature"], "--record", rec, "--no-combat-records"] + list(sp.get("sp_extra", []))
+                                 + (["--replicas", R] if R > 1 else []),
                                  asc=mix[k % len(mix)])
             # sp_prio: the queue rank of these chunks (lower runs first; sts2-rs self-play is ~20x
             # cheaper than ours, so its chunks may go ahead of another pipeline's)

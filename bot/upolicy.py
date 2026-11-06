@@ -492,6 +492,37 @@ def grad_cosines(net, items, decs, A, LPP, IW, ADV, T, dev, batch):
     return out
 
 
+def loo_baseline(decs, Gl, b_value, b_fallback, kind):
+    """Leave-one-out baseline over replicas of one game (run.py --replicas: seeds "<game>~<r>"): a
+    decision taken in act a is measured against the other replicas' decisions in act a, which share
+    its seed (map, encounters, rewards: what a state-only baseline cannot see early) but not its
+    actions, so the gradient stays unbiased. loo: their mean return. loo_value: this decision's value
+    plus their mean (return - value), the part of the return their value missed. Runs without another
+    replica in that act fall back to b_fallback (loo) / the value (loo_value)."""
+    grp = lambda key: key.split("/", 1)[-1].split("~")[0] if "~" in key else None
+    tot = defaultdict(lambda: [0.0, 0])   # (game, act, run) -> [sum, n]
+    for d, g, v in zip(decs, Gl, b_value):
+        gk = grp(d[6])
+        if gk is not None:
+            t = tot[(gk, d[1].get("act") or 1, d[6])]
+            t[0] += float(g) - (float(v) if kind == "loo_value" else 0.0)
+            t[1] += 1
+    by = defaultdict(list)   # (game, act) -> [(run, mean)]
+    for (gk, a, run), (sm, n) in tot.items():
+        by[(gk, a)].append((run, sm / n))
+    out, hit = np.empty(len(decs), np.float32), 0
+    for i, d in enumerate(decs):
+        gk = grp(d[6])
+        others = [m for run, m in by.get((gk, d[1].get("act") or 1), []) if run != d[6]] if gk is not None else []
+        if others:
+            out[i] = float(np.mean(others)) + (b_value[i] if kind == "loo_value" else 0.0)
+            hit += 1
+        else:
+            out[i] = b_value[i] if kind == "loo_value" else b_fallback[i]
+    print(json.dumps({"loo_covered": round(hit / max(1, len(decs)), 3)}), flush=True)
+    return out
+
+
 def rl(args):
     """PPO on every decision kind at once. The self-play records were played with this network at
     temperature T (run.py --deck-sample T, deck-nets "unified"), so their behaviour log-probs are
@@ -560,7 +591,12 @@ def rl(args):
                           **{f"adv_lambda_std_act{a}": round(float((Gl - b_value)[acts == a].std()), 3) for a in (1, 2, 3) if (acts == a).sum() > 10},
                           **{f"adv_std_act{a}": round(float((G - b_value)[acts == a].std()), 3) for a in (1, 2, 3) if (acts == a).sum() > 10}}),
               flush=True)
-    adv = Gl - {"bucket": b_bucket, "value": b_value, "mix": 0.5 * (b_bucket + b_value)}[args.baseline]
+    if args.baseline in ("loo", "loo_value"):
+        b_loo = loo_baseline(decs, Gl, b_value, b_bucket, args.baseline)
+        print(json.dumps({"baseline": args.baseline, "ev_loo": ev(b_loo), "ev_value": ev(b_value), "ev_bucket": ev(b_bucket),
+                          **{f"ev_loo_act{a}": ev(b_loo, acts == a) for a in (1, 2, 3) if (acts == a).sum() > 10}}), flush=True)
+    adv = Gl - (b_loo if args.baseline in ("loo", "loo_value") else
+                {"bucket": b_bucket, "value": b_value, "mix": 0.5 * (b_bucket + b_value)}[args.baseline])
     adv = (adv - adv.mean()) / (adv.std() + 1e-6)
     LP0 = torch.tensor([d[5] for d in decs], dtype=torch.float32, device=dev)
     ADV = torch.from_numpy(adv).to(dev)
@@ -738,9 +774,11 @@ def main():
     ap.add_argument("--gae-lambda", type=float, default=float(os.environ.get("NETS_GAE_LAMBDA", "1")),
                     help="rl: lambda-returns over a run's decisions, bootstrapped from the value head (1 = the run's "
                          "return; env NETS_GAE_LAMBDA, which the fleet's spec reward passes)")
-    ap.add_argument("--baseline", default="auto", choices=["auto", "bucket", "value", "mix"],
-                    help="rl: mean return at the same (asc, act, floor), the value head, their mean, or (auto) whichever "
-                         "explains more of the return's variance in this data")
+    ap.add_argument("--baseline", default=os.environ.get("NETS_BASELINE", "auto"),
+                    choices=["auto", "bucket", "value", "mix", "loo", "loo_value"],
+                    help="rl: mean return at the same (asc, act, floor), the value head, their mean, (auto) whichever "
+                         "explains more of the return's variance in this data, or over replicas of one game (loo / "
+                         "loo_value: loo_baseline; run.py --replicas). Env NETS_BASELINE, which the fleet's spec reward passes")
     ap.add_argument("--awr", action="store_true")
     ap.add_argument("--teacher-only", action="store_true", help="train: only the decisions a teacher made (x.teach)")
     ap.add_argument("--soft", action="store_true", help="train: fit the teacher's probabilities (x.tp), not its pick")

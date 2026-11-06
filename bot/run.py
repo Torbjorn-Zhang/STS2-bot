@@ -317,7 +317,9 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
     vine_rng = random.Random(f"vine/{seed}")
     policy.ASCENSION = ascension
     planner = new_planner(sim, seed, max_nodes=max_nodes, value=model, value_weight=value_weight, rollouts=rollouts)
-    st = sim.send({"cmd": "start_run", "character": character, "seed": seed, "ascension": ascension})
+    # "<game seed>~<r>" (--replicas): replica r of that game; every other random choice (planner,
+    # deck-net sampling, sts2-rs search) is seeded by the full name, so replicas play it differently
+    st = sim.send({"cmd": "start_run", "character": character, "seed": seed.split("~")[0], "ascension": ascension})
     t0, steps, fights, hp_log, ev_log = time.perf_counter(), 0, 0, [], []
     dead_ends, loops, memo, stuck = {}, 0, {}, False
     boss_dmg = 0.0   # sum over boss fights of the share of boss HP removed (a win = 1), as selfplay.py
@@ -466,6 +468,9 @@ def main():
     ap.add_argument("--tag", default="act1")
     ap.add_argument("--seed-prefix", default="bot")
     ap.add_argument("--seed-start", type=int, default=0, help="run seeds prefix_start .. prefix_(n-1) (split work across machines)")
+    ap.add_argument("--replicas", type=int, default=1,
+                    help="each game seed is played this many times: run i is prefix_(i // R)~(i % R) (self-play with a "
+                         "leave-one-out baseline, upolicy --baseline loo / loo_value); keep chunks a multiple of R")
     ap.add_argument("--model", default=None, help="value model (models/value.pkl); default: hand-written evaluation")
     ap.add_argument("--rollouts", default=None, help='JSON rollout config, e.g. {"k":4,"m":3,"turns":2}')
     ap.add_argument("--no-deck-test", action="store_true", help="pick card rewards by the tier list only")
@@ -752,7 +757,8 @@ def main():
 
     os.makedirs(os.path.join(HERE, "runs"), exist_ok=True)
     out_path = os.path.join(HERE, "runs", f"{args.tag}.jsonl")
-    seeds = [f"{args.seed_prefix}_{i}" for i in range(args.seed_start, args.n)]
+    R = max(1, args.replicas)
+    seeds = [f"{args.seed_prefix}_{i // R}~{i % R}" if R > 1 else f"{args.seed_prefix}_{i}" for i in range(args.seed_start, args.n)]
 
     done = {}
     if os.path.exists(out_path):  # resume: keep finished runs
