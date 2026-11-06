@@ -13,6 +13,7 @@ left to the fallback planner for that decision.
   st = fighter.play_combat(sim, st, fallback=planner)      # like TurnPlanner.play_combat
 """
 import os
+import random
 import sys
 import zlib
 from collections import Counter
@@ -158,7 +159,8 @@ def same_board(a, b, view=False):
 
 class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
-                 keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False, carry_rooms=None):
+                 keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False, carry_rooms=None,
+                 blind_rng=False):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -182,6 +184,13 @@ class RsFighter:
         self.carry, self.prev = carry, None
         # carry_rooms: carry only in these room types (e.g. {"Boss"}); None: every fight
         self.carry_rooms = set(carry_rooms) if carry_rooms else None
+        # blind_rng: the wire's rng block names the world's run_seed + stream counters, so the host
+        # rebuilds the world's own dice (98-99% of hold turns: the host's enemy turn, draws and
+        # reshuffles match the truth) and the search may see the future reshuffles, AI rolls and card
+        # generation. blind_rng hands the host a random run_seed per fight instead (counters kept):
+        # its dice are plausible but not the world's, as in MC plays after determinize_run
+        self.blind_rng, self.blind_seed = blind_rng, None
+        self.blind_rs = random.Random(seed ^ 0xB11D) if blind_rng else None
         if reuse:
             want_override("tree_reuse=1")
         # boss1_pow k: the first boss of A10's double boss values a win at 0.5 + (the share of a full
@@ -260,6 +269,9 @@ class RsFighter:
         ctx = st.get("context") or {}
         asc = int(ctx.get("ascension") or 0)
         wire = {**wire, "game_version": GAME_VERSION}
+        if self.blind_rng and isinstance(wire.get("rng"), dict) and wire["rng"].get("run_seed") is not None:
+            wire["rng"] = {**wire["rng"], "run_seed": self.blind_seed}
+            self.stats["blind"] += 1
         # character: the adapter otherwise infers the class from card ids, which fails for a
         # deck with no Ironclad-prefixed card left
         imported = adapter.translate(wire, character="Ironclad", ascension=asc)
@@ -437,6 +449,8 @@ class RsFighter:
         n = 0
         self.agent = self.cont = self.prev = None   # a fight's own agent and host (reuse, carry)
         self.fight, self.diffs, self.cont_move, self.wire0, self.tdiffs = Counter(), [], None, None, []
+        if self.blind_rng:
+            self.blind_seed = self.blind_rs.getrandbits(63)
         if on_state:
             on_state(state)
         while state.get("decision") in ("combat_play", "card_select") and n < max_actions:
