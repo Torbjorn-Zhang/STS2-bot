@@ -186,9 +186,12 @@ class RsFighter:
         self.carry_rooms = set(carry_rooms) if carry_rooms else None
         # blind_rng: the wire's rng block names the world's run_seed + stream counters, so the host
         # rebuilds the world's own dice (98-99% of hold turns: the host's enemy turn, draws and
-        # reshuffles match the truth) and the search may see the future reshuffles, AI rolls and card
-        # generation. blind_rng hands the host a random run_seed per fight instead (counters kept):
-        # its dice are plausible but not the world's, as in MC plays after determinize_run
+        # reshuffles match the truth) and keeps its board and tree across turns more often. The search
+        # itself does not see those dice (sts2-rs BeliefDraw: each search clone is blindfolded at its
+        # root, draw order and RNG cursors rescrambled). blind_rng hands the host a random run_seed per
+        # fight instead (counters kept): its dice are plausible but not the world's, as in MC plays
+        # after determinize_run without rebase. hold_up8e24s16bl (11-07): real wins 20.10 -> 18.54 %,
+        # host kept 81 -> 74 % of searches, and the real - MC gap +2.2 -> +0.1 pp
         self.blind_rng, self.blind_seed = blind_rng, None
         self.blind_rs = random.Random(seed ^ 0xB11D) if blind_rng else None
         if reuse:

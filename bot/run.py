@@ -59,6 +59,7 @@ STOP_AT_ACT = 0   # --stop-at-act A: end the run at act A's first map node (afte
 # MC plays from it win less than the real continuation (up9 it27-31: real - MC +1.88 +- 0.34 pp, every
 # act-3 floor a bit deadlier). See repro().
 REPRO = 0
+MC_REBASE = False   # --mc-rebase
 
 
 def _json_diff(a, b, path="", out=None, cap=40):
@@ -221,7 +222,10 @@ def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None,
             st = sim.send({"cmd": "load_save", "path": path})
             if st.get("type") == "error":
                 raise RuntimeError(st.get("message"))
-            sim.send({"cmd": "determinize_run", "seed": zlib.crc32(f"{seed}/mc{MC_ACT}/{j}".encode()) * 2654435761 % (2 ** 62)})
+            dr = sim.send({"cmd": "determinize_run", "seed": zlib.crc32(f"{seed}/mc{MC_ACT}/{j}".encode()) * 2654435761 % (2 ** 62),
+                           **({"rebase": True} if MC_REBASE else {})})
+            if MC_REBASE and not dr.get("rebased"):   # an engine before Fix14 ignores the field: fail loudly
+                raise SystemExit(f"--mc-rebase: this engine build did not rebase (Fix14+ needed): {dr}")
             planner = new_planner(sim, f"{seed}/mc{MC_ACT}/{j}", max_nodes=max_nodes, value=model, value_weight=value_weight,
                                   rollouts=rollouts)
             if decknets is not None:
@@ -554,6 +558,9 @@ def main():
     ap.add_argument("--mc-act", type=int, default=3, help="--mc-k: the act whose first map node the rollouts start from")
     ap.add_argument("--mc-k", type=int, default=0, help="K plays of the rest of the run from act --mc-act's start (cmpwin.py)")
     ap.add_argument("--mc-drop-saves", action="store_true", help="--mc-k: delete each act-start save after its plays (self-play)")
+    ap.add_argument("--mc-rebase", action="store_true",
+                    help="--mc-k: determinize_run rebuilds the run's streams from a new run seed (engine Fix14+), so "
+                         "sts2-rs's host mirrors the MC plays' dice as a real run's (MC plays lost ~2 pp without it)")
     ap.add_argument("--mc-dir", default=None, help="--mc-k: where the act-start saves go (default runs/mcsaves/<tag>)")
     ap.add_argument("--boss-beta", type=float, default=0.0, help="weight of the boss-win logit gain on card rewards")
     ap.add_argument("--map-elite-bias", type=float, default=0.0, help="map network: logit added to elite rooms")
@@ -650,8 +657,8 @@ def main():
         import nets
         nets.SKIP_BIAS = args.skip_bias
         nets.SKIP_BIAS_MIN_ACT = args.skip_bias_from_act
-    global MC_BOSS, MC_BOSS_ACTS, MC_ACT, MC_K, MC_DIR, STOP_AT_ACT, ROOM_PLANNER, REPRO
-    STOP_AT_ACT, REPRO = args.stop_at_act, args.repro
+    global MC_BOSS, MC_BOSS_ACTS, MC_ACT, MC_K, MC_DIR, STOP_AT_ACT, ROOM_PLANNER, REPRO, MC_REBASE
+    STOP_AT_ACT, REPRO, MC_REBASE = args.stop_at_act, args.repro, args.mc_rebase
     if args.room_planner:
         ROOM_PLANNER = json.loads(args.room_planner)
     if args.mc_boss:

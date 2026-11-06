@@ -685,17 +685,35 @@ public partial class RunSimulator
     /// the not-yet-visited encounter / elite / event queues of this and later acts, and the
     /// relic grab bags. Recorded in the command log like determinize, so snapshots stay exact.
     /// </summary>
-    public Dictionary<string, object?> DeterminizeRun(ulong seed)
+    /// <summary>
+    /// rebase (Fix14): the run gets a new seed string ("MC" + seed) and its streams are rebuilt from
+    /// it as a new run builds them (Seed = the string's hash, each stream from Seed and its snake_case
+    /// name; Rng(player, model) streams made later derive from it too). The combat wire publishes
+    /// run_seed + cursors, so sts2-rs's host mirrors an MC play's dice as it mirrors a real run's.
+    /// Without it the streams are fresh Rng objects no seed names: the host's dice drift from the
+    /// world's, it rebuilds more and keeps its tree less, and MC plays won ~2 pp less than real ones
+    /// at the same act-3 save (hold_up8e24s16 vs the blind-host arm, 11-07). Up Front stays as it is.
+    /// </summary>
+    public Dictionary<string, object?> DeterminizeRun(ulong seed, bool rebase = false)
     {
         try
         {
             if (_runState == null) return Error("No run in progress");
             var rnd = new System.Random(unchecked((int)(seed ^ (seed >> 32))));
             int rngs = 0, lists = 0;
+            string? rebased = null;
+            if (rebase)
+            {
+                rebased = $"MC{seed:X}";
+                var set = _runState.Rng;
+                FindField(set.GetType(), "<StringSeed>k__BackingField")!.SetValue(set, rebased);
+                FindField(set.GetType(), "<Seed>k__BackingField")!.SetValue(set, StringHelper.GetDeterministicHashCode(rebased));
+            }
             foreach (RunRngType t in Enum.GetValues(typeof(RunRngType)))
             {
                 if (t == RunRngType.UpFront) continue;
-                var fresh = new Rng(unchecked(seed * 0x9E3779B97F4A7C15UL + (ulong)t + 101));
+                var fresh = rebased != null ? new Rng(_runState.Rng.Seed, StringHelper.SnakeCase(t.ToString()))
+                                            : new Rng(unchecked(seed * 0x9E3779B97F4A7C15UL + (ulong)t + 101));
                 try { _runState.Rng.GetRng(t).LoadFromSerializable(fresh.ToSerializable()); rngs++; } catch { }
             }
             foreach (var player in _runState.Players)
@@ -743,7 +761,8 @@ public partial class RunSimulator
                     lists++;
                 }
             }
-            return new Dictionary<string, object?> { ["type"] = "ok", ["rngs"] = rngs, ["lists"] = lists, ["acts"] = dbg };
+            return new Dictionary<string, object?> { ["type"] = "ok", ["rngs"] = rngs, ["lists"] = lists, ["acts"] = dbg,
+                                                     ["rebased"] = rebased != null, ["run_seed"] = _runState.Rng.Seed };
         }
         catch (Exception ex) { return ErrorWithTrace("DeterminizeRun failed", ex); }
     }

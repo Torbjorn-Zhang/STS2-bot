@@ -219,7 +219,8 @@ class Program
                 return sim.Determinize(cmd.TryGetProperty("seed", out var ds) ? ds.GetUInt64() : 0UL);
 
             case "determinize_run":
-                return sim.DeterminizeRun(cmd.TryGetProperty("seed", out var drs) ? drs.GetUInt64() : 0UL);
+                return sim.DeterminizeRun(cmd.TryGetProperty("seed", out var drs) ? drs.GetUInt64() : 0UL,
+                                          cmd.TryGetProperty("rebase", out var drb) && drb.ValueKind == JsonValueKind.True);
 
             case "write_continue_save":
             {
