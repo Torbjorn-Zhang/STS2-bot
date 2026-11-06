@@ -144,15 +144,31 @@ def turn_diff(host, real):
     return out + [(f"player.{k}", pa.get(k), pb.get(k)) for k in ("hp", "block", "energy", "powers") if pa.get(k) != pb.get(k)]
 
 
-def same_board(a, b, view=False):
+# Relics whose counter cycles. sts2-rs counts up for good and fires on count % N == 0 (sts2-core
+# relic_effects/*.rs, *_THRESHOLD in helpers.rs; Iron Club in sts2-content relics/shop_event.rs); our
+# engine's counter is back at 0 after the trigger, so the wire's host reads 0 where the kept one reads
+# N (11-07: 29 % of the recorded mid-turn host diffs in hold_up8e24s16, each one a needless rebuild)
+RELIC_PERIOD = {"OrnamentalFan": 3, "Kusarigama": 3, "Kunai": 3, "Shuriken": 3, "LetterOpener": 3,
+                "IronClub": 4, "Nunchaku": 10, "TuningFork": 10}
+
+
+def _relics(rm, mod):
+    rc = rm.relic_counters()
+    if not mod:
+        return rc
+    return {k: v % RELIC_PERIOD[k] if k in RELIC_PERIOD and isinstance(v, int) else v for k, v in rc.items()}
+
+
+def same_board(a, b, view=False, relic_mod=False):
     """Two hosts show the same board: the visible state, potions, relic counters and the cards
     of every pile (the draw order is not compared: the search never reads it). view: the visible
     state as _view shows it (with the powers gained in the fight; the live one misses them, so a
-    host that gained one never matched)."""
+    host that gained one never matched). relic_mod: cycling relics' counters compared modulo their
+    period (RELIC_PERIOD)."""
     try:
         state = _view if view else (lambda rm: rm.combat_state().get_state())
         return (state(a) == state(b) and a.potions() == b.potions()
-                and a.relic_counters() == b.relic_counters() and _piles(a) == _piles(b))
+                and _relics(a, relic_mod) == _relics(b, relic_mod) and _piles(a) == _piles(b))
     except Exception:
         return False
 
@@ -160,7 +176,7 @@ def same_board(a, b, view=False):
 class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
                  keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False, carry_rooms=None,
-                 blind_rng=False):
+                 blind_rng=False, relic_mod=False):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -193,6 +209,9 @@ class RsFighter:
         # after determinize_run without rebase. hold_up8e24s16bl (11-07): real wins 20.10 -> 18.54 %,
         # host kept 81 -> 74 % of searches, and the real - MC gap +2.2 -> +0.1 pp
         self.blind_rng, self.blind_seed = blind_rng, None
+        # relic_mod: keep the host when a cycling relic's counter differs from the wire's only by its
+        # period (same_board, RELIC_PERIOD)
+        self.relic_mod = relic_mod
         self.blind_rs = random.Random(seed ^ 0xB11D) if blind_rng else None
         if reuse:
             want_override("tree_reuse=1")
@@ -327,7 +346,7 @@ class RsFighter:
                     if td and len(self.tdiffs) < 8:
                         self.tdiffs.append({"round": st.get("round"),
                                             "diff": [[p, str(a)[:60], str(b)[:60]] for p, a, b in td[:6]]})
-                if same_board(cont, rm, self.true_view):
+                if same_board(cont, rm, self.true_view, self.relic_mod):
                     if mid:
                         self.fight["mid_same"] += 1
                     rm = cont

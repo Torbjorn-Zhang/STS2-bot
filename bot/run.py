@@ -526,7 +526,10 @@ def main():
     ap.add_argument("--rs-dump-wires", action="store_true",
                     help="with --rs-fight: each elite / boss fight's first combat_wire in its fight-log entry (transplant.py)")
     ap.add_argument("--rs-blind-rng", action="store_true",
-                    help="--rs-fight: the host gets a random run_seed per fight, not the world's (no peeking at the dice)")
+                    help="--rs-fight: the host gets a random run_seed per fight, not the world's (a diagnostic: the host tracks less)")
+    ap.add_argument("--rs-relic-mod", action="store_true",
+                    help="--rs-fight: keep the host when a cycling relic's counter (Nunchaku, Ornamental Fan, ...) differs "
+                         "from the wire's only by its period (rsfight.RELIC_PERIOD)")
     ap.add_argument("--rs-carry", action="store_true",
                     help="with --rs-fight: a host rebuilt from the wire takes the hidden state the wire lacks (enemy move "
                          "machines, relic latches, turn tallies) from the last host (CombatState.transplant_hidden)")
@@ -593,6 +596,7 @@ def main():
         RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse, "keep_host": args.rs_keep_host,
                             "boss1_pow": args.rs_boss1_pow, "true_view": args.rs_true_view,
                             "dump_wires": args.rs_dump_wires, "carry": args.rs_carry, "blind_rng": args.rs_blind_rng,
+                            "relic_mod": args.rs_relic_mod,
                             "carry_rooms": args.rs_carry_rooms.split(",") if args.rs_carry_rooms else None})
     if args.rs:
         import engine

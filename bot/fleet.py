@@ -2131,6 +2131,7 @@ def main():
     ap.add_argument("--prefix", default="full")
     ap.add_argument("--rollouts", default='{"k":6,"m":4,"turns":3}')
     ap.add_argument("--missing", action="store_true", help="expert: only seeds without a row in runs/<tag>.jsonl yet")
+    ap.add_argument("--seeds-file", default=None, help="expert: only these seed indices (a JSON list of ints)")
     ap.add_argument("--prio", type=float, default=None, help="expert/bench: queue priority (self-play 1, evaluation 2)")
     ap.add_argument("--bench", help="bench: fight bench tag (data/bossbench_<bench>)")
     ap.add_argument("--configs", help='bench: JSON {name: rollout config}')
@@ -2200,6 +2201,11 @@ def main():
                             pass
             seeds = [i for i in range(args.n) if f"{args.prefix}_{i}" not in done]
             print(f"{len(seeds)} seeds missing")
+        if args.seeds_file:
+            with open(args.seeds_file) as fh:
+                pick = sorted({int(i) for i in json.load(fh)})
+            seeds = [i for i in (seeds if seeds is not None else range(args.n)) if i in set(pick)]
+            print(f"{len(seeds)} seeds from {args.seeds_file}")
         submit("expert", {"tag": args.tag, "deck_nets": args.deck_nets, "n": args.n, "start": 0, "chunk": args.expert_chunk,
                           "prefix": args.prefix, "rollouts": args.rollouts, "seeds": seeds,
                           "prio": 1.5 if args.prio is None else args.prio, "extra": json.loads(args.extra or "[]"),
