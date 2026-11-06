@@ -12,6 +12,15 @@ the value would serve). Reported per act: AUC, log-loss and Brier against the (a
 floor) win-rate table of the training runs, the baseline any useful value must beat. Then the
 option-level check (valuepick.py --win on the --test records): how often the value's best
 card-reward option is the pick, how far apart the options are in win points.
+
+    winvalue.py check models/vwin9.pt 'data/xdarchive/up9_it19/*.jsonl' ... [--policy-value]
+
+The validity test (supervisor r13): spread and disagreement can come from noise, so on self-play
+the value never saw (sampled picks, so the played option varies), every card reward gets
+V_pre (its own state's value) and gap = V(best option) - V(played option), and the run's win is
+regressed on both: logit P(win) = a + b * logit(V_pre) + c * gap. The value knows something
+about options only if c < 0 at >= 2 SE (bootstrap over runs: a run's decisions share its label).
+--policy-value: the same with the policy network's own value head (return points, not win).
 """
 
 import argparse
@@ -186,7 +195,131 @@ def train(args):
                       "test_all": (rep.get("test") or {}).get("all"), "valuepick": rep.get("valuepick")}))
 
 
+def card_cases(net, enc, files, win):
+    """-> [(run key, won, V_pre, gap, chosen is value-best)] over the card rewards whose next
+    decision is in the record (valuepick.py's construction: each option's resulting state is the
+    next decision's state with the deck that option leaves)."""
+    import copy
+    runs, won = defaultdict(list), {}
+    for f in files:
+        for line in open(f):
+            r = json.loads(line)
+            key = f"{os.path.basename(f)}/{r.get('seed')}"
+            if r.get("k") == "o":
+                won[key] = bool(r.get("victory"))
+            elif r.get("k") == "d":
+                runs[key].append(r)
+    scale = (lambda v: 100.0 * torch.sigmoid(v)) if win else (lambda v: 100.0 * v)
+    out = []
+    for key, R in runs.items():
+        if key not in won:
+            continue
+        for i, r in enumerate(R[:-1]):
+            if r.get("dec") != "card_reward":
+                continue
+            opts, nxt = options_of(r), R[i + 1]
+            a = chosen_of(r, opts)
+            if not opts or len(opts) < 2 or a is None or not 0 <= a < len(opts) or options_of(nxt) is None:
+                continue
+            deck0, deck1 = list(r["s"].get("deck") or []), list(nxt["s"].get("deck") or [])
+            kept = [o[1] for o in opts]
+            if sorted(deck0 + ([kept[a]] if kept[a] else [])) != sorted(deck1):
+                continue
+            items = []
+            for o in opts:
+                s = copy.deepcopy(nxt["s"])
+                s["deck"] = deck0 + ([o[1]] if o[1] else [])
+                items.append(enc.encode(kind_of(nxt), s, options_of(nxt), (nxt.get("x") or {}).get("route")))
+            items.append(enc.encode("card_reward", r["s"], opts, (r.get("x") or {}).get("route")))
+            with torch.no_grad():
+                _, v = net(collate(items, torch.device("cpu")), with_value=True)
+            v = scale(v).numpy()
+            vo = v[:-1]
+            out.append((key, won[key], float(v[-1]), float(vo.max() - vo[a]), int(np.argmax(vo) == a)))
+    return out
+
+
+def logit_fit(X, y, iters=25):
+    """Logistic regression by Newton's method (ridge 1e-6) -> coefficients."""
+    w = np.zeros(X.shape[1])
+    for _ in range(iters):
+        p = 1 / (1 + np.exp(-np.clip(X @ w, -30, 30)))
+        g = X.T @ (y - p)
+        H = (X * (p * (1 - p))[:, None]).T @ X + 1e-6 * np.eye(X.shape[1])
+        w += np.linalg.solve(H, g)
+    return w
+
+
+def check(args):
+    blob = torch.load(os.path.join(HERE, args.net), map_location="cpu", weights_only=False)
+    enc, (net, _) = Enc(blob=blob["enc"]), load_net(blob)
+    net.eval()
+    win = not args.policy_value
+    C = card_cases(net, enc, expand(args.files), win)
+    if len(C) < 100:
+        print(json.dumps({"cases": len(C)}))
+        return
+    keys = sorted({c[0] for c in C})
+    by = defaultdict(list)
+    for j, c in enumerate(C):
+        by[c[0]].append(j)
+    y = np.array([c[1] for c in C], float)
+    vp = np.array([c[2] for c in C]) / 100.0
+    gap = np.array([c[3] for c in C])
+    if win:
+        x1 = np.log(np.clip(vp, 1e-3, 1 - 1e-3) / np.clip(1 - vp, 1e-3, 1 - 1e-3))
+    else:
+        x1 = (vp - vp.mean()) / (vp.std() + 1e-9)
+    X = np.stack([np.ones(len(C)), x1, gap / 10.0], 1)   # c per 10 points of gap
+    w = logit_fit(X, y)
+    rng = np.random.default_rng(0)
+    boot = []
+    for _ in range(args.boot):
+        idx = np.concatenate([by[keys[k]] for k in rng.integers(0, len(keys), len(keys))])
+        boot.append(logit_fit(X[idx], y[idx])[2])
+    se = float(np.std(boot))
+    # the decile view: within deciles of V_pre, win rate of value-best picks vs picks >= margin below
+    dec = np.quantile(x1, np.linspace(0, 1, 11)[1:-1])
+    bins = np.digitize(x1, dec)
+    best = np.array([c[4] for c in C], bool)
+    below = gap >= args.margin
+    rows, diffs = [], []
+    for b in range(10):
+        m = bins == b
+        if (m & best).sum() >= 10 and (m & below).sum() >= 10:
+            d = y[m & best].mean() - y[m & below].mean()
+            diffs.append((d, (m & best).sum(), (m & below).sum()))
+            rows.append({"decile": b, "n_best": int((m & best).sum()), "win_best": round(float(y[m & best].mean()), 3),
+                         "n_below": int((m & below).sum()), "win_below": round(float(y[m & below].mean()), 3)})
+    pooled = (sum(d * min(a, b) for d, a, b in diffs) / max(1, sum(min(a, b) for _, a, b in diffs))) if diffs else None
+    res = {"net": args.net, "values": "win" if win else "return", "cases": len(C), "runs": len(keys),
+           "win": round(float(y.mean()), 4), "share_value_best": round(float(best.mean()), 3),
+           f"share_gap_ge_{args.margin:g}": round(float(below.mean()), 3),
+           "gap_median": round(float(np.median(gap)), 2), "gap_p90": round(float(np.percentile(gap, 90)), 2),
+           "coef_vpre": round(float(w[1]), 4), "coef_gap_per10": round(float(w[2]), 4), "se_gap_per10": round(se, 4),
+           "z_gap": round(float(w[2]) / (se + 1e-12), 2), "pass": bool(w[2] < 0 and w[2] / (se + 1e-12) <= -2),
+           "decile_best_minus_below": round(float(pooled), 4) if pooled is not None else None, "deciles": rows}
+    if args.report:
+        with open(os.path.join(HERE, args.report), "w") as fh:
+            json.dump(res, fh, indent=1)
+    print(json.dumps({k: v for k, v in res.items() if k != "deciles"}))
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "check":
+        ap = argparse.ArgumentParser()
+        ap.add_argument("cmd")
+        ap.add_argument("net")
+        ap.add_argument("files", nargs="+")
+        ap.add_argument("--policy-value", action="store_true")
+        ap.add_argument("--margin", type=float, default=2.0)
+        ap.add_argument("--boot", type=int, default=200)
+        ap.add_argument("--report", default=None)
+        ap.add_argument("--threads", type=int, default=2)
+        args = ap.parse_args()
+        torch.set_num_threads(args.threads)
+        check(args)
+        return
     ap = argparse.ArgumentParser()
     ap.add_argument("cmd", choices=["train"])
     ap.add_argument("files", nargs="+")

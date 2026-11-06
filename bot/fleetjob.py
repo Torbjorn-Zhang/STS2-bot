@@ -62,8 +62,21 @@ def train(args):
             with open(os.path.join(HERE, "fleet", "jobs", f"train_{args.tag}{args.it}_{kind}.log")) as fh:
                 sys.stderr.write(f"--- {kind}\n" + fh.read()[-1500:])
         sys.exit(1)
+    # the trainers' JSON stat lines (importance weights, gradient cosines, per-epoch KL / clipfrac /
+    # entropy, early stop) come back in the result: the remote log is overwritten next iteration
+    stats = {}
+    for kind in procs:
+        rows = []
+        for line in open(os.path.join(HERE, "fleet", "jobs", f"train_{args.tag}{args.it}_{kind}.log")):
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    pass
+        stats[kind] = rows[-12:]
     print(json.dumps({"models": models, "timing": {**timing, "total": round(time.time() - t0, 1)},
-                      "device": os.environ.get("NETS_DEVICE", "cpu")}), flush=True)
+                      "device": os.environ.get("NETS_DEVICE", "cpu"), "stats": stats}), flush=True)
 
 
 def main():

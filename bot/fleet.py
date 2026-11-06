@@ -63,9 +63,11 @@ BACKUP_AFTER = 120   # a job running this long while the queue is empty gets a b
 # a CPU training job takes up to this many slots (workers threads each): with 2 torch threads it was
 # a third of each iteration (750 s on lab0); without "overlap" the pipeline's self-play waits for it
 TRAIN_SLOTS = 6
-# an update on a GPU host: the card does the work, so it takes 2 slots (4 threads for data loading)
-# instead of waiting for 6 to free on a busy lab0 (6-17 min waits for a 3-4 min update, 11-06)
-GPU_TRAIN_SLOTS = 2
+# an update on a GPU host: the card does the work, so it takes 1 slot (2 threads for data loading)
+# instead of waiting for 6 to free on a busy lab0 (6-17 min waits for a 3-4 min update, 11-06). Not
+# 2: at 2 the share guard stopped up920_train 22 s in when others' load jumped to 76 of 80 threads
+# (allowance 1 slot) and the update fell back to lab1's CPU for 28 min; at 1 it fits that allowance
+GPU_TRAIN_SLOTS = 1
 # an update still queued this long while its GPU host is full stops that host's lowest-priority,
 # newest jobs to free the slots: lab0 filled with fresh 40-min chunks just before up913_train was
 # queued, so it fell back to 1 slot on lab3's CPU and took 66 min instead of 3.5 (11-06)
@@ -1846,10 +1848,12 @@ class Fleet:
                 continue
             # a copy keeps its primary's width (j["w"]): only copies that fit the free slots, or the
             # share guard stops them at the next poll and they are started again (11-04: an 8-slot
-            # task copied onto lab0 every 20 s for an hour)
+            # task copied onto lab0 every 20 s for an hour). No copies of tasks or GPU jobs: a task's
+            # inputs can be GBs, pushed inside the loop (11-06: vwin9's 2.2 GB to lab0 held every host's
+            # poll for 10+ min), and a GPU job's copy would run on the CPU
             cand = []
             for j in sorted([j for j in self.jobs.values() if j["state"] == "running" and j["host"] != h["name"]
-                             and not j.get("backup") and j["kind"] != "train" and not j.get("gpu_now") and not j.get("only")
+                             and not j.get("backup") and j["kind"] not in ("train", "task") and not j.get("gpu") and not j.get("only")
                              and all(h.get(c) for c in j.get("needs", []))
                              and time.time() - j.get("t_start", time.time()) > BACKUP_AFTER],
                             key=lambda j: j.get("t_start", 0)):

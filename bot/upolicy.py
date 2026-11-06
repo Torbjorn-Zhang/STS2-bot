@@ -445,6 +445,44 @@ def train(args):
     print(json.dumps({"saved": args.out, "decisions": len(decs), **best[2]}))
 
 
+def grad_cosines(net, items, decs, A, LPP, IW, ADV, T, dev, batch):
+    """Is the update direction signal or noise? The policy-gradient (at the proximal network, the
+    PPO loss's gradient at ratio 1) of two random halves of the runs, and their cosine: near 0 =
+    the batch is too small for its noise (more runs per update would help), clearly positive = the
+    halves agree (the limit is elsewhere: reward, capacity). Also for the A10 runs alone, and for
+    pairs of single minibatches (the per-step noise)."""
+    def grad(idx):
+        net.zero_grad()
+        for i in range(0, len(idx), batch):
+            b = idx[i:i + batch]
+            z = net(collate([items[j] for j in b], dev))
+            lp = torch.log_softmax(z / T, -1).gather(1, A[b][:, None]).squeeze(1)
+            (-(IW[b] * torch.exp(lp - LPP[b]) * ADV[b]).sum() / len(idx)).backward()
+        return torch.cat([(q.grad if q.grad is not None else torch.zeros_like(q)).flatten() for q in net.parameters()]).clone()
+
+    cos = lambda a, b: round(float(torch.dot(a, b) / (a.norm() * b.norm() + 1e-12)), 4)
+    rng = random.Random(1)
+    out = {}
+    for name, sel in (("all", lambda d: True), ("a10", lambda d: d[1].get("asc") == 10)):
+        keys = sorted({d[6] for d in decs if sel(d)})
+        if len(keys) < 20:
+            continue
+        rng.shuffle(keys)
+        half = set(keys[:len(keys) // 2])
+        ia = [i for i, d in enumerate(decs) if sel(d) and d[6] in half]
+        ib = [i for i, d in enumerate(decs) if sel(d) and d[6] not in half]
+        out[f"gcos_{name}"] = cos(grad(ia), grad(ib))
+        out[f"runs_{name}"] = len(keys)
+    idx = list(range(len(decs)))
+    pairs = []
+    for _ in range(8):
+        rng.shuffle(idx)
+        pairs.append(cos(grad(idx[:batch]), grad(idx[batch:2 * batch])))
+    out["gcos_minibatch"] = round(float(np.mean(pairs)), 4)
+    net.zero_grad()
+    return out
+
+
 def rl(args):
     """PPO on every decision kind at once. The self-play records were played with this network at
     temperature T (run.py --deck-sample T, deck-nets "unified"), so their behaviour log-probs are
@@ -525,6 +563,8 @@ def rl(args):
     print(json.dumps({"init_lp_gap": round(float(gap.mean()), 4), "stale": round(float((gap > 1e-3).float().mean()), 3),
                       "iw_mean": round(float(IW.mean()), 4), "iw_capped": round(float((LPP - LP0 > np.log(args.is_cap)).float().mean()), 4)}),
           flush=True)
+    if os.environ.get("NETS_GRADCOS", "1") != "0":
+        print(json.dumps(grad_cosines(net, items, decs, A, LPP, IW, ADV, T, dev, args.batch)), flush=True)
     order = list(range(len(decs)))
     for ep in range(args.epochs):
         random.Random(ep).shuffle(order)
