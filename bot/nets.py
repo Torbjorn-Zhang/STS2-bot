@@ -88,9 +88,11 @@ def boss3_real(o):
 def boss3_estimate(o):
     """Act-3 boss shares averaged over the run and its run.py --mc-k plays from act 3's start."""
     b = (o.get("mc") or {}).get("bdmg") or []
-    # each play's share is 0..2 by definition; up8 it16+ (--rs-carry) logs a few plays far above it
-    # (up927_4049: 3963), which blew up927's smcb returns to ret_std 216 (45 before): clip, don't trust
-    return (boss3_real(o) + sum(min(2.0, max(0.0, x)) for x in b)) / (1 + len(b))
+    # each play's share is 0..2 by definition; up8 it16+ (--rs-carry) logged a few plays far above it
+    # (continue_run's boss loop, fixed in dcbfb58; up927_4049: 3963), which blew up927's smcb returns to
+    # ret_std 216 (45 before). Such a play's share is unknown (not "beat both": its win is 0): drop it
+    b = [x for x in b if 0.0 <= x <= 2.0 + 1e-6]
+    return (boss3_real(o) + sum(b)) / (1 + len(b))
 
 
 def win_estimate(o):
