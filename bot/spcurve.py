@@ -22,8 +22,10 @@ def b3(r):
         return 2.0
     if (r.get("act") or 1) < 3:
         return 0.0
-    real = max(0.0, (r.get("boss_dmg") or 0) - 2.0)
-    mc = (r.get("mc") or {}).get("bdmg") or []
+    # as nets.boss3_real / boss3_estimate: cap the real share at 2, drop out-of-range MC plays (a looped
+    # boss count, e.g. up932_1046 real boss_dmg 4900, otherwise moves the iteration mean by +0.5)
+    real = min(2.0, max(0.0, (r.get("boss_dmg") or 0) - 2.0))
+    mc = [x for x in (r.get("mc") or {}).get("bdmg") or [] if 0.0 <= x <= 2.0 + 1e-6]
     return (real + sum(mc)) / (1 + len(mc))
 
 
