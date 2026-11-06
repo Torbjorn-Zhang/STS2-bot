@@ -73,7 +73,7 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg
     decknets: the deck networks the run itself played with (else the --deck-nets rules).
     boss_dmg: optional dict, gets {act: sum over that act's boss fights of the boss-HP share
     removed (a win = 1)}, as play_run's boss_dmg."""
-    dead_ends, memo, steps = {}, {}, 0
+    dead_ends, memo, steps, counted = {}, {}, 0, set()
     while steps < max_steps:
         d = st.get("decision")
         ctx = st.get("context") or {}
@@ -82,19 +82,29 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg
         if d == "combat_play" or (d == "card_select" and ctx.get("room_type") in ("Monster", "Elite", "Boss")):
             boss = boss_dmg is not None and ctx.get("room_type") == "Boss"
             emax = sum((e.get("max_hp") or 0) for e in st.get("enemies") or [])
+            # one boss fight = one share: RsSim.play_combat returns at once outside its combat phase, so a
+            # card_select left in a Boss room looped here, adding a "won" boss per pass without a step
+            # (up927_4049: bdmg 3963 in 1492 s; up8 it16+, --rs-carry). Count each fight once, and count steps
+            fid = (ctx.get("act"), ctx.get("floor"), tuple(sorted(str(e.get("name") or e.get("id")) for e in st.get("enemies") or [])))
             last = {}
             def watch(s):
                 if s.get("enemies") is not None:
                     last["hp"] = [e.get("hp") for e in s["enemies"]]
-            st = fight(sim, st, planner, on_state=watch if boss else None)
-            if boss:
-                won = st.get("decision") not in ("game_over", "combat_play") or bool(st.get("victory"))
+            key0 = _key(st)
+            nst = fight(sim, st, planner, on_state=watch if boss else None)
+            steps += 1
+            if boss and fid not in counted and (last or _key(nst) != key0):
+                counted.add(fid)
+                won = nst.get("decision") not in ("game_over", "combat_play") or bool(nst.get("victory"))
                 left = sum(h or 0 for h in last.get("hp") or [])
                 a = ctx.get("act") or 1
                 boss_dmg[a] = boss_dmg.get(a, 0.0) + (1.0 if won else max(0.0, 1 - left / max(1, emax)))
-            if st.get("decision") == "combat_play":
-                break   # the planner's action cap: counts as a loss
-            continue
+            if _key(nst) != key0:
+                st = nst
+                if st.get("decision") == "combat_play":
+                    break   # the planner's action cap: counts as a loss
+                continue
+            # no progress: the fighter cannot take this decision; the policy below does
         a = decknets.decide(sim, st)[0] if decknets is not None else None
         if a is None or json.dumps(a, sort_keys=True) in dead_ends.get(_key(st), ()):
             a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)

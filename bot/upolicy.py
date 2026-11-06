@@ -536,7 +536,8 @@ def rl(args):
     ev = lambda b, m=slice(None): round(float(1 - np.var(G[m] - b[m]) / (np.var(G[m]) + 1e-9)), 3)
     acts = np.array([d[1].get("act") or 1 for d in decs])
     print(json.dumps({"decisions": len(decs), "by_kind": dict(Counter(d[0] for d in decs)), "runs": len({d[6] for d in decs}),
-                      "ret_std": round(float(G.std()), 3), "ev_bucket": ev(b_bucket), "ev_value": ev(b_value),
+                      "ret_std": round(float(G.std()), 3), "ret_max": round(float(G.max()), 2),   # smcb: <= 130 (up927: 19829)
+                      "ev_bucket": ev(b_bucket), "ev_value": ev(b_value),
                       **{f"ev_value_act{a}": ev(b_value, acts == a) for a in (1, 2, 3) if (acts == a).sum() > 10},
                       **{f"ev_bucket_act{a}": ev(b_bucket, acts == a) for a in (1, 2, 3) if (acts == a).sum() > 10},
                       "baseline": args.baseline, "ent_coef": args.ent}), flush=True)
