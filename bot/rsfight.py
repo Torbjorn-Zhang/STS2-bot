@@ -12,6 +12,7 @@ left to the fallback planner for that decision.
   fighter = RsFighter(sims=1000, boss_sims=4000)
   st = fighter.play_combat(sim, st, fallback=planner)      # like TurnPlanner.play_combat
 """
+import json
 import os
 import random
 import sys
@@ -116,13 +117,14 @@ def _view(rm):
         return cs.get_state()
 
 
-def board_diff(host, real):
+def board_diff(host, real, relic_mod=False):
     """Where the host that took a move shows another board than the true one after the same move
-    (same_board's fields, the visible state as _view shows it): host value | true value per path."""
+    (same_board's fields, the visible state as _view shows it): host value | true value per path.
+    relic_mod: relic counters compared as same_board does (modulo RELIC_PERIOD)."""
     try:
         ga, gb = _norm(_view(host)), _norm(_view(real))
         return (_diff(ga, gb, "board") + _diff(_piles_any(host), _piles_any(real), "piles")
-                + _diff(host.potions(), real.potions(), "potions") + _diff(host.relic_counters(), real.relic_counters(), "relics"))[:6]
+                + _diff(host.potions(), real.potions(), "potions") + _diff(_relics(host, relic_mod), _relics(real, relic_mod), "relics"))[:6]
     except Exception as e:  # noqa: BLE001  (a diagnostic only)
         return [f"diff failed: {type(e).__name__}: {str(e)[:120]}"]
 
@@ -173,10 +175,91 @@ def same_board(a, b, view=False, relic_mod=False):
         return False
 
 
+def _alive(e):
+    return bool(e.get("is_alive", (e.get("hp") or 0) > 0))
+
+
+def _hand_keys(rm, vis):
+    """Each hand card of rm as everything that makes two copies interchangeable: the visible card
+    and its state_to_dict card without the instance number (stable_idx differs between a kept host
+    and a fresh import of the same board)."""
+    deck = (sts2_rs.state_to_dict(rm.combat_state()).get("deck") or {}).get("hand") or []
+    hand = vis.get("hand") or []
+    if len(deck) != len(hand):
+        raise ValueError("hand lengths")
+    return [json.dumps([h, {k: v for k, v in c.items() if k != "stable_idx"}], sort_keys=True) for h, c in zip(hand, deck)]
+
+
+def loose_map(a, b, relic_mod=False):
+    """--rs-loose-board: the kept host a against the wire's fresh host b. When they show the same board
+    up to representation (power lists in another order, dead enemies a still lists, hand cards in
+    another order: _norm of the visible state, _piles_any, relic counters per relic_mod), the maps
+    that carry a's action indices to b's (= our engine's order): (hand_map[i] = b's hand index of a's
+    card i, enemy_map[t] = b's enemy slot of a's living slot t); None otherwise. A hand card needs an
+    identical counterpart (visible card and card state), so the wrong copy is never played."""
+    try:
+        va, vb = _view(a), _view(b)
+        if not (_norm(va) == _norm(vb) and a.potions() == b.potions()
+                and _relics(a, relic_mod) == _relics(b, relic_mod) and _piles_any(a) == _piles_any(b)):
+            return None
+        ka, kb = _hand_keys(a, va), _hand_keys(b, vb)
+        used, hmap = set(), []
+        for k in ka:
+            j = next((j for j, x in enumerate(kb) if x == k and j not in used), None)
+            if j is None:
+                return None
+            used.add(j)
+            hmap.append(j)
+        ea, eb = va.get("enemies") or [], vb.get("enemies") or []
+        ia = [i for i, e in enumerate(ea) if _alive(e)]
+        ib = [i for i, e in enumerate(eb) if _alive(e)]
+        if len(ia) != len(ib):
+            return None
+        return hmap, dict(zip(ia, ib))
+    except Exception:  # noqa: BLE001  (no map: rebuild, as before)
+        return None
+
+
+def repr_kinds(a, b):
+    """Why same_board said "differs" where board_diff (the _norm view, _piles_any) sees nothing: the
+    mid_repr kinds, for the fight log (mr:<kind>). A diagnostic only."""
+    out = []
+    try:
+        try:
+            _piles(a), _piles(b)
+        except Exception:  # noqa: BLE001
+            out.append("piles_raise")
+        va, vb = _view(a), _view(b)
+        for k in sorted(set(va) | set(vb)):
+            x, y = va.get(k), vb.get(k)
+            if x == y:
+                continue
+            if k == "hand":
+                out.append("hand_order" if _norm(x, k) == _norm(y, k) else "hand_other")
+            elif k == "enemies":
+                xs, ys = x or [], y or []
+                if len(xs) != len(ys) or any(not _alive(e) for e in xs + ys):
+                    out.append("dead_enemy")
+                if [_norm(e) for e in xs if _alive(e)] == [_norm(e) for e in ys if _alive(e)]:
+                    if [e for e in xs if _alive(e)] != [e for e in ys if _alive(e)]:
+                        out.append("enemy_power_order")
+                else:
+                    out.append("enemy_other")
+            elif k == "player":
+                out.append("player_power_order" if _norm(x) == _norm(y) else "player_other")
+            else:
+                out.append("other:" + str(k))
+        if a.potions() != b.potions():
+            out.append("potions")
+    except Exception as e:  # noqa: BLE001
+        out.append("failed:" + type(e).__name__)
+    return out or ["none"]
+
+
 class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
                  keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False, carry_rooms=None,
-                 blind_rng=False, relic_mod=False):
+                 blind_rng=False, relic_mod=False, loose_board=False):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -212,6 +295,10 @@ class RsFighter:
         # relic_mod: keep the host when a cycling relic's counter differs from the wire's only by its
         # period (same_board, RELIC_PERIOD)
         self.relic_mod = relic_mod
+        # loose_board: also keep the host when its board differs from the wire's only in representation
+        # (loose_map: power order, dead enemies it lists, hand order); its action indices then go
+        # through loose_map's maps (self.amap) to ours
+        self.loose_board, self.amap = loose_board, None
         self.blind_rs = random.Random(seed ^ 0xB11D) if blind_rng else None
         if reuse:
             want_override("tree_reuse=1")
@@ -314,7 +401,7 @@ class RsFighter:
         """Our engine's (action, args) for this combat decision, or None (use the fallback)."""
         d = st.get("decision")
         if d == "combat_play":
-            self.host = None
+            self.host, self.amap = None, None
             wire = sim.send({"cmd": "combat_wire"})
             if wire.get("type") != "combat_wire":
                 self.stats["wire_error"] += 1
@@ -346,16 +433,26 @@ class RsFighter:
                     if td and len(self.tdiffs) < 8:
                         self.tdiffs.append({"round": st.get("round"),
                                             "diff": [[p, str(a)[:60], str(b)[:60]] for p, a, b in td[:6]]})
-                if same_board(cont, rm, self.true_view, self.relic_mod):
+                same = same_board(cont, rm, self.true_view, self.relic_mod)
+                lmap = loose_map(cont, rm, self.relic_mod) if self.loose_board and not same else None
+                if same:
                     if mid:
                         self.fight["mid_same"] += 1
                     rm = cont
                     self.stats["host_kept"] += 1
+                elif lmap is not None:
+                    if mid:
+                        self.fight["mid_loose"] += 1
+                    rm, self.amap = cont, lmap
+                    self.stats["host_kept"] += 1
+                    self.stats["loose_kept"] += 1
                 else:
                     if mid:
-                        diff = board_diff(cont, rm)
+                        diff = board_diff(cont, rm, self.relic_mod)
                         if not diff:
                             self.fight["mid_repr"] += 1   # only power order / dead enemies listed
+                            for kind in repr_kinds(cont, rm):
+                                self.fight["mr:" + kind] += 1
                         else:
                             self.fight["mid_diff"] += 1
                             if len(self.diffs) < 3:
@@ -373,6 +470,8 @@ class RsFighter:
                     self.cont = rm
                     hand = st.get("hand") or []
                     i = rec["action"].get("hand_idx")
+                    if self.amap is not None and i is not None and 0 <= i < len(self.amap[0]):
+                        i = self.amap[0][i]
                     self.cont_move = (rec["action"].get("action"),
                                       hand[i].get("id") if i is not None and 0 <= i < len(hand) else None)
             return act
@@ -384,21 +483,29 @@ class RsFighter:
         kind = a.get("action")
         if kind == "end_turn":
             return ("end_turn", {})
+        tgt = a.get("target_index")
+        if self.amap is not None and tgt is not None:   # a loose-kept host's slot -> the wire's
+            tgt = self.amap[1].get(tgt)
+            if tgt is None:
+                self.stats["loose_bad_target"] += 1
+                return None
         if kind == "play_card":
             hand = st.get("hand") or []
             i = a.get("hand_idx")
+            if self.amap is not None and i is not None:
+                i = self.amap[0][i] if 0 <= i < len(self.amap[0]) else None
             if i is None or not 0 <= i < len(hand):
                 self.stats["bad_hand_idx"] += 1
                 return None
             args = {"card_index": hand[i].get("index", i)}
-            if a.get("target_index") is not None:
-                args["target_index"] = a["target_index"]
+            if tgt is not None:
+                args["target_index"] = tgt
             return ("play_card", args)
         if kind == "drink_potion":
             slot = a.get("potion_slot")
             args = {"potion_index": slot}
-            if a.get("target_index") is not None:
-                args["target_index"] = a["target_index"]
+            if tgt is not None:
+                args["target_index"] = tgt
             else:
                 # sts2-rs drinks every potion untargeted and aims an AnyEnemy one at the first
                 # living enemy (as the original Sts2Headless did); our engine wants the target

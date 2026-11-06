@@ -469,7 +469,7 @@ def main():
     ap.add_argument("--seed-prefix", default="bot")
     ap.add_argument("--seed-start", type=int, default=0, help="run seeds prefix_start .. prefix_(n-1) (split work across machines)")
     ap.add_argument("--replicas", type=int, default=1,
-                    help="each game seed is played this many times: run i is prefix_(i // R)~(i % R) (self-play with a "
+                    help="each game seed is played this many times: run i is prefix_(i // R)~(i %% R) (self-play with a "
                          "leave-one-out baseline, upolicy --baseline loo / loo_value); keep chunks a multiple of R")
     ap.add_argument("--model", default=None, help="value model (models/value.pkl); default: hand-written evaluation")
     ap.add_argument("--rollouts", default=None, help='JSON rollout config, e.g. {"k":4,"m":3,"turns":2}')
@@ -535,6 +535,9 @@ def main():
     ap.add_argument("--rs-relic-mod", action="store_true",
                     help="--rs-fight: keep the host when a cycling relic's counter (Nunchaku, Ornamental Fan, ...) differs "
                          "from the wire's only by its period (rsfight.RELIC_PERIOD)")
+    ap.add_argument("--rs-loose-board", action="store_true",
+                    help="--rs-fight: also keep the host when its board differs from the wire's only in representation "
+                         "(power order, dead enemies, hand order: rsfight.loose_map); its actions are mapped by card / slot identity")
     ap.add_argument("--rs-carry", action="store_true",
                     help="with --rs-fight: a host rebuilt from the wire takes the hidden state the wire lacks (enemy move "
                          "machines, relic latches, turn tallies) from the last host (CombatState.transplant_hidden)")
@@ -601,7 +604,7 @@ def main():
         RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse, "keep_host": args.rs_keep_host,
                             "boss1_pow": args.rs_boss1_pow, "true_view": args.rs_true_view,
                             "dump_wires": args.rs_dump_wires, "carry": args.rs_carry, "blind_rng": args.rs_blind_rng,
-                            "relic_mod": args.rs_relic_mod,
+                            "relic_mod": args.rs_relic_mod, "loose_board": args.rs_loose_board,
                             "carry_rooms": args.rs_carry_rooms.split(",") if args.rs_carry_rooms else None})
     if args.rs:
         import engine
