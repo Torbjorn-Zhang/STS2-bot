@@ -603,15 +603,37 @@ def mc_shadow_diag(net, enc, mc_decs, outcome, decs, items, A, LPP, IW, ADV, G, 
         gc = [gr[q] + gm[q] for q in range(4)]
         c_r, c_c = cos(gr[0] + gr[1], gr[2] + gr[3]), cos(gc[0] + gc[1], gc[2] + gc[3])
         sm = [g for q, g in enumerate(gm) if mc_q[q]]
+        # cross alignment (r22): runs' gradient of one quarter vs the plays' of ANOTHER quarter (disjoint
+        # parents, independent noise). E[g_i . g_j] = mu_i . mu_j for disjoint i, j, so
+        # rho_cross = d_rm / sqrt(d_rr d_mm) estimates cos(true runs' gradient, true plays' gradient):
+        # a play-specific bias that is consistent across halves raises c_with but lowers rho_cross.
+        # (c_real_vs_mc compares the SAME parents: shared states make it positive even at zero signal.)
+        pr = [(i, j) for i in range(4) for j in range(i + 1, 4)]
+        mq = [q for q in range(4) if mc_q[q]]
+        d_rr = float(np.mean([float(torch.dot(gr[i], gr[j])) for i, j in pr]))
+        d_mm = float(np.mean([float(torch.dot(gm[i], gm[j])) for i, j in pr if mc_q[i] and mc_q[j]])) if len(mq) >= 2 else None
+        xs = [(i, j) for i in range(4) for j in mq if i != j]
+        d_rm = float(np.mean([float(torch.dot(gr[i], gm[j])) for i, j in xs])) if xs else None
+        c_x = float(np.mean([cos(gr[i], gm[j]) for i, j in xs])) if xs else None
+        rho = d_rm / np.sqrt(d_rr * d_mm) if d_rm is not None and d_mm is not None and d_rr > 0 and d_mm > 0 else None
         splits.append({"c_real": round(c_r, 4), "c_with": round(c_c, 4),
                        "q_real": round((cos(gr[0], gr[1]) + cos(gr[2], gr[3])) / 2, 4),
                        "q_with": round((cos(gc[0], gc[1]) + cos(gc[2], gc[3])) / 2, 4),
                        # do the plays push the way the runs do? (their whole gradient vs the runs')
-                       "c_real_vs_mc": round(cos(sum(gr), sum(sm)), 4) if sm else None})
+                       "c_real_vs_mc": round(cos(sum(gr), sum(sm)), 4) if sm else None,
+                       "c_cross": round(c_x, 4) if c_x is not None else None,
+                       "rho_cross": round(float(rho), 4) if rho is not None else None,
+                       "d_rr": float(f"{d_rr:.6g}"), "d_mm": float(f"{d_mm:.6g}") if d_mm is not None else None,
+                       "d_rm": float(f"{d_rm:.6g}") if d_rm is not None else None})
     net.zero_grad()
     mean = lambda k: float(np.mean([x[k] for x in splits]))
     out.update({"splits": splits, "c_real": round(mean("c_real"), 4), "c_with": round(mean("c_with"), 4),
                 "ratio_snr": round(snr(mean("c_with")) / snr(mean("c_real")), 3) if mean("c_real") > 0 else None})
+    if splits and all(x["d_mm"] is not None and x["d_rm"] is not None for x in splits):
+        rr, mm, rm = mean("d_rr"), mean("d_mm"), mean("d_rm")
+        out.update({"d_rr": float(f"{rr:.6g}"), "d_mm": float(f"{mm:.6g}"), "d_rm": float(f"{rm:.6g}"),
+                    "c_cross": round(mean("c_cross"), 4),
+                    "rho_cross": round(float(rm / np.sqrt(rr * mm)), 4) if rr > 0 and mm > 0 else None})
     return out
 
 

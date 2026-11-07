@@ -31,7 +31,8 @@ def b3(r):
 
 def rows(d):
     out = subprocess.run(f"cat {d}/*.jsonl | grep '\"k\":\"o\"'", shell=True, capture_output=True, text=True).stdout
-    return [json.loads(l) for l in out.splitlines()]
+    # run.py --mc-record writes each MC play as its own record ("<seed>/mc<j>"): part of its run, not a run
+    return [r for r in map(json.loads, out.splitlines()) if not re.search(r"/mc\d+$", str(r.get("seed")))]
 
 
 def main():
