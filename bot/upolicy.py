@@ -662,8 +662,12 @@ def rl(args):
     from nets import decision_return
     blob = torch.load(os.path.join(HERE, args.init), map_location="cpu", weights_only=False)
     enc = Enc(blob=blob["enc"])
-    decs, outcome = load_records(expand(args.files), keep_mc=True)
-    mc_decs = [d for d in decs if is_mc_key(d[6])]   # run.py --mc-record: diagnostics only (mc_shadow_diag)
+    # NETS_MC_DIAG=1: also load the run.py --mc-record plays, for mc_shadow_diag only (off by default:
+    # on a CPU update it costs ~1.5 epochs on the critical path, so it runs offline; NETS_MC_DIAG_ONLY=1
+    # stops after it, no training and no --out)
+    mc_diag_on = os.environ.get("NETS_MC_DIAG", "0") != "0"
+    decs, outcome = load_records(expand(args.files), keep_mc=mc_diag_on)
+    mc_decs = [d for d in decs if is_mc_key(d[6])]
     decs = [d for d in decs if not is_mc_key(d[6])]
     decs = [d for d in decs if d[6] in outcome and d[5] is not None]
     G = np.array([decision_return(outcome[d[6]], d[1].get("act")) for d in decs], np.float32)
@@ -737,9 +741,11 @@ def rl(args):
           flush=True)
     if os.environ.get("NETS_GRADCOS", "1") != "0":
         print(json.dumps(grad_cosines(net, items, decs, A, LPP, IW, ADV, T, dev, args.batch)), flush=True)
-    if mc_decs and os.environ.get("NETS_MC_DIAG", "1") != "0":
+    if mc_decs and mc_diag_on:
         print(json.dumps({"mc_diag": mc_shadow_diag(net, enc, mc_decs, outcome, decs, items, A, LPP, IW, ADV, G, acts,
                                                     base_, args.baseline, adv_mu, adv_sd, T, dev, args)}), flush=True)
+    if os.environ.get("NETS_MC_DIAG_ONLY", "0") != "0":
+        return
     order = list(range(len(decs)))
     for ep in range(args.epochs):
         random.Random(ep).shuffle(order)
