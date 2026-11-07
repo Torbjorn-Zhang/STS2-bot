@@ -589,7 +589,9 @@ class RsFighter:
         """Play until the combat ends (TurnPlanner.play_combat's contract); decisions the agent
         cannot take go to fallback.plan(state)'s first action (or end_turn / skip)."""
         n = 0
-        self.agent = self.cont = self.prev = None   # a fight's own agent and host (reuse, carry)
+        # a fight's own agent and host (reuse, carry); host: the last fight's must not answer this
+        # fight's opening prompt (Toasty Mittens / Gambling Chip / Toolbox) -> prompt_no_host, not prompt_host_not_prompt
+        self.agent = self.cont = self.prev = self.host = None
         self.fight, self.diffs, self.cont_move, self.wire0, self.tdiffs = Counter(), [], None, None, []
         if self.blind_rng:
             self.blind_seed = self.blind_rs.getrandbits(63)
@@ -623,5 +625,5 @@ class RsFighter:
             for k, v in self.agent.tree_reuse_stats().items():
                 if isinstance(v, int) and k not in ("reused", "retained_visits"):
                     self.stats["tr_" + k] += v
-        self.agent = self.cont = self.prev = None
+        self.agent = self.cont = self.prev = self.host = None
         return state
