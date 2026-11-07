@@ -68,10 +68,23 @@ def _piles(rm):
 
 def _piles_any(rm):
     """_piles that also keeps the deck's non-card lists (_piles raises on them, so same_board says
-    "differs" there; left as it is, the diagnostic must not)."""
+    "differs" there; left as it is, the diagnostic must not). pinned_top / pinned_bottom (the draw
+    cards whose place is known, e.g. after Headbutt) are indices into this host's draw_pile list,
+    whose order is the host's own: compare the pinned cards themselves, in pin order."""
     d = sts2_rs.state_to_dict(rm.combat_state()).get("deck") or {}
-    return {k: sorted((c.get("id"), c.get("upgraded")) for c in v) if all(isinstance(c, dict) for c in v) else v
-            for k, v in d.items() if isinstance(v, list)}
+    draw = d.get("draw_pile") or []
+    out = {}
+    for k, v in d.items():
+        if not isinstance(v, list):
+            continue
+        if all(isinstance(c, dict) for c in v):
+            out[k] = sorted((c.get("id"), c.get("upgraded")) for c in v)
+        elif k in ("pinned_top", "pinned_bottom"):
+            out[k] = [(draw[i].get("id"), draw[i].get("upgraded")) if isinstance(i, int) and 0 <= i < len(draw)
+                      else ("?", i) for i in v]
+        else:
+            out[k] = v
+    return out
 
 
 def _diff(a, b, path="", out=None, limit=6):
