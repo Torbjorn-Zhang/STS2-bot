@@ -146,8 +146,10 @@ def act_state(st):
             "potions": [pot_tok(x) for x in p.get("potions") or [] if x], "boss": (ctx.get("boss") or {}).get("id")}
 
 
-def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg=None, stuck_limit=None):
+def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg=None, stuck_limit=None, rec=None):
     """Play on from st with the bot (as play_run, without records) until the run ends.
+    rec: optional record.GameRecorder for the non-combat decisions (run.py --mc-record), the
+    rows play_run writes; recording reads the state only, the play is the same with or without.
     decknets: the deck networks the run itself played with (else the --deck-nets rules).
     boss_dmg: optional dict, gets {act: sum over that act's boss fights of the boss-HP share
     removed (a win = 1)}, as play_run's boss_dmg.
@@ -192,10 +194,13 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg
                     {"d": d, "room": ctx.get("room_type"), "act": ctx.get("act"), "floor": ctx.get("floor"),
                      "purpose": st.get("purpose"), "n": len(st.get("cards") or []), "min": st.get("min_select"),
                      "max": st.get("max_select"), "deck": len(p.get("deck") or [])}, separators=(",", ":")))
-        a = decknets.decide(sim, st)[0] if decknets is not None else None
-        if a is None or json.dumps(a, sort_keys=True) in dead_ends.get(_key(st), ()):
+        a, extra = decknets.decide(sim, st) if decknets is not None else (None, None)
+        fallback = a is None or json.dumps(a, sort_keys=True) in dead_ends.get(_key(st), ())
+        if fallback:
             a = policy.decide(sim, st, avoid=dead_ends.get(_key(st), ()), memo=memo)
-        policy.pop_last_scores()
+        scores = policy.pop_last_scores()
+        if rec is not None:
+            rec.decision(st, legal_actions(st), a, scores if fallback else extra)
         nxt = sim.act(a[0], **a[1])
         steps += 1
         if nxt.get("type") == "error" or _key(nxt) == _key(st):
@@ -208,11 +213,15 @@ def continue_run(sim, st, planner, acts, max_steps=4000, decknets=None, boss_dmg
     return st
 
 
-def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None, rollouts=None, decknets=None):
+def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None, rollouts=None, decknets=None,
+                new_rec=None, recs=None):
     """MC_K plays of the rest of the run from the save at act MC_ACT's first map node.
     decknets: the run's own deck networks (reseeded per play), so the plays estimate the
     policy being trained. Returns (sim, {"win": [...], "prog": [...], ...}); the engine may
-    be recycled or replaced."""
+    be recycled or replaced.
+    new_rec(j) -> record.GameRecorder (run.py --mc-record): play j's decisions are recorded as a
+    run of its own (seed "<seed>/mc<j>", outcome row with mc_of); the finished plays'
+    (recorder, result) pairs go to `recs` for the caller to write after the run's own record."""
     import zlib
     out = {"act": MC_ACT, "k": MC_K, "win": [], "prog": [], "bdmg": [], "secs": [], "err": 0}
     for j in range(MC_K):
@@ -231,7 +240,8 @@ def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None,
             if decknets is not None:
                 decknets.rng, decknets.visits = random.Random(f"{seed}/mc{MC_ACT}/{j}"), {}
             bd = {}
-            end = continue_run(sim, st, planner, acts, decknets=decknets, boss_dmg=bd, stuck_limit=50)
+            jrec = new_rec(j) if new_rec is not None else None
+            end = continue_run(sim, st, planner, acts, decknets=decknets, boss_dmg=bd, stuck_limit=50, rec=jrec)
         except Exception as e:
             out["err"] += 1
             out.setdefault("errors", []).append(f"{type(e).__name__}: {e}"[:200])
@@ -247,6 +257,15 @@ def mc_rollouts(sim, path, seed, acts, max_nodes, model=None, value_weight=None,
         out["prog"].append(53 if win else ((ctx.get("act") or 1) - 1) * 17 + (ctx.get("floor") or 0))
         out["bdmg"].append(round(sum(v for a, v in bd.items() if a >= MC_ACT), 3))   # this act's bosses on (a win = 1 each)
         out["secs"].append(round(time.perf_counter() - t0, 1))
+        if jrec is not None and recs is not None:
+            p = end.get("player") or {}
+            recs.append((jrec, {
+                "cleared_acts": 3 if win else (ctx.get("act") or 1) - 1, "victory": win,
+                "died": end.get("decision") == "game_over" and not win, "act": ctx.get("act"), "floor": ctx.get("floor"),
+                "room": ctx.get("room_type"), "hp": p.get("hp"), "max_hp": p.get("max_hp"),
+                # as play_run's: the acts before MC_ACT's bosses were beaten (1 each)
+                "boss_dmg": round(MC_ACT - 1 + sum(v for a, v in bd.items() if a >= MC_ACT), 3),
+                "error": end.get("message") if end.get("type") == "error" else None, "stuck": False}))
     return sim, out
 
 
@@ -572,6 +591,9 @@ def main():
     ap.add_argument("--mc-rebase", action="store_true",
                     help="--mc-k: determinize_run rebuilds the run's streams from a new run seed (engine Fix14+), so "
                          "sts2-rs's host mirrors the MC plays' dice as a real run's (MC plays lost ~2 pp without it)")
+    ap.add_argument("--mc-record", action="store_true",
+                    help="--mc-k with --record: record each MC play's decisions as a run of its own (seed "
+                         "\"<seed>/mc<j>\", outcome row mc_of); trainers skip them unless asked (upolicy NETS_MC_DIAG)")
     ap.add_argument("--mc-dir", default=None, help="--mc-k: where the act-start saves go (default runs/mcsaves/<tag>)")
     ap.add_argument("--boss-beta", type=float, default=0.0, help="weight of the boss-win logit gain on card rewards")
     ap.add_argument("--map-elite-bias", type=float, default=0.0, help="map network: logit added to elite rooms")
@@ -812,9 +834,17 @@ def main():
                         if REPRO and stop_state and r.get("mc_save") and not r.get("error"):
                             r["repro"] = repro(sim, stop_state, r["mc_save"], s, args.acts, args.nodes, model, args.value_weight,
                                                json.loads(args.rollouts) if args.rollouts else None, decknets=dn)
+                        mc_recs, new_rec = [], None
+                        if rec and args.mc_record:
+                            from record import GameRecorder
+
+                            def new_rec(j, s=s):
+                                return GameRecorder(args.record, rec_lock, f"{s}/mc{j}",
+                                                    {"tag": args.tag, "asc": args.ascension, "mc_of": s, "mc_j": j})
                         if MC_K and r.get("mc_save") and not r.get("error"):
                             sim, r["mc"] = mc_rollouts(sim, r["mc_save"], s, args.acts, args.nodes, model, args.value_weight,
-                                                       json.loads(args.rollouts) if args.rollouts else None, decknets=dn)
+                                                       json.loads(args.rollouts) if args.rollouts else None, decknets=dn,
+                                                       new_rec=new_rec, recs=mc_recs)
                             if args.mc_drop_saves:
                                 try:
                                     os.remove(r["mc_save"])
@@ -822,6 +852,8 @@ def main():
                                     pass
                         if rec and MC_K and r.get("mc_save"):
                             rec.finish(r)
+                            for jrec, jres in mc_recs:   # after the run's own record: a retried run writes neither
+                                jrec.finish(jres)
                         if attempt:
                             r["retried"] = attempt
                         break

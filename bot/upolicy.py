@@ -328,13 +328,23 @@ def load_net(blob):
     return net, list(blob.get("kinds") or BASE_KINDS)
 
 
-def load_records(files):
+MC_SEED = re.compile(r"/mc\d+$")   # run.py --mc-record: an MC play's records (seed "<seed>/mc<j>")
+
+
+def is_mc_key(key):
+    return MC_SEED.search(str(key)) is not None
+
+
+def load_records(files, keep_mc=False):
     """-> decisions [(dec, s, opts, chosen, route, behavior lp, run key, teacher probs or None)],
-    outcomes {run key: row}."""
+    outcomes {run key: row}. keep_mc: also the run.py --mc-record plays' records (skipped by
+    default: an MC play is part of its run, not a run of its own)."""
     decs, outcome = [], {}
     for f in files:
         for l in (gzip.open(f, "rt") if f.endswith(".gz") else open(f)):
             r = json.loads(l)
+            if not keep_mc and is_mc_key(r.get("seed")):
+                continue
             key = f"{os.path.basename(f)}/{r.get('seed')}"
             if r.get("k") == "o":
                 outcome[key] = r
@@ -492,6 +502,119 @@ def grad_cosines(net, items, decs, A, LPP, IW, ADV, T, dev, batch):
     return out
 
 
+def mc_shadow_diag(net, enc, mc_decs, outcome, decs, items, A, LPP, IW, ADV, G, acts, base_, baseline, adv_mu, adv_sd,
+                   T, dev, args):
+    """run.py --mc-record's MC plays (K plays from each run's act-3 start, recorded as runs "<key>/mc<j>"),
+    measured but not trained on (shadow mode): their act-3 decisions get the advantage they would get
+    (their own return, lambda-returns, the real runs' baseline and normalisation) and the act-3
+    policy gradient's split-half cosine is compared with and without them. The halves split the
+    real runs, each run's MC plays going with it (they share its act-3 start: split apart, they would
+    inflate the cosine). Under pure sampling noise c/(1-c) grows with the effective sample, so
+    ratio_snr = (c/(1-c) with) / (c/(1-c) without) is the plays' variance gain (K + 1 at most, less by
+    the plays' correlation with their run). Also: behaviour log-prob gaps (are the plays' records
+    this network's own, as the runs'), mean advantage by source (a bias, e.g. the non-rebased plays'
+    ~2 pp, shows as an offset), and the plays' win rate against their runs'."""
+    from nets import decision_return
+    parent = lambda key: MC_SEED.sub("", key)
+    mc = [d for d in mc_decs if d[6] in outcome and d[5] is not None and parent(d[6]) in outcome]
+    out = {"mc_runs": len({d[6] for d in mc}), "mc_decisions": len(mc)}
+    if len(mc) < int(os.environ.get("NETS_MC_DIAG_MIN", "100")):
+        return out
+    Gm = np.array([decision_return(outcome[d[6]], d[1].get("act")) for d in mc], np.float32)
+    items_m = [enc.encode(d[0], d[1], d[2], d[4]) for d in mc]
+    Am = torch.tensor([d[3] for d in mc], device=dev)
+    with torch.no_grad():
+        bv, lpp = [], []
+        for i in range(0, len(mc), 512):
+            z, v = net(collate(items_m[i:i + 512], dev), with_value=True)
+            bv.append(100.0 * v.cpu().numpy())
+            lpp.append(torch.log_softmax(z / T, -1).gather(1, Am[i:i + 512][:, None]).squeeze(1))
+        bvm = np.concatenate(bv).astype(np.float32)
+        LPPm = torch.cat(lpp)
+    Glm = Gm.copy()
+    if args.gae_lambda < 1.0:   # as rl(): each play's decisions in play order
+        lam, idx = args.gae_lambda, defaultdict(list)
+        for i, d in enumerate(mc):
+            idx[d[6]].append(i)
+        for run in idx.values():
+            S, w = 0.0, 1.0
+            for i in reversed(run):
+                Glm[i] = S + w * Gm[i]
+                S, w = (1 - lam) * bvm[i] + lam * S, lam * w
+    bb = np.array([base_.get((d[1].get("asc"), d[1].get("act"), d[1].get("floor")), bvm[i]) for i, d in enumerate(mc)], np.float32)
+    bm = {"bucket": bb, "mix": 0.5 * (bb + bvm)}.get(baseline, bvm)   # loo: no replicas among the plays, its value fallback
+    advm = (Glm - bm - adv_mu) / adv_sd
+    LP0m = torch.tensor([d[5] for d in mc], dtype=torch.float32, device=dev)
+    IWm = torch.exp(LPPm - LP0m).clamp(max=args.is_cap)
+    gap = (LPPm - LP0m).abs()
+    ADVm = torch.from_numpy(advm.astype(np.float32)).to(dev)
+    r3 = [i for i in range(len(decs)) if acts[i] == 3]
+    par = {d[6] for d in mc}
+    par = {parent(k) for k in par}
+    r3p = [i for i in r3 if decs[i][6] in par]   # act-3 decisions of runs that have plays
+    adv3 = ADV[r3].cpu().numpy() if r3 else np.zeros(1)
+    mcv = [bool(outcome[k].get("victory")) for k in {d[6] for d in mc}]
+    out.update({
+        "lp_gap": round(float(gap.mean()), 4), "stale": round(float((gap > 1e-3).float().mean()), 3),
+        "iw_mean": round(float(IWm.mean()), 4),
+        "adv_mean_real3": round(float(adv3.mean()), 4), "adv_mean_mc": round(float(advm.mean()), 4),
+        "adv_mean_real3_withplays": round(float(ADV[r3p].mean()), 4) if r3p else None,
+        "adv_std_real3": round(float(adv3.std()), 4), "adv_std_mc": round(float(advm.std()), 4),
+        "ret_mean_real3": round(float(G[r3].mean()), 3) if r3 else None, "ret_mean_mc": round(float(Gm.mean()), 3),
+        "win_mc": round(float(np.mean(mcv)), 4),
+        "win_parents": round(float(np.mean([bool(outcome[k].get("victory")) for k in par])), 4),
+        "parents": len(par), "real3_decisions": len(r3), "real3_withplays": len(r3p),
+        "ev_value_mc": round(float(1 - np.var(Glm - bvm) / (np.var(Glm) + 1e-9)), 3)})
+
+    # the act-3 gradient, real runs alone vs with their plays (weight 1 each)
+    items_c = [items[i] for i in r3] + items_m
+    Ac = torch.cat([A[r3], Am])
+    LPPc, IWc, ADVc = torch.cat([LPP[r3], LPPm]), torch.cat([IW[r3], IWm]), torch.cat([ADV[r3], ADVm])
+    key_c = [decs[i][6] for i in r3] + [parent(d[6]) for d in mc]
+    n_real = len(r3)
+
+    def grad(idx):   # the summed PPO-at-ratio-1 gradient over idx (as grad_cosines)
+        net.zero_grad()
+        if not idx:
+            return torch.cat([torch.zeros_like(q).flatten() for q in net.parameters()])
+        for i in range(0, len(idx), args.batch):
+            b = idx[i:i + args.batch]
+            z = net(collate([items_c[j] for j in b], dev))
+            lp = torch.log_softmax(z / T, -1).gather(1, Ac[b][:, None]).squeeze(1)
+            (-(IWc[b] * torch.exp(lp - LPPc[b]) * ADVc[b]).sum()).backward()
+        return torch.cat([(q.grad if q.grad is not None else torch.zeros_like(q)).flatten() for q in net.parameters()]).clone()
+
+    cos = lambda a, b: float(torch.dot(a, b) / (a.norm() * b.norm() + 1e-12))
+    snr = lambda c: c / max(1e-6, 1 - c)
+    splits = []
+    keys = sorted(set(key_c))
+    for s_ in range(int(os.environ.get("NETS_MC_DIAG_SPLITS", "2"))):
+        rng = random.Random(100 + s_)
+        ks = keys[:]
+        rng.shuffle(ks)
+        h = len(ks) // 2
+        cut = [0, h // 2, h, h + (len(ks) - h) // 2, len(ks)]
+        where = {k: q for q in range(4) for k in ks[cut[q]:cut[q + 1]]}
+        real_q, mc_q = [[] for _ in range(4)], [[] for _ in range(4)]
+        for j, k in enumerate(key_c):
+            (real_q if j < n_real else mc_q)[where[k]].append(j)
+        gr = [grad(ix) for ix in real_q]
+        gm = [grad(ix) for ix in mc_q]
+        gc = [gr[q] + gm[q] for q in range(4)]
+        c_r, c_c = cos(gr[0] + gr[1], gr[2] + gr[3]), cos(gc[0] + gc[1], gc[2] + gc[3])
+        sm = [g for q, g in enumerate(gm) if mc_q[q]]
+        splits.append({"c_real": round(c_r, 4), "c_with": round(c_c, 4),
+                       "q_real": round((cos(gr[0], gr[1]) + cos(gr[2], gr[3])) / 2, 4),
+                       "q_with": round((cos(gc[0], gc[1]) + cos(gc[2], gc[3])) / 2, 4),
+                       # do the plays push the way the runs do? (their whole gradient vs the runs')
+                       "c_real_vs_mc": round(cos(sum(gr), sum(sm)), 4) if sm else None})
+    net.zero_grad()
+    mean = lambda k: float(np.mean([x[k] for x in splits]))
+    out.update({"splits": splits, "c_real": round(mean("c_real"), 4), "c_with": round(mean("c_with"), 4),
+                "ratio_snr": round(snr(mean("c_with")) / snr(mean("c_real")), 3) if mean("c_real") > 0 else None})
+    return out
+
+
 def loo_baseline(decs, Gl, b_value, b_fallback, kind):
     """Leave-one-out baseline over replicas of one game (run.py --replicas: seeds "<game>~<r>"): a
     decision taken in act a is measured against the other replicas' decisions in act a, which share
@@ -539,7 +662,9 @@ def rl(args):
     from nets import decision_return
     blob = torch.load(os.path.join(HERE, args.init), map_location="cpu", weights_only=False)
     enc = Enc(blob=blob["enc"])
-    decs, outcome = load_records(expand(args.files))
+    decs, outcome = load_records(expand(args.files), keep_mc=True)
+    mc_decs = [d for d in decs if is_mc_key(d[6])]   # run.py --mc-record: diagnostics only (mc_shadow_diag)
+    decs = [d for d in decs if not is_mc_key(d[6])]
     decs = [d for d in decs if d[6] in outcome and d[5] is not None]
     G = np.array([decision_return(outcome[d[6]], d[1].get("act")) for d in decs], np.float32)
     by = defaultdict(list)
@@ -597,7 +722,8 @@ def rl(args):
                           **{f"ev_loo_act{a}": ev(b_loo, acts == a) for a in (1, 2, 3) if (acts == a).sum() > 10}}), flush=True)
     adv = Gl - (b_loo if args.baseline in ("loo", "loo_value") else
                 {"bucket": b_bucket, "value": b_value, "mix": 0.5 * (b_bucket + b_value)}[args.baseline])
-    adv = (adv - adv.mean()) / (adv.std() + 1e-6)
+    adv_mu, adv_sd = adv.mean(), adv.std() + 1e-6
+    adv = (adv - adv_mu) / adv_sd
     LP0 = torch.tensor([d[5] for d in decs], dtype=torch.float32, device=dev)
     ADV = torch.from_numpy(adv).to(dev)
     R = torch.from_numpy(G / 100.0).to(dev)
@@ -611,6 +737,9 @@ def rl(args):
           flush=True)
     if os.environ.get("NETS_GRADCOS", "1") != "0":
         print(json.dumps(grad_cosines(net, items, decs, A, LPP, IW, ADV, T, dev, args.batch)), flush=True)
+    if mc_decs and os.environ.get("NETS_MC_DIAG", "1") != "0":
+        print(json.dumps({"mc_diag": mc_shadow_diag(net, enc, mc_decs, outcome, decs, items, A, LPP, IW, ADV, G, acts,
+                                                    base_, args.baseline, adv_mu, adv_sd, T, dev, args)}), flush=True)
     order = list(range(len(decs)))
     for ep in range(args.epochs):
         random.Random(ep).shuffle(order)

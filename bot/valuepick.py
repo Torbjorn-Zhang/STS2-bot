@@ -11,6 +11,7 @@ the head fits), and whether runs whose pick the value rated well below its best 
 import argparse
 import copy
 import json
+import re
 import os
 import sys
 from collections import Counter, defaultdict
@@ -37,6 +38,8 @@ def main():
     for f in expand(args.files):
         for line in open(f):
             r = json.loads(line)
+            if re.search(r"/mc\d+$", str(r.get("seed"))):   # run.py --mc-record: an MC play, part of its run
+                continue
             key = f"{os.path.basename(f)}/{r.get('seed')}"
             if r.get("k") == "o":
                 outcome[key] = r

@@ -13,6 +13,7 @@ then compare the states each option leads to.
 import argparse
 import glob
 import json
+import re
 import math
 import os
 import random
@@ -75,6 +76,8 @@ def load(files):
     for f in files:
         for l in open(f):
             r = json.loads(l)
+            if re.search(r"/mc\d+$", str(r.get("seed"))):   # run.py --mc-record: an MC play, part of its run
+                continue
             key = f"{os.path.basename(f)}/{r.get('seed')}"
             if r.get("k") == "o":
                 outcomes[key] = r

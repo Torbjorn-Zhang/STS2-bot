@@ -25,6 +25,7 @@ about options only if c < 0 at >= 2 SE (bootstrap over runs: a run's decisions s
 
 import argparse
 import json
+import re
 import math
 import os
 import random
@@ -48,6 +49,8 @@ def read_runs(files, per_run, rng):
         runs, won = defaultdict(list), {}
         for line in open(f):
             r = json.loads(line)
+            if re.search(r"/mc\d+$", str(r.get("seed"))):   # run.py --mc-record: an MC play, part of its run
+                continue
             key = f"{os.path.basename(f)}/{r.get('seed')}"
             if r.get("k") == "o":
                 won[key] = bool(r.get("victory"))
@@ -204,6 +207,8 @@ def card_cases(net, enc, files, win):
     for f in files:
         for line in open(f):
             r = json.loads(line)
+            if re.search(r"/mc\d+$", str(r.get("seed"))):   # run.py --mc-record: an MC play, part of its run
+                continue
             key = f"{os.path.basename(f)}/{r.get('seed')}"
             if r.get("k") == "o":
                 won[key] = bool(r.get("victory"))

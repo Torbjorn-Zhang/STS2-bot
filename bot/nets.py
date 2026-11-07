@@ -11,6 +11,7 @@
 
 import argparse
 import json
+import re
 import os
 import random
 import sys
@@ -45,6 +46,8 @@ def load_runs(paths):
                 try:
                     r = json.loads(line)
                 except ValueError:
+                    continue
+                if re.search(r"/mc\d+$", str(r.get("seed"))):   # run.py --mc-record: an MC play, part of its run
                     continue
                 runs[(path, r["seed"])].append(r)
     return {k: v for k, v in runs.items() if v and v[-1]["k"] == "o" and not v[-1].get("error")}

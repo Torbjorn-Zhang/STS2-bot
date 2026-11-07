@@ -15,6 +15,7 @@ weigh more: offline policy improvement from all past play (AlphaGo's SL stage, w
 import argparse
 import glob
 import json
+import re
 import math
 import os
 import random
@@ -139,6 +140,8 @@ def load_decisions(files):
     for f in files:
         for l in open(f):
             r = json.loads(l)
+            if re.search(r"/mc\d+$", str(r.get("seed"))):   # run.py --mc-record: an MC play, part of its run
+                continue
             key = f"{os.path.basename(f)}/{r.get('seed')}"
             if r.get("k") == "o":
                 outcome[key] = r
