@@ -1670,6 +1670,7 @@ class Fleet:
             allow = int((r["ncpu"] - others) * h.get("share", 0.5)) // per
             h["slots_now"] = max(0, min(h["slots"], int((r["ncpu"] - peak) * h.get("share", 0.5)) // per))
             h["others_load"] = round(others, 1)
+            h["ncpu"], h["others_peak"] = r["ncpu"], round(peak, 1)
             extra = sum(j.get("w", 1) for j in self.running_on(h)) - max(0, min(h["slots"], allow))
             if extra > 1:   # one slot of slack against load-average jitter
                 stop, freed = [], 0
@@ -1793,12 +1794,20 @@ class Fleet:
                 return None, False
         cand = [h for h in hosts if self.free_slots(h) > 0]
         if job["kind"] == "train":
-            # never an Apollo pod: CPU updates there vanished within a minute 8 times (11-05/06)
-            cand = [h for h in cand if not h.get("runai")]
+            # never an Apollo pod: CPU updates there vanished within a minute 8 times (11-05/06).
+            # r22: any host with an allowance, free slots or not (schedule() stops self-play chunks
+            # there after TRAIN_PREEMPT_AFTER), so a busy-but-calm host beats a free stormy one
+            cand = [h for h in hosts if not h.get("runai") and self.cap(h) > 0]
         if job["kind"] == "train" and cand:
-            # a CPU update: the host that can give it the most of its TRAIN_SLOTS, then the biggest
+            # a CPU update (r22): not where other users' threads peaked above half the machine in
+            # the last 10 min (up949_train was stopped twice on lab0 by the share guard, 59 then 77
+            # of 80 threads taken, and ran on lab1 at 4 threads while lab2/lab3 sat idle, 11-07);
+            # then the biggest allowance
+            calm = [h for h in cand if not h.get("ncpu") or h.get("others_peak", 0) <= 0.5 * h["ncpu"]]
+            cand = calm or cand
             need = lambda h: min(TRAIN_SLOTS, self.cap(h))
-            return max(cand, key=lambda h: (min(self.free_slots(h), need(h)) / need(h), self.cap(h), -h.get("order", 9))), False
+            return max(cand, key=lambda h: (need(h), min(self.free_slots(h), need(h)) / need(h),
+                                            -h.get("others_peak", 0) / max(1, h.get("ncpu", 1)), -h.get("order", 9))), False
         if job.get("slots") and job["kind"] != "train":
             # a multi-slot task waits (30 min at most) for a host with all its slots free, which
             # comes between two self-play iterations; launched on one free slot it gets 2 threads
@@ -1833,6 +1842,19 @@ class Fleet:
                         log(f"{g['name']}: stopped {', '.join(v['id'] for v in vic)} for {j['id']} "
                             f"(queued {round(time.time() - j['queued_since'])} s)")
                         h, gpu = self.pick(j, [x for x in hosts if x["name"] not in held])
+            if j["kind"] == "train" and not gpu and h is not None and time.time() - j["queued_since"] >= TRAIN_PREEMPT_AFTER:
+                # a CPU update (r22): free its TRAIN_SLOTS by stopping that host's lowest-priority,
+                # newest one-slot jobs (chunks are requeued; minutes of work vs ~1.5 h of update time)
+                n = min(TRAIN_SLOTS, self.cap(h)) - self.free_slots(h)
+                vic = sorted([x for x in self.running_on(h) if x["kind"] != "train" and not x.get("only") and x.get("w", 1) == 1],
+                             key=lambda x: (-x["prio"], -x.get("t_start", 0)))[:max(0, n)]
+                for v in vic:
+                    self.kill_job(h["name"], v["id"])
+                    if not self.drop_copy(v, h["name"]):
+                        v["state"], v["host"] = "queued", None
+                if vic:
+                    log(f"{h['name']}: stopped {', '.join(v['id'] for v in vic)} for {j['id']} on CPU "
+                        f"(queued {round(time.time() - j['queued_since'])} s)")
             if j["kind"] == "train" and time.time() - j["queued_since"] < TRAIN_WAIT:
                 # with the next self-play already queued, a slot freed here would go to it at once:
                 # hold the update's host (its GPU machine while that is busy) until it has the slots
