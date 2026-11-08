@@ -1519,7 +1519,12 @@ class Fleet:
             # Pods: 1/2", apollo 11-03, apollo2 11-04): the phase stays Running, but runai exec without
             # --pod reaches the first, terminated one, so the host never answers. Same cure as Failed
             second = re.search(r"Running Pods:\s+\d+/([2-9])", out)
-            if m and m.group(1) != "Failed" and not second:
+            # the project's 7-day running limit stops a workload ("Phase: Stopped", event
+            # WorkloadTimeoutReached; apollo3 11-08 17:05, its keeper's 160 h still 2.5 days away: the
+            # limit's clock does not restart with every new pod). Same cure as Failed; a workload
+            # stopped by hand has no such event and stays stopped
+            timeout = bool(m) and m.group(1) == "Stopped" and "WorkloadTimeoutReached" in out
+            if m and m.group(1) != "Failed" and not second and not timeout:
                 return
             if not m and "not found" not in out.lower():
                 log(f"{h['name']}: runai describe: {out.strip()[:120]}")   # e.g. the login expired
@@ -1535,7 +1540,7 @@ class Fleet:
             res = subprocess.run([RUNAI, "training", "submit", r["workload"], "-p", r["project"]] + r["submit"],
                                  capture_output=True, text=True, timeout=120, errors="replace")
             h["revives"].append(now)
-            log(f"{h['name']}: workload {'failed' if m else 'gone'}; submitted again "
+            log(f"{h['name']}: workload {'timed out' if timeout else 'failed' if m else 'gone'}; submitted again "
                 f"(rc {res.returncode}: {(res.stdout + res.stderr).strip()[-120:]})")
         except Exception as e:
             log(f"{h['name']}: revive failed: {str(e)[:120]}")
