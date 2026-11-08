@@ -1536,7 +1536,12 @@ class Fleet:
             if m:
                 subprocess.run([RUNAI, "training", "delete", r["workload"], "-p", r["project"]],
                                capture_output=True, timeout=120)
-                time.sleep(5)
+                for _ in range(12):   # a Stopped workload took > 5 s to go (apollo3 11-08: "already exists")
+                    time.sleep(5)
+                    d = subprocess.run([RUNAI, "training", "describe", r["workload"], "-p", r["project"]],
+                                       capture_output=True, text=True, timeout=60, errors="replace")
+                    if "not found" in (d.stdout + d.stderr).lower():
+                        break
             res = subprocess.run([RUNAI, "training", "submit", r["workload"], "-p", r["project"]] + r["submit"],
                                  capture_output=True, text=True, timeout=120, errors="replace")
             h["revives"].append(now)
