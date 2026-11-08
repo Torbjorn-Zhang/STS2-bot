@@ -1816,12 +1816,14 @@ class Fleet:
             # a CPU update (r22): not where other users' threads peaked above half the machine in
             # the last 10 min (up949_train was stopped twice on lab0 by the share guard, 59 then 77
             # of 80 threads taken, and ran on lab1 at 4 threads while lab2/lab3 sat idle, 11-07);
-            # then the biggest allowance
+            # then the biggest allowance, then the calmest host before the freest (r28: up964_train went to
+            # lab3 for its free slots, others rose to 13/32 within 19 s and the share guard stopped it; lab2
+            # had 3.6/32. Its chunks are stopped after TRAIN_PREEMPT_AFTER anyway)
             calm = [h for h in cand if not h.get("ncpu") or h.get("others_peak", 0) <= 0.5 * h["ncpu"]]
             cand = calm or cand
             need = lambda h: min(TRAIN_SLOTS, self.cap(h))
-            return max(cand, key=lambda h: (need(h), min(self.free_slots(h), need(h)) / need(h),
-                                            -h.get("others_peak", 0) / max(1, h.get("ncpu", 1)), -h.get("order", 9))), False
+            return max(cand, key=lambda h: (need(h), -h.get("others_peak", 0) / max(1, h.get("ncpu", 1)),
+                                            min(self.free_slots(h), need(h)) / need(h), -h.get("order", 9))), False
         if job.get("slots") and job["kind"] != "train":
             # a multi-slot task waits (30 min at most) for a host with all its slots free, which
             # comes between two self-play iterations; launched on one free slot it gets 2 threads
