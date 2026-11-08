@@ -64,8 +64,9 @@ BACKUP_AFTER = 120   # a job running this long while the queue is empty gets a b
 # a third of each iteration (750 s on lab0); without "overlap" the pipeline's self-play waits for it.
 # 12 (11-08, r26): with lab0's GPUs taken by others the up9 update ran on 6 slots (12 threads) for
 # ~5250 s and the fleet idled ~20 min per iteration waiting for it; a GPU update is ~560 s, so the
-# CPU time is the threaded torch work. Revert to 6 if the next CPU update is not <= 4200 s
-TRAIN_SLOTS = 12
+# CPU time is the threaded torch work. Back to 6 (11-08 20:52): on 12 slots up961_train took 4791 s on
+# lab0 vs 4957/5250 s on 6, so the update barely scales with threads, and 12 slots evicted running jobs
+TRAIN_SLOTS = 6
 # an update on a GPU host: the card does the work, so it takes 1 slot (2 threads for data loading)
 # instead of waiting for 6 to free on a busy lab0 (6-17 min waits for a 3-4 min update, 11-06). Not
 # 2: at 2 the share guard stopped up920_train 22 s in when others' load jumped to 76 of 80 threads
