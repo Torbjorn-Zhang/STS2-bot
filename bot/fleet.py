@@ -76,6 +76,10 @@ GPU_TRAIN_SLOTS = 1
 # newest jobs to free the slots: lab0 filled with fresh 40-min chunks just before up913_train was
 # queued, so it fell back to 1 slot on lab3's CPU and took 66 min instead of 3.5 (11-06)
 TRAIN_PREEMPT_AFTER = 120
+# r31: a GPU-placed update that finds no idle card at launch exits with this rc and is requeued for
+# the CPU (no try counted); for NO_GPU_CPU_S it is not placed as a GPU job again
+NO_GPU_RC = 75
+NO_GPU_CPU_S = 900
 FETCH_TRIES = 3
 # idle-class jobs (prio above IDLE_PRIO, the pipelines' self-play prio) only fill gaps: RL or eval
 # work queued IDLE_PREEMPT_AFTER with nowhere to go stops the newest of them, one per waiting job
@@ -503,6 +507,12 @@ def job_sh(host, job):
                f'PY={py}',
                f'if [ -n "$G" ] && [ -x {R}/.venv-cu/bin/python ]; then export CUDA_VISIBLE_DEVICES=$G NETS_DEVICE=cuda; PY={R}/.venv-cu/bin/python; fi',
                f'echo "gpu=${{G:-none}}" > fleet/jobs/{jid}.gpu']
+        if job["kind"] == "train":
+            # r31: an update placed as a GPU job has 1 slot (2 threads); on the CPU it would crawl
+            # (up974_train: the card the last poll saw idle was taken by launch, ~3 h at 2 threads
+            # instead of ~55 min at 6 slots). Give it back at once: rc NO_GPU_RC requeues it for the CPU
+            gpu.append(f'if [ -z "$G" ]; then echo "no idle GPU at launch" > fleet/jobs/{jid}.err; '
+                       f': > fleet/jobs/{jid}.out; echo {NO_GPU_RC} > fleet/jobs/{jid}.rc; exit 0; fi')
         py = "$PY"
     lines = ["#!/bin/bash"] + [f"export {k}={shlex.quote(v)}" for k, v in env.items()] + [f"mkdir -p {R}/home", f"cd {R}/bot"] + \
         [f"rm -f {shlex.quote(o)}" for o in job["outputs"]] + gpu + \
@@ -1731,6 +1741,14 @@ class Fleet:
             what = f"failed rc {jr['rc']}" if jr["state"] == "done" else "vanished" if jr["state"] == "lost" else None
             if what is None:
                 continue
+            if jr["state"] == "done" and str(jr["rc"]) == str(NO_GPU_RC) and j["kind"] == "train" and not j.get("backup"):
+                # r31: no idle card at launch (job_sh): requeue for the CPU at once, no try counted
+                j["state"], j["host"], j["gpu_now"] = "queued", None, False
+                j["cpu_until"] = time.time() + NO_GPU_CPU_S
+                j.pop("queued_since", None)
+                h["gpu_idle"] = 0
+                log(f"{h['name']}: {jid} found no idle GPU at launch; requeued for the CPU")
+                continue
             if self.drop_copy(j, h["name"]):
                 log(f"{h['name']}: {jid} {what} here; the other copy goes on")
                 continue
@@ -1796,7 +1814,7 @@ class Fleet:
             hosts = [h for h in hosts if h["name"] == job["only"]]
         if job.get("needs"):   # capabilities set in deploy/fleet.json (e.g. "rs": true)
             hosts = [h for h in hosts if all(h.get(c) for c in job["needs"])]
-        if job["gpu"]:
+        if job["gpu"] and time.time() >= job.get("cpu_until", 0):
             # gpu_idle (Linux polls): cards with no memory in use; with every card taken by other
             # users the job would only run on that host's CPU, so it goes where the CPU is best
             gpu = [h for h in hosts if h.get("gpu") and h.get("gpu_idle", 1) > 0 and self.free_slots(h) > 0
@@ -1842,7 +1860,8 @@ class Fleet:
         for j in sorted([j for j in self.jobs.values() if j["state"] == "queued"], key=lambda j: (j["prio"], j["seq"])):
             j.setdefault("queued_since", time.time())
             h, gpu = self.pick(j, [x for x in hosts if x["name"] not in held])
-            if j["kind"] == "train" and j.get("gpu") and time.time() - j["queued_since"] >= TRAIN_PREEMPT_AFTER:
+            if j["kind"] == "train" and j.get("gpu") and time.time() >= j.get("cpu_until", 0) \
+                    and time.time() - j["queued_since"] >= TRAIN_PREEMPT_AFTER:
                 gpus = sorted([x for x in hosts if x.get("gpu") and x.get("gpu_idle", 1) > 0 and x["name"] not in held],
                               key=lambda x: x.get("gpu_order", x.get("order", 9)))
                 g = gpus[0] if gpus else None
