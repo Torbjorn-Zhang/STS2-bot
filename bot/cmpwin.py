@@ -9,8 +9,10 @@ estimates the seed's win chance with far less variance, but NOT unbiased: MC pla
 act-3 save win less than the real continuation from the same state (up9 it27-31 A10: real - MC
 +1.88 +- 0.34 pp; evals ev6..ev30 -2.7..+4.7, heterogeneous; cause under study, run.py --repro).
 So each arm also prints `gap` = mean over runs with MC of (real win - mean MC win), and every
-pair prints the difference of the arms' gaps. Pre-registered (11-07): when |gap diff| > 2 SE the
-W comparison is not trusted; decide by raw and enlarge the sample (e.g. 1920 seeds). The table
+pair prints the difference of the arms' gaps. The 11-07 rule "|gap diff| > 2 SE -> W untrusted, decide by
+raw" is WITHDRAWN (r34): per run raw - W = k/(1+k) * gap, so the rule just picks raw whenever raw and W
+disagree most. Decide paired verdicts on W under both failed-MC bounds, check only the sign of raw, and
+test arm-dependent MC bias by gap homogeneity across evaluations (scratchpad r34/gaphom.py). The table
 shows W (in %), raw wins, and paired differences with standard errors."""
 import json
 import statistics as S
@@ -79,7 +81,7 @@ for t in tags:
         g0, g1 = gap([base[x] for x in s]), gap([D[t][x] for x in s])
         if len(g0) > 1 and len(g1) > 1:
             gd, gs = S.mean(g1) - S.mean(g0), (se(g0) ** 2 + se(g1) ** 2) ** 0.5
-            line += f" | gap diff {100 * gd:+.2f}±{100 * gs:.2f}" + ("  ** W UNTRUSTED: decide by raw **" if abs(gd) > 2 * gs else "")
+            line += f" | gap diff {100 * gd:+.2f}±{100 * gs:.2f}"
     print(line)
     if t != tags[0] and any((r.get("mc") or {}).get("err") for r in list(base.values()) + rows):
         # r33: the same pair with failed MC plays as losses / as wins; a verdict must hold under both bounds
@@ -91,7 +93,7 @@ for t in tags:
         gtxt = ""
         if len(h0) > 1 and len(h1) > 1:
             gd, gs = S.mean(h1) - S.mean(h0), (se(h0) ** 2 + se(h1) ** 2) ** 0.5
-            gtxt = f" | gap diff (hi) {100 * gd:+.2f}±{100 * gs:.2f}" + ("  ** W UNTRUSTED **" if abs(gd) > 2 * gs else "")
+            gtxt = f" | gap diff (hi) {100 * gd:+.2f}±{100 * gs:.2f}"
         print(f"{'':22s} failed-MC bounds: dW as-loss {b[0]} as-win {b[1]}{gtxt}")
     if mcs and len(rows) > 1:
         v_raw, v_w = S.pvariance(raw), S.pvariance(est)
