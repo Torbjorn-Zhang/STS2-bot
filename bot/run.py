@@ -563,6 +563,9 @@ def main():
     ap.add_argument("--rs-carry-rooms", default=None, help="with --rs-carry: only in these room types, e.g. Boss or Boss,Elite")
     ap.add_argument("--rs-boss1-pow", type=float, default=None,
                     help="with --rs-fight: A10's first act-3 boss values a win at 0.5 + kept HP-and-belt share ^ K")
+    ap.add_argument("--rs-boss1-keep", type=int, default=0,
+                    help="with --rs-fight: A10's first act-3 boss, entered with more than N potions, keeps its N "
+                         "highest-slot potions for the second boss (hidden from the search); 0: off")
     ap.add_argument("--teacher", default=None,
                     help="with --rs and --deck-sample: spire-mentor's PPO run policy (.onnx) makes the deck decisions "
                          "it scores; --record marks them (x.teach, x.tp) for upolicy.py train --teacher-only")
@@ -624,7 +627,7 @@ def main():
         global RS_FIGHT
         RS_FIGHT = tuple(int(x) for x in args.rs_fight.split(","))
         RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse, "keep_host": args.rs_keep_host,
-                            "boss1_pow": args.rs_boss1_pow, "true_view": args.rs_true_view,
+                            "boss1_pow": args.rs_boss1_pow, "boss1_keep": args.rs_boss1_keep, "true_view": args.rs_true_view,
                             "dump_wires": args.rs_dump_wires, "carry": args.rs_carry, "blind_rng": args.rs_blind_rng,
                             "relic_mod": args.rs_relic_mod, "loose_board": args.rs_loose_board,
                             "carry_rooms": args.rs_carry_rooms.split(",") if args.rs_carry_rooms else None})

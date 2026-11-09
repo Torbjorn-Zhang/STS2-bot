@@ -272,7 +272,7 @@ def repr_kinds(a, b):
 class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
                  keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False, carry_rooms=None,
-                 blind_rng=False, relic_mod=False, loose_board=False):
+                 blind_rng=False, relic_mod=False, loose_board=False, boss1_keep=0):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -319,6 +319,10 @@ class RsFighter:
         # HP bar and belt it keeps)^k, as the second boss's win rate climbs steeply with its entry HP
         # (sts2-rs win_carry_pow; the deployed value prices 1 HP at ~1/300 of the win)
         self.boss1_pow = boss1_pow
+        # boss1_keep n: the first boss of A10's double boss, entered with more than n potions, is
+        # searched as if the n highest-slot potions were not on the belt (hidden from the wire every
+        # host is built from), so they reach the second boss. 0: off (every potion visible)
+        self.boss1_keep, self.reserve = int(boss1_keep or 0), None
         self.stats = Counter()
         self.fails = []       # the first failures of the run (kind, detail), for the run record
         self.k = 0            # decisions searched (the agent seed mixes it in)
@@ -387,6 +391,23 @@ class RsFighter:
             if self.stats["carry_fail"] <= 3:
                 self._fail("carry", f"{type(e).__name__}: {str(e)[:200]}")
 
+    def _keep_potions(self, wire):
+        """boss1_keep: the wire without the reserved potions. The reserve (slot index and potion id of
+        the boss1_keep highest-slot potions) is fixed at the fight's first decision, when the belt holds
+        more than boss1_keep potions, and kept for the whole fight; every host (kept or fresh) is built
+        from the wire with them removed, so same_board / loose_map still match."""
+        player = wire.get("player") or {}
+        pots = [p for p in player.get("potions") or [] if p]
+        if self.reserve is None:
+            top = sorted(pots, key=lambda p: p.get("index", -1))[-self.boss1_keep:] if len(pots) > self.boss1_keep else []
+            self.reserve = {(p.get("index"), p.get("entry")) for p in top}
+            if self.reserve:
+                self.stats["boss1_keep"] += 1
+        if not self.reserve:
+            return wire
+        kept = [p for p in player.get("potions") or [] if not (p and (p.get("index"), p.get("entry")) in self.reserve)]
+        return {**wire, "player": {**player, "potions": kept}}
+
     def _host(self, st, wire, carried=None):
         ctx = st.get("context") or {}
         asc = int(ctx.get("ascension") or 0)
@@ -423,6 +444,8 @@ class RsFighter:
             if self.dump_wires and self.wire0 is None and ctx.get("room_type") in ("Elite", "Boss"):
                 self.wire0 = {"ctx": {k: ctx.get(k) for k in ("act", "floor", "room_type", "ascension")},
                               "last_boss": is_last_boss(ctx), "wire": wire}
+            if self.boss1_keep and is_first_double_boss(ctx):
+                wire = self._keep_potions(wire)
             cont, self.cont = self.cont, None
             src = cont if cont is not None else self.prev
             try:
@@ -592,6 +615,7 @@ class RsFighter:
         # a fight's own agent and host (reuse, carry); host: the last fight's must not answer this
         # fight's opening prompt (Toasty Mittens / Gambling Chip / Toolbox) -> prompt_no_host, not prompt_host_not_prompt
         self.agent = self.cont = self.prev = self.host = None
+        self.reserve = None
         self.fight, self.diffs, self.cont_move, self.wire0, self.tdiffs = Counter(), [], None, None, []
         if self.blind_rng:
             self.blind_seed = self.blind_rs.getrandbits(63)
@@ -604,6 +628,8 @@ class RsFighter:
                 self.cont = None   # the host did not take the fallback's move
                 path = fallback.plan(state)[0] if fallback is not None else []
                 a = path[0] if path else (("end_turn", {}) if state.get("decision") == "combat_play" else ("skip_select", {}))
+                if self.reserve and a[0] == "use_potion" and a[1].get("potion_index") in {i for i, _ in self.reserve}:
+                    self.stats["boss1_keep_fb_drink"] += 1   # the fallback drinks a reserved potion (not blocked)
             if on_step:
                 on_step(state, a)
             nxt = sim.act(a[0], **a[1])
