@@ -29,6 +29,23 @@ def w_est(r):
     return float(r["victory"]), bool(r.get("act_states"))
 
 
+def w_bound(r, hi):
+    """W with the run's failed MC plays (mc.err: mostly RunTimeout, the run's wall clock limit shared with its plays,
+    which hits long act-3 games = disproportionately wins) counted as losses (hi False) or wins (hi True)."""
+    mc, v = r.get("mc"), float(r["victory"])
+    if not mc or mc.get("win") is None:
+        return v
+    e = mc.get("err", 0)
+    if not (mc["win"] or v or e):
+        return v
+    return (v + sum(mc["win"]) + (e if hi else 0)) / (1 + len(mc["win"]) + e)
+
+
+def gap_hi(rows):
+    return [float(r["victory"]) - (sum(r["mc"]["win"]) + r["mc"].get("err", 0)) / (len(r["mc"]["win"]) + r["mc"].get("err", 0))
+            for r in rows if (r.get("mc") or {}).get("win") is not None and (len(r["mc"]["win"]) + r["mc"].get("err", 0))]
+
+
 def se(x):
     return S.stdev(x) / len(x) ** 0.5 if len(x) > 1 else 0.0
 
@@ -64,6 +81,18 @@ for t in tags:
             gd, gs = S.mean(g1) - S.mean(g0), (se(g0) ** 2 + se(g1) ** 2) ** 0.5
             line += f" | gap diff {100 * gd:+.2f}±{100 * gs:.2f}" + ("  ** W UNTRUSTED: decide by raw **" if abs(gd) > 2 * gs else "")
     print(line)
+    if t != tags[0] and any((r.get("mc") or {}).get("err") for r in list(base.values()) + rows):
+        # r33: the same pair with failed MC plays as losses / as wins; a verdict must hold under both bounds
+        b = []
+        for hi in (False, True):
+            dwb = [w_bound(D[t][x], hi) - w_bound(base[x], hi) for x in s]
+            b.append(f"{100 * S.mean(dwb):+.2f}±{100 * se(dwb):.2f}")
+        h0, h1 = gap_hi([base[x] for x in s]), gap_hi([D[t][x] for x in s])
+        gtxt = ""
+        if len(h0) > 1 and len(h1) > 1:
+            gd, gs = S.mean(h1) - S.mean(h0), (se(h0) ** 2 + se(h1) ** 2) ** 0.5
+            gtxt = f" | gap diff (hi) {100 * gd:+.2f}±{100 * gs:.2f}" + ("  ** W UNTRUSTED **" if abs(gd) > 2 * gs else "")
+        print(f"{'':22s} failed-MC bounds: dW as-loss {b[0]} as-win {b[1]}{gtxt}")
     if mcs and len(rows) > 1:
         v_raw, v_w = S.pvariance(raw), S.pvariance(est)
         print(f"{'':22s} variance raw {v_raw:.5f} W {v_w:.5f} -> {v_raw / max(v_w, 1e-12):.1f}x fewer seeds needed; "
