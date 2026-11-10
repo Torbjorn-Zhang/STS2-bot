@@ -625,6 +625,9 @@ def main():
     ap.add_argument("--strat", type=int, default=0, help="rest sites by K strategic rollouts per option (stratsearch.py)")
     ap.add_argument("--deck-sample", type=float, default=None,
                     help="RL in the expert bot: card/rest/event/map nets (the --*-net / --card-prior files) sample at this temperature")
+    ap.add_argument("--deck-explore", default=None,
+                    help='with --deck-sample: JSON {"frac": f, "cards": {"1": [ids], "2": [ids]}}, directed card-reward '
+                         "exploration in a seed-hashed share f of the runs (decknets.DeckNets explore; off by default)")
     ap.add_argument("--card-prior", default=None, help="card network log-probs added to card reward scores")
     ap.add_argument("--card-prior-weight", type=float, default=None)
     ap.add_argument("--value-weight", type=float, default=None,
@@ -832,7 +835,8 @@ def main():
                                 paths = (cfg.get("card"), cfg.get("rest"), cfg.get("event"), cfg.get("map"))
                                 shop = cfg.get("shop")
                                 unified = unified or cfg.get("unified")   # xdeckrl kind "unified": the network being trained
-                            dn = DeckNets(*paths, args.deck_sample, seed=s, shop=shop, unified=unified, teacher=teacher)
+                            dn = DeckNets(*paths, args.deck_sample, seed=s, shop=shop, unified=unified, teacher=teacher,
+                                          explore=json.loads(args.deck_explore) if args.deck_explore else None)
                         rec = None
                         if args.record:
                             from record import GameRecorder

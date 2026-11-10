@@ -16,8 +16,20 @@ import numpy as np
 
 class DeckNets:
     def __init__(self, card=None, rest=None, event=None, mapp=None, temperature=1.0, seed=0, shop=None, unified=None,
-                 teacher=None):
+                 teacher=None, explore=None):
         self.card = self.rest = self.event = self.map = self.shop = None
+        # explore (run.py --deck-explore, route audit 11-11 deck_explore_1111.md): {"frac": f, "cards": {"1": [ids],
+        # "2": [ids]}}. A run is an exploration run when crc32(seed) puts it in the first f; there, a sampled card
+        # reward offering a listed card (for its act) flips a coin: heads takes the listed card (the highest
+        # logit of the listed ones offered), tails samples as usual. x.lp is the true behaviour log-prob of that
+        # mixture (0.5 + 0.5 p for the heads card, 0.5 p otherwise), so the trainers' IW stays correct; x.xp
+        # = {c card, a act, h heads, f first such decision for (card, act) in the run, pj, pi}. Off by default
+        # (None): nothing below draws or changes.
+        self.xp, self.xrun, self.xseen = explore, False, set()
+        if explore:
+            import zlib
+            self.xrun = zlib.crc32(str(seed).encode()) % 10000 < int(round(float(explore["frac"]) * 10000))
+            self.xrng = random.Random(f"xp:{seed}")
         # teacher (teacher.PpoTeacher, on sts2-rs): its best option is played instead of ours and the
         # record says so (x.teach, x.tp: its probabilities over our options), for imitation
         self.teacher = teacher
@@ -73,6 +85,37 @@ class DeckNets:
         i, lp = self._sample(z)
         return i, lp, {}
 
+    def _explore_card(self, st, acts, z):
+        """The exploration coin on a card reward (see __init__): (action, extra) or None (nothing listed offered)."""
+        act = (st.get("context") or {}).get("act")
+        listed = set(self.xp["cards"].get(str(act), ()))
+        if not listed:
+            return None
+        by_index = {c["index"]: c for c in st.get("cards") or []}
+
+        def cid(k):
+            a = acts[k]
+            if a[0] != "select_card_reward":
+                return None
+            c = str((by_index.get(a[1]["card_index"]) or {}).get("id") or "")
+            return c.split(".", 1)[1] if c.startswith("CARD.") else c
+        cand = [k for k in range(len(acts)) if cid(k) in listed]
+        if not cand:
+            return None
+        z = np.asarray(z, dtype=np.float64)
+        j = max(cand, key=lambda k: z[k])
+        p = np.exp((z - z.max()) / self.temperature)
+        p /= p.sum()
+        heads = self.xrng.random() < 0.5
+        i = j if heads else self.rng.choices(range(len(z)), weights=p.tolist())[0]
+        q = 0.5 * p[i] + (0.5 if i == j else 0.0)
+        card = cid(j)
+        first = (card, act) not in self.xseen
+        self.xseen.add((card, act))
+        return acts[i], {"lp": float(math.log(max(q, 1e-12))), "T": self.temperature,
+                         "xp": {"c": card, "a": act, "h": int(heads), "f": int(first),
+                                "pj": round(float(p[j]), 6), "pi": round(float(p[i]), 6)}}
+
     def decide(self, sim, st):
         """-> (action, extra) or (None, None) when no network covers this decision."""
         import policy
@@ -85,6 +128,10 @@ class DeckNets:
                 opts = [("card", card_tok(by_index[a[1]["card_index"]])) if a[0] == "select_card_reward" else ("skip", None)
                         for a in acts]
                 z = self.unified.score("card_reward", st, opts)
+            if self.xrun and self.teacher is None and self.temperature > 0:
+                xr = self._explore_card(st, acts, z)
+                if xr is not None:
+                    return xr
             i, lp, tx = self._pick(sim, z, acts)
             return acts[i], {"lp": lp, "T": self.temperature, **tx}
         if d == "rest_site" and self.rest is not None:
