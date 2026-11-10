@@ -152,6 +152,10 @@ class DeckNets:
             chs, descs, z = self.map.scores(sim, st)
             if z is not None and self.unified is not None:
                 z = self.unified.score("map_select", st, [("map", x) for x in descs])
+                import mapnet   # run.py --map-elite-bias(-act), as in MapPolicy.scores (the unified score replaced its z)
+                eb = mapnet.ELITE_BIAS + mapnet.ELITE_BIAS_ACT.get((st.get("context") or {}).get("act") or 1, 0.0)
+                if eb:
+                    z = np.asarray(z, dtype=np.float64) + np.asarray([eb if d[0] == "Elite" else 0.0 for d in descs])
             if z is not None:
                 i, lp, tx = self._pick(sim, z, [("select_map_node", {"col": c["col"], "row": c["row"]}) for c in chs])
                 return ("select_map_node", {"col": chs[i]["col"], "row": chs[i]["row"]}), \

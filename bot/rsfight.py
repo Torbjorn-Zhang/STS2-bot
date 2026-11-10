@@ -425,6 +425,8 @@ class RsFighter:
             self.stats["boss1_keep_shift"] += 1
             self.reserve_idx = idx
         self.hidden = idx
+        if idx:
+            self.fight["b1_hidden"] += 1
         kept = [p for p in player.get("potions") or [] if not (p and p.get("index") in idx)]
         return {**wire, "player": {**player, "potions": kept}}
 
@@ -436,6 +438,7 @@ class RsFighter:
             self.a3_released = True
             if self.a3_counted:
                 self.stats["a3_keep_release"] += 1   # released after potions were hidden in this fight
+                self.fight["a3_release"] += 1
         if self.a3_released or not pots:
             self.hidden = set()
             return wire
@@ -443,6 +446,7 @@ class RsFighter:
             self.a3_counted = True
             self.stats["a3_keep_fights"] += 1
         self.stats["a3_keep_hidden"] += 1
+        self.fight["a3_hidden"] += 1   # decisions searched with the belt hidden (fight_log rs_mid)
         self.hidden = {p.get("index") for p in pots}
         return {**wire, "player": {**player, "potions": []}}
 
