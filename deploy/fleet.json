@@ -43,7 +43,8 @@
    "workers": 2,
    "dynamic": true,
    "share": 0.5,
-   "gpu": false,
+   "gpu": true,
+   "gpu_order": 1,
    "order": 4,
    "rs": true
   },
