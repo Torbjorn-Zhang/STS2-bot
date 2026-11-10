@@ -319,11 +319,12 @@ def native_board(sim, st, room):
 def rs_fidelity(planner):
     """--rs-fight's per-fight fidelity counts (rsfight.RsFighter.fight / .diffs) for the fight log."""
     f = getattr(planner, "rs_fighter", None)
-    if f is None or not getattr(f, "fight", None):
+    if f is None or not (getattr(f, "fight", None) or getattr(f, "root0", None)):
         return {}
     return {"rs_mid": dict(f.fight), **({"rs_diffs": f.diffs} if f.diffs else {}),
             **({"rs_tdiffs": f.tdiffs} if getattr(f, "tdiffs", None) else {}),
-            **({"wire0": f.wire0} if getattr(f, "wire0", None) else {})}
+            **({"wire0": f.wire0} if getattr(f, "wire0", None) else {}),
+            **({"root0": f.root0} if getattr(f, "root0", None) else {})}
 
 
 def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=None, ascension=0, rollouts=None,
@@ -569,6 +570,9 @@ def main():
     ap.add_argument("--rs-a3-keep", type=float, default=None,
                     help="with --rs-fight: act-3 hallway (Monster) fights hide the potion belt from the search while "
                          "HP >= TAU of max, releasing it for the rest of the fight once HP drops below; default off")
+    ap.add_argument("--rs-root-log", action="store_true",
+                    help="with --rs-fight: log each fight's first searched decision's root estimate (p_win, q, visits, "
+                         "mean final HP) as fight_log root0; logging only, default off")
     ap.add_argument("--teacher", default=None,
                     help="with --rs and --deck-sample: spire-mentor's PPO run policy (.onnx) makes the deck decisions "
                          "it scores; --record marks them (x.teach, x.tp) for upolicy.py train --teacher-only")
@@ -630,7 +634,7 @@ def main():
         global RS_FIGHT
         RS_FIGHT = tuple(int(x) for x in args.rs_fight.split(","))
         RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse, "keep_host": args.rs_keep_host,
-                            "boss1_pow": args.rs_boss1_pow, "boss1_keep": args.rs_boss1_keep, "a3_keep": args.rs_a3_keep, "true_view": args.rs_true_view,
+                            "boss1_pow": args.rs_boss1_pow, "boss1_keep": args.rs_boss1_keep, "a3_keep": args.rs_a3_keep, "root_log": args.rs_root_log, "true_view": args.rs_true_view,
                             "dump_wires": args.rs_dump_wires, "carry": args.rs_carry, "blind_rng": args.rs_blind_rng,
                             "relic_mod": args.rs_relic_mod, "loose_board": args.rs_loose_board,
                             "carry_rooms": args.rs_carry_rooms.split(",") if args.rs_carry_rooms else None})

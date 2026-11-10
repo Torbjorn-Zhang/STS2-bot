@@ -272,7 +272,8 @@ def repr_kinds(a, b):
 class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
                  keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False, carry_rooms=None,
-                 blind_rng=False, relic_mod=False, loose_board=False, boss1_keep=0, a3_keep=None):
+                 blind_rng=False, relic_mod=False, loose_board=False, boss1_keep=0, a3_keep=None,
+                 root_log=False):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -328,6 +329,10 @@ class RsFighter:
         # its rest. The hallway drinks buy HP the rest site mostly refills; the belt is worth more at
         # the first boss. None: off
         self.a3_keep, self.a3_released, self.a3_counted = a3_keep, False, False
+        # root_log (route-audit K1, 11-10): the fight's first searched decision's root estimate in self.root0
+        # (best action's p_win / q / value / visits, all actions' visits, mean final HP) for the fight log, so
+        # the search's own opening estimate can be set against the outcome per boss. Logging only; off: None
+        self.root_log, self.root0 = root_log, None
         self.stats = Counter()
         self.fails = []       # the first failures of the run (kind, detail), for the run record
         self.k = 0            # decisions searched (the agent seed mixes it in)
@@ -361,6 +366,17 @@ class RsFighter:
 
     def _step(self, st, rm):
         rec = self._agent(st).step(rm)
+        if self.root_log and self.root0 is None and rec is not None:
+            try:
+                cs = rec.get("combat_search")
+                acts = (cs or {}).get("actions") or []
+                if acts:
+                    b = next((x for x in acts if x.get("is_best")), acts[0])
+                    self.root0 = {"p": b.get("p_win"), "q": b.get("q"), "v": b.get("value"), "n": b.get("visits"),
+                                  "N": sum(x.get("visits") or 0 for x in acts), "hp": b.get("mean_final_hp"),
+                                  "k": len(acts), "ret": rec.get("retained_visits")}
+            except Exception:   # logging must never reach the fallback planner
+                self.stats["root_log_err"] += 1
         if rec is not None and rec.get("retained_visits") is not None:
             self.stats["reused"] += 1
             self.stats["retained_visits"] += int(rec["retained_visits"])
@@ -662,6 +678,7 @@ class RsFighter:
         self.reserve, self.hidden = None, set()
         self.a3_released = self.a3_counted = False
         self.fight, self.diffs, self.cont_move, self.wire0, self.tdiffs = Counter(), [], None, None, []
+        self.root0 = None
         if self.blind_rng:
             self.blind_seed = self.blind_rs.getrandbits(63)
         if on_state:
