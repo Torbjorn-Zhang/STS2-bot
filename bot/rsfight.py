@@ -272,7 +272,7 @@ def repr_kinds(a, b):
 class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
                  keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False, carry_rooms=None,
-                 blind_rng=False, relic_mod=False, loose_board=False, boss1_keep=0):
+                 blind_rng=False, relic_mod=False, loose_board=False, boss1_keep=0, a3_keep=None):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -323,6 +323,11 @@ class RsFighter:
         # searched as if the n highest-slot potions were not on the belt (hidden from the wire every
         # host is built from), so they reach the second boss. 0: off (every potion visible)
         self.boss1_keep, self.reserve, self.hidden, self.reserve_idx = int(boss1_keep or 0), None, set(), set()
+        # a3_keep tau: act-3 hallway (Monster) fights are searched with the whole belt hidden while the
+        # player's HP is at least tau of max; once it drops below, the fight's potions are released for
+        # its rest. The hallway drinks buy HP the rest site mostly refills; the belt is worth more at
+        # the first boss. None: off
+        self.a3_keep, self.a3_released, self.a3_counted = a3_keep, False, False
         self.stats = Counter()
         self.fails = []       # the first failures of the run (kind, detail), for the run record
         self.k = 0            # decisions searched (the agent seed mixes it in)
@@ -423,6 +428,24 @@ class RsFighter:
         kept = [p for p in player.get("potions") or [] if not (p and p.get("index") in idx)]
         return {**wire, "player": {**player, "potions": kept}}
 
+    def _a3_hide(self, wire):
+        """a3_keep: the wire with an empty belt until the fight's release (HP below a3_keep of max)."""
+        player = wire.get("player") or {}
+        pots = [p for p in player.get("potions") or [] if p]
+        if not self.a3_released and (player.get("hp") or 0) < self.a3_keep * (player.get("max_hp") or 1):
+            self.a3_released = True
+            if self.a3_counted:
+                self.stats["a3_keep_release"] += 1   # released after potions were hidden in this fight
+        if self.a3_released or not pots:
+            self.hidden = set()
+            return wire
+        if not self.a3_counted:
+            self.a3_counted = True
+            self.stats["a3_keep_fights"] += 1
+        self.stats["a3_keep_hidden"] += 1
+        self.hidden = {p.get("index") for p in pots}
+        return {**wire, "player": {**player, "potions": []}}
+
     def _host(self, st, wire, carried=None):
         ctx = st.get("context") or {}
         asc = int(ctx.get("ascension") or 0)
@@ -461,6 +484,8 @@ class RsFighter:
                               "last_boss": is_last_boss(ctx), "wire": wire}
             if self.boss1_keep and is_first_double_boss(ctx):
                 wire = self._keep_potions(wire)
+            elif self.a3_keep is not None and ctx.get("act") == 3 and ctx.get("room_type") == "Monster":
+                wire = self._a3_hide(wire)
             cont, self.cont = self.cont, None
             src = cont if cont is not None else self.prev
             try:
@@ -631,6 +656,7 @@ class RsFighter:
         # fight's opening prompt (Toasty Mittens / Gambling Chip / Toolbox) -> prompt_no_host, not prompt_host_not_prompt
         self.agent = self.cont = self.prev = self.host = None
         self.reserve, self.hidden = None, set()
+        self.a3_released = self.a3_counted = False
         self.fight, self.diffs, self.cont_move, self.wire0, self.tdiffs = Counter(), [], None, None, []
         if self.blind_rng:
             self.blind_seed = self.blind_rs.getrandbits(63)
@@ -644,7 +670,7 @@ class RsFighter:
                 path = fallback.plan(state)[0] if fallback is not None else []
                 a = path[0] if path else (("end_turn", {}) if state.get("decision") == "combat_play" else ("skip_select", {}))
                 if self.hidden and a[0] == "use_potion" and a[1].get("potion_index") in self.hidden:
-                    self.stats["boss1_keep_fb_drink"] += 1   # the fallback drinks a reserved potion (not blocked)
+                    self.stats["keep_fb_drink"] += 1   # the fallback drinks a hidden potion (not blocked)
             if on_step:
                 on_step(state, a)
             nxt = sim.act(a[0], **a[1])
