@@ -1839,7 +1839,12 @@ class Fleet:
             # had 3.6/32. Its chunks are stopped after TRAIN_PREEMPT_AFTER anyway)
             calm = [h for h in cand if not h.get("ncpu") or h.get("others_peak", 0) <= 0.5 * h["ncpu"]]
             cand = calm or cand
-            need = lambda h: min(TRAIN_SLOTS, self.cap(h))
+            # r43 (supervisor P0): the allowance counts only the slots schedule() can actually free there:
+            # free slots plus the one-slot jobs it may stop (not `only` tasks, not trains). up995_train went
+            # to the calm lab2 whose slots k3a2's pinned tasks held, and ran at w=1 (2 threads) for 47 min
+            freeable = lambda h: self.free_slots(h) + sum(x.get("w", 1) for x in self.running_on(h)
+                                                          if x["kind"] != "train" and not x.get("only") and x.get("w", 1) == 1)
+            need = lambda h: max(1, min(TRAIN_SLOTS, self.cap(h), freeable(h)))
             return max(cand, key=lambda h: (need(h), -h.get("others_peak", 0) / max(1, h.get("ncpu", 1)),
                                             min(self.free_slots(h), need(h)) / need(h), -h.get("order", 9))), False
         if job.get("slots") and job["kind"] != "train":
