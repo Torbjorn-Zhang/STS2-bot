@@ -12,6 +12,7 @@ left to the fallback planner for that decision.
   fighter = RsFighter(sims=1000, boss_sims=4000)
   st = fighter.play_combat(sim, st, fallback=planner)      # like TurnPlanner.play_combat
 """
+import hashlib
 import json
 import os
 import random
@@ -51,6 +52,18 @@ def is_first_double_boss(ctx):
     second boss's, with no rest between."""
     return (int(ctx.get("ascension") or 0) >= 10 and ctx.get("act") == 3 and ctx.get("room_type") == "Boss"
             and ctx.get("floor") == 15)
+
+
+# k3c8c/REGISTER.md sections 10-15 (ms4k): an extra MCTS override bundle applied to the fights of one scope only.
+# None for A10's last boss (B4: its win value carries no HP), event fights and non-A10 act-3 bosses, whatever the flag says.
+OV_SCOPES = ("b3",)   # whitelist; more scopes (elite, hallway, boss12) need their own registration
+
+
+def fight_scope(ctx):
+    room, act = ctx.get("room_type"), ctx.get("act")
+    if room == "Boss" and act == 3:
+        return "b3" if is_first_double_boss(ctx) else None
+    return {"Boss": "boss12", "Elite": "elite", "Monster": "hallway"}.get(room)
 
 
 def want_override(tok):
@@ -273,7 +286,7 @@ class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
                  keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False, carry_rooms=None,
                  blind_rng=False, relic_mod=False, loose_board=False, boss1_keep=0, a3_keep=None,
-                 root_log=False):
+                 root_log=False, ov=None, ov_scope=None):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -320,6 +333,10 @@ class RsFighter:
         # HP bar and belt it keeps)^k, as the second boss's win rate climbs steeply with its entry HP
         # (sts2-rs win_carry_pow; the deployed value prices 1 HP at ~1/300 of the win)
         self.boss1_pow = boss1_pow
+        # ov / ov_scope (k3c8c section 15): this bundle is added to the fights of these scopes; off by default.
+        # ov_sha: sha1[:12] of the bundle this fight's agents were built with (the env bundle when nothing was set)
+        self.ov, self.ov_scope, self.ov_sha = ov, set(ov_scope.split(",")) if ov_scope else set(), None
+        assert not (self.ov_scope - set(OV_SCOPES)), f"--rs-ov-scope outside {OV_SCOPES}"
         # boss1_keep n: the first boss of A10's double boss, entered with more than n potions, is
         # searched as if the n highest-slot potions were not on the belt (hidden from the wire every
         # host is built from), so they reach the second boss. 0: off (every potion visible)
@@ -355,11 +372,22 @@ class RsFighter:
         room = ctx.get("room_type")
         boss = self.boss3_sims if ctx.get("act") == 3 and room == "Boss" else self.boss_sims
         agent = sts2_rs.MctsCombatAgent(seed=s, sims=self.elite_sims if room == "Elite" else self.sims, boss_sims=boss)
+        # this agent only: the env bundle is shared by every worker thread of the process. The overrides replace the
+        # agent's whole bundle (runai set_mcts_overrides), so every source goes into ONE string and ONE call; with
+        # --rs-ov off the calls are exactly the old code's (one call only when boss1_pow applies)
+        cur = os.environ.get("STS2_RUNAI_MCTS_OVERRIDES", "").strip()
+        parts = []
         if self.boss1_pow and is_first_double_boss(ctx):
-            # this agent only: the env bundle is shared by every worker thread of the process
-            cur = os.environ.get("STS2_RUNAI_MCTS_OVERRIDES", "").strip()
-            agent.set_mcts_overrides(",".join(x for x in (cur, f"win_carry_pow={self.boss1_pow}") if x))
+            parts.append(f"win_carry_pow={self.boss1_pow}")
             self.stats["boss1_pow"] += 1
+        sc = fight_scope(ctx) if self.ov else None
+        if sc is not None and sc in self.ov_scope:
+            parts.append(self.ov)
+            self.stats["ov_" + sc] += 1
+        bundle = ",".join(x for x in [cur] + parts if x)
+        if parts:
+            agent.set_mcts_overrides(bundle)
+        self.ov_sha = hashlib.sha1(bundle.encode()).hexdigest()[:12]
         if self.reuse:
             self.agent = agent
         return agent
@@ -679,6 +707,7 @@ class RsFighter:
         self.a3_released = self.a3_counted = False
         self.fight, self.diffs, self.cont_move, self.wire0, self.tdiffs = Counter(), [], None, None, []
         self.root0 = None
+        self.ov_sha = None
         if self.blind_rng:
             self.blind_seed = self.blind_rs.getrandbits(63)
         if on_state:

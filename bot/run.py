@@ -316,6 +316,16 @@ def native_board(sim, st, room):
             "state": state}
 
 
+def _ov_sha(planner):
+    """k3c8c section 15: the sha1[:12] of the MCTS override bundle this fight's search ran with (rsfight ov_sha), then cleared."""
+    f = getattr(planner, "rs_fighter", None)
+    h = getattr(f, "ov_sha", None) if f is not None else None
+    if h is None:
+        return {}
+    f.ov_sha = None
+    return {"ov_sha": h}
+
+
 def rs_fidelity(planner):
     """--rs-fight's per-fight fidelity counts (rsfight.RsFighter.fight / .diffs) for the fight log."""
     f = getattr(planner, "rs_fighter", None)
@@ -413,6 +423,7 @@ def play_run(sim, seed, character, acts, max_nodes, model=None, value_weight=Non
                            "enemy_hp_left": last_enemies.get("hp"), "rounds": last_enemies.get("round"),
                            "potions_before": pots0, "potions_left": last_enemies.get("potions"),
                            **({"deck": deck_stats} if deck_stats else {}), **rs_fidelity(planner),
+                           **_ov_sha(planner),
                            **({"wire0": native0} if native0 else {})})
             if st.get("decision") == "combat_play":
                 stuck = True   # play_combat hit its action cap: give up on the run
@@ -564,6 +575,11 @@ def main():
     ap.add_argument("--rs-carry-rooms", default=None, help="with --rs-carry: only in these room types, e.g. Boss or Boss,Elite")
     ap.add_argument("--rs-boss1-pow", type=float, default=None,
                     help="with --rs-fight: A10's first act-3 boss values a win at 0.5 + kept HP-and-belt share ^ K")
+    ap.add_argument("--rs-ov", default=None,
+                    help="with --rs-fight and --rs-ov-scope: an MCTS override bundle (k=v,...) added to the fights of that scope "
+                         "only, in the same single set_mcts_overrides call as --rs-boss1-pow (k3c8c/REGISTER.md section 15)")
+    ap.add_argument("--rs-ov-scope", default=None, choices=["b3"],
+                    help="with --rs-ov: b3 = A10's first act-3 boss (never the last boss)")
     ap.add_argument("--rs-boss1-keep", type=int, default=0,
                     help="with --rs-fight: A10's first act-3 boss, entered with more than N potions, keeps its N "
                          "highest-slot potions for the second boss (hidden from the search); 0: off")
@@ -633,10 +649,13 @@ def main():
     ap.add_argument("--value-weight", type=float, default=None,
                     help="with --model: score = hand-written + w * model (default: model only)")
     args = ap.parse_args()
+    if bool(args.rs_ov) != bool(args.rs_ov_scope) or (args.rs_ov and not args.rs_fight):
+        ap.error("--rs-ov and --rs-ov-scope go together, with --rs-fight (k3c8c/REGISTER.md section 15)")
     if args.rs_fight:
         global RS_FIGHT
         RS_FIGHT = tuple(int(x) for x in args.rs_fight.split(","))
         RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse, "keep_host": args.rs_keep_host,
+                            "ov": args.rs_ov, "ov_scope": args.rs_ov_scope,
                             "boss1_pow": args.rs_boss1_pow, "boss1_keep": args.rs_boss1_keep, "a3_keep": args.rs_a3_keep, "root_log": args.rs_root_log, "true_view": args.rs_true_view,
                             "dump_wires": args.rs_dump_wires, "carry": args.rs_carry, "blind_rng": args.rs_blind_rng,
                             "relic_mod": args.rs_relic_mod, "loose_board": args.rs_loose_board,
