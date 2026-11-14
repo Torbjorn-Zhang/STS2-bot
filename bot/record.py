@@ -35,7 +35,9 @@ def run_state(st):
             "hp": p.get("hp"), "mhp": p.get("max_hp"), "gold": p.get("gold"),
             "deck": [card_tok(c) for c in p.get("deck") or []],
             "relics": [r.get("name") for r in p.get("relics") or []],
-            "pots": [pot_tok(x) for x in p.get("potions") or [] if x]}
+            "pots": [pot_tok(x) for x in p.get("potions") or [] if x],
+            # C1 (k3c1): A10's second final boss, only when the engine reports one (Fix15+), so older rows are unchanged
+            **({"boss2": (ctx.get("boss2") or {}).get("id")} if (ctx.get("boss2") or {}).get("id") else {})}
 
 
 def enemy(e):

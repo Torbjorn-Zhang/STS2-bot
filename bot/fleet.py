@@ -1383,8 +1383,11 @@ class Fleet:
     # Fix14 = Fix13 + determinize_run {"rebase": true} (run.py --mc-rebase): the run's streams are rebuilt
     # from a new run seed as a new run builds them, so the combat wire's run_seed + cursors name an MC
     # play's dice and sts2-rs's host mirrors them as a real run's; without rebase, runs are Fix13's
+    # Fix15 = Fix14 + every reply's context carries "boss2" {id, name} when the act has a second final boss
+    # (A10's act 3; the game shows its icon in the top bar): record.run_state's "boss2", the unified network's C1
+    # input (k3c1). Nothing else changes: the combat wire has its own context, runs are Fix14's
     ENGINE_BUILDS = ("Fix1", "Diag", "Fix2", "Fix3", "Fix4", "Fix5", "Fix6", "Fix8", "Fix9", "Fix10", "Fix11", "Fix12", "Fix13",
-                     "Fix14")
+                     "Fix14", "Fix15")
 
     def ensure_builds(self, h):
         if linux(h):

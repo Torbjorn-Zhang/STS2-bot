@@ -3673,6 +3673,24 @@ public partial class RunSimulator
         }
         catch { }
 
+        // Fix15 / C1 (k3c1): Ascension 10's second final boss, which the game shows in the top bar
+        // (NTopBarBossIcon reads Act.SecondBossEncounter). Absent when the act has none.
+        try
+        {
+            var boss2IdEntry = _runState.Act?.SecondBossEncounter?.Id?.Entry;
+            if (!string.IsNullOrEmpty(boss2IdEntry))
+            {
+                var monsterKey2 = boss2IdEntry.EndsWith("_BOSS") ? boss2IdEntry[..^5] : boss2IdEntry;
+                if (monsterKey2 == "THE_KIN") monsterKey2 = "KIN_PRIEST";
+                ctx["boss2"] = new Dictionary<string, object?>
+                {
+                    ["id"] = boss2IdEntry,
+                    ["name"] = _loc.Monster(monsterKey2),
+                };
+            }
+        }
+        catch { }
+
         return ctx;
     }
 

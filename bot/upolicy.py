@@ -223,6 +223,9 @@ class Enc:
                 "op": [o[4] for o in os_], "orest": [o[5] for o in os_], "oev": [o[6] for o in os_], "oroom": [o[7] for o in os_],
                 "osc": [o[8] for o in os_],
                 "b": self.bosses(str(s.get("boss"))),
+                # C1 (k3c1): A10's second final boss, recorded only when the engine reports one (Fix15+); 0 = padding
+                # (no second boss / older records): the embedding row stays zero and gets no gradient
+                "b2": self.bosses(str(s["boss2"])) if s.get("boss2") else 0,
                 "x": [(s.get("act") or 1) / 3, (s.get("floor") or 0) / 17, (s.get("asc") or 0) / 10,
                       (s.get("hp") or 0) / max(1, s.get("mhp") or 1), (s.get("mhp") or 80) / 100, gold / 300,
                       float(s.get("room") == "Elite"), float(s.get("room") == "Boss"), len(deck) / 30] + route_counts(route)}
@@ -253,13 +256,14 @@ def collate(items, device):
     T["osc"] = torch.from_numpy(sc).to(device)
     T["omask"] = torch.from_numpy(np.array([[j < len(it["ok"]) for j in range(L["ok"])] for it in items])).to(device)
     T["b"] = torch.tensor([it["b"] for it in items], device=device)
+    T["b2"] = torch.tensor([it.get("b2", 0) for it in items], device=device)
     T["dec"] = torch.tensor([it["dec"] for it in items], device=device)
     T["x"] = torch.tensor([it["x"] for it in items], dtype=torch.float32, device=device)
     return T
 
 
 class Net(nn.Module):
-    def __init__(self, enc, d=128, layers=3, heads=4):
+    def __init__(self, enc, d=128, layers=3, heads=4, b2=False):
         super().__init__()
         E = lambda v: nn.Embedding(len(v), d, padding_idx=0)
         self.card, self.relic, self.pot, self.boss = E(enc.cards), E(enc.relics), E(enc.pots), nn.Embedding(len(enc.bosses), d)
@@ -279,11 +283,21 @@ class Net(nn.Module):
         self.head = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.ReLU(), nn.Linear(d, 1))
         self.shead = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.ReLU(), nn.Linear(d, 1))
         self.value = nn.Sequential(nn.LayerNorm(d), nn.Linear(d, d), nn.ReLU(), nn.Linear(d, 1))
+        # C1 (k3c1): the second final boss on the state token, only in a network that carries "boss2.weight"
+        # (k3c1/add_b2.py adds it as zeros, so the network plays exactly as before until training moves it).
+        # Created last, so the other modules' initialisation is unchanged.
+        self.b2 = b2
+        if b2:
+            self.boss2 = nn.Embedding(len(enc.bosses), d, padding_idx=0)
+            nn.init.zeros_(self.boss2.weight)
 
     def embed(self, T):
         """-> the tokens [n, L, d] (state, deck, relics, potions, options) and their padding mask."""
         k = self.tok.weight
-        st = (self.scal(T["x"]) + self.boss(T["b"]) + self.dec(T["dec"]) + k[0]).unsqueeze(1)
+        st = self.scal(T["x"]) + self.boss(T["b"]) + self.dec(T["dec"]) + k[0]
+        if self.b2:
+            st = st + self.boss2(T["b2"])
+        st = st.unsqueeze(1)
         deck = self.card(T["d"]) + T["du"].unsqueeze(-1) * self.up + k[1]
         rel = self.relic(T["r"]) + k[2]
         pot = self.pot(T["p"]) + k[3]
@@ -316,7 +330,7 @@ def load_net(blob):
     before the card prompts' own parameters gets no kind on its option tokens and the shared head
     as the prompts' head, so it plays as it did."""
     enc = Enc(blob=blob["enc"])
-    net = Net(enc)
+    net = Net(enc, b2="boss2.weight" in blob["state"])
     state = dict(blob["state"])
     w = state["dec.weight"]
     if w.shape[0] < len(KINDS):
