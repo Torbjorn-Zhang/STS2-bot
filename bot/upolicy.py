@@ -768,7 +768,14 @@ def rl(args):
     ADV = torch.from_numpy(adv).to(dev)
     R = torch.from_numpy(G / 100.0).to(dev)
     lr = args.lr * float(os.environ.get("NETS_LR_SCALE", "1"))
-    opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
+    m2 = float(os.environ.get("NETS_B2_LR_MULT", "1"))   # C1 (k3c1 section 11): lr multiplier for the zero-initialised boss2 rows
+    b2p = [p for n, p in net.named_parameters() if n.startswith("boss2.")] if m2 != 1 else []
+    if b2p:
+        rest = [p for n, p in net.named_parameters() if not n.startswith("boss2.")]
+        opt = torch.optim.AdamW([{"params": rest}, {"params": b2p, "lr": lr * m2}], lr=lr, weight_decay=1e-4)
+        print(json.dumps({"b2_lr_mult": m2, "b2_params": len(b2p), "b2_lr": lr * m2}), flush=True)   # audit 14:28 #68: proof it took effect
+    else:   # default (no multiplier, or a network without boss2): exactly the old optimizer
+        opt = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=1e-4)
     # behaviour -> proximal importance weights: 1 where the records are this network's own
     IW = torch.exp(LPP - LP0).clamp(max=args.is_cap)
     gap = (LPP - LP0).abs()
