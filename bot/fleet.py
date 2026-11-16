@@ -1188,9 +1188,11 @@ class Fleet:
             for name, h in s["hosts"].items():
                 if name in self.hosts:
                     moved = h.get("root", self.hosts[name]["root"]) != self.hosts[name]["root"]
+                    # code_sig too: without it every host logged "code changed, synced" (and synced) at its first
+                    # dispatch after any restart although no file had changed; a real change still differs from it
                     for k in ("drain", "state", "gpu_quiet_since", "gpu_yield") if moved else \
-                            ("files", "drain", "clean", "state", "gpu_quiet_since", "gpu_yield"):   # a new root has none of the old files
-                        self.hosts[name][k] = h.get(k, self.hosts[name][k])
+                            ("files", "drain", "clean", "state", "gpu_quiet_since", "gpu_yield", "code_sig"):   # a new root has none of the old files
+                        self.hosts[name][k] = h.get(k, self.hosts[name].get(k))
             self.pipes = [PIPES[p["type"]](p["spec"], p["st"]) for p in s["pipes"]]
             for j in self.jobs.values():
                 if j["state"] == "fetch":
