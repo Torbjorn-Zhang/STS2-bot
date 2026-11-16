@@ -501,6 +501,8 @@ class RsFighter:
         if self.blind_rng and isinstance(wire.get("rng"), dict) and wire["rng"].get("run_seed") is not None:
             wire["rng"] = {**wire["rng"], "run_seed": self.blind_seed}
             self.stats["blind"] += 1
+        if self.blind_rng and isinstance(wire.get("draw_pile"), list) and len(wire["draw_pile"]) > 1:
+            wire["draw_pile"] = self._bl_shuffle_draw(wire["draw_pile"], carried)
         # character: the adapter otherwise infers the class from card ids, which fails for a
         # deck with no Ironclad-prefixed card left
         imported = adapter.translate(wire, character="Ironclad", ascension=asc)
@@ -517,8 +519,9 @@ class RsFighter:
         rm.debug_enter_combat(cs, TIER.get(ctx.get("room_type"), "monster"))
         return rm
 
-    def choose(self, sim, st):
-        """Our engine's (action, args) for this combat decision, or None (use the fallback)."""
+    def choose(self, sim, st, _bl_retry=False):
+        """Our engine's (action, args) for this combat decision, or None (use the fallback).
+        _bl_retry (blind_rng only): the second search of a decision whose first answer the true hand cannot play."""
         d = st.get("decision")
         if d == "combat_play":
             self.host, self.amap = None, None
@@ -587,6 +590,19 @@ class RsFighter:
                 self.stats["no_action"] += 1
                 return None
             act = self._ours(st, rec["action"])
+            if act is not None and self.blind_rng and not self._bl_playable(st, act):
+                # blind fix (k3c2 sections 39, 41, 46): a host on its own dice can differ from the world in what it cannot
+                # see (Mummified Hand zeroed another card, ...) and pick a card the true hand cannot play; the game refuses
+                # it (EnergyCostTooHigh), and every ms7bl stuck run began there. Rebuild from the wire alone (no kept host,
+                # no carry) and search once more; still unplayable -> the fallback. The default path never gets here.
+                self.stats["bl_unplayable"] += 1
+                self.stats["bl_unplayable:" + str(self._bl_card(st, act))] += 1
+                self.host = self.amap = None
+                if not _bl_retry:
+                    self.cont = self.prev = None
+                    return self.choose(sim, st, _bl_retry=True)
+                self.stats["bl_unplayable_fb"] += 1
+                return None
             if act is not None:
                 self.stats["searched"] += 1
                 self.host = self.prev = rm   # took the same action on the true board: it answers the next prompt
@@ -654,6 +670,20 @@ class RsFighter:
         rs_cards = [(card_id(c["id"]), bool(c.get("upgraded"))) for c in s.get("cards") or []]
         ours = st.get("cards") or []
         our_cards = [((c.get("id") or "").split(".", 1)[-1], bool(c.get("upgraded"))) for c in ours]
+        if Counter(rs_cards) != Counter(our_cards) and self.blind_rng:
+            # blind fix (k3c2 sections 39, 41, 46): the host derived the choice from its own dice; count it by kind and
+            # opening card, then re-open the host's parked choice over the world's option list (open_injected_choice,
+            # the pending play's tail kept) and answer there. The default path keeps the old fallback below.
+            self._bl_pm(cs)
+            rm2 = self._bl_inject(st, cs, ours)
+            if rm2 is not None:
+                s2 = rm2.combat_state().get_state()
+                rs2 = [(card_id(c["id"]), bool(c.get("upgraded"))) for c in s2.get("cards") or []]
+                if s2.get("type") == "card_select" and Counter(rs2) == Counter(our_cards):
+                    self.stats["bl_inject_ok"] += 1
+                    rm, s, rs_cards = rm2, s2, rs2
+                else:
+                    self.stats["bl_inject_fail:after"] += 1
         if Counter(rs_cards) != Counter(our_cards):
             self.stats["prompt_mismatch"] += 1
             return None
@@ -691,6 +721,113 @@ class RsFighter:
             self.cont = rm
         return ("select_cards", {"indices": ",".join(idx)})
 
+    # ── blind_rng fixes (k3c2 sections 39, 41, 46); called only when blind_rng is on ──
+    def _bl_card(self, st, act):
+        ci = act[1].get("card_index")
+        c = next((c for c in st.get("hand") or [] if c.get("index") == ci), None)
+        return (c or {}).get("id")
+
+    def _bl_playable(self, st, act):
+        """False only when the true hand marks the chosen card unplayable (can_play False)."""
+        if act[0] != "play_card":
+            return True
+        ci = act[1].get("card_index")
+        c = next((c for c in st.get("hand") or [] if c.get("index") == ci), None)
+        return c is None or c.get("can_play") is not False
+
+    def _bl_pm(self, cs):
+        """A host / world card_select mismatch, counted by category, choice kind and the card that opened it. vis: every
+        option of the host's choice sits in hand / discard / exhaust / play and the kind is not generative (the options
+        follow from what the player sees); hid: generative, or options from the draw pile (mid-play draws, order)."""
+        try:
+            pc = cs.pending_choice() or {}
+        except Exception:  # noqa: BLE001
+            pc = {}
+        kind = str(pc.get("kind") or "none")
+        piles = {c.get("pile") for c in pc.get("cards") or []}
+        try:
+            gen = bool(pc.get("kind")) and sts2_rs.choice_kind_is_generative(pc["kind"])
+        except Exception:  # noqa: BLE001
+            gen = False
+        cat = "hid" if gen or "draw" in piles or None in piles or not piles else "vis"
+        card = self.cont_move[1] if self.cont_move is not None and self.cont_move[0] == "play_card" else "none"
+        self.stats["bl_pm_" + cat] += 1
+        self.stats[f"bl_pm_{cat}:{kind}:{card}"] += 1
+
+    def _bl_shuffle_draw(self, draw, carried):
+        """blind fix 2 (k3c2 section 49, round 75 #1): the wire lists the draw pile in the world's true order and the
+        import numbers the cards in that order, so the host's canonical (uid-sorted) unknown middle IS the true order.
+        Shuffle it (blind_rs) and renumber each card's index; positions the carried host pins (pinned_top / bottom,
+        indices into its draw list, translated by position in transplant_hidden) stay put when the piles have the same
+        length, so the player's own knowledge (Headbutt's top card, ...) survives."""
+        fixed = set()
+        if carried is not None:
+            try:
+                d = sts2_rs.state_to_dict(carried).get("deck") or {}
+                if len(d.get("draw_pile") or []) == len(draw):
+                    fixed = {i for i in list(d.get("pinned_top") or []) + list(d.get("pinned_bottom") or [])
+                             if isinstance(i, int) and 0 <= i < len(draw)}
+            except Exception:  # noqa: BLE001  (shuffle everything)
+                self.stats["bl_shuffle_pin_err"] += 1
+        free = [i for i in range(len(draw)) if i not in fixed]
+        vals = [draw[i] for i in free]
+        self.blind_rs.shuffle(vals)
+        out = list(draw)
+        for i, v in zip(free, vals):
+            out[i] = v
+        self.stats["bl_shuffled"] += 1
+        if fixed:
+            self.stats["bl_shuffle_pinned"] += 1
+        return [{**c, "index": i} if isinstance(c, dict) else c for i, c in enumerate(out)]
+
+    def _bl_inject(self, st, cs, ours):
+        """A host (fresh RunManager) whose parked choice lists the world's options: each option is the first unused card
+        of the host's piles with the same id and upgrade (the host's own option piles first); a card in no pile only
+        for a generative kind (synthetic option). None (counted) when the host has no parked choice or a card is missing."""
+        try:
+            pc = cs.pending_choice()
+            if not pc:
+                self.stats["bl_inject_fail:no_choice"] += 1
+                return None
+            kind = pc["kind"]
+            gen = sts2_rs.choice_kind_is_generative(kind)
+            d = sts2_rs.state_to_dict(cs).get("deck") or {}
+            piles = {"hand": d.get("hand") or [], "draw": d.get("draw_pile") or [], "discard": d.get("discard_pile") or [],
+                     "exhaust": d.get("exhaust_pile") or [], "play": d.get("play_pile") or []}
+            order = list(dict.fromkeys([c.get("pile") for c in pc.get("cards") or [] if c.get("pile") in piles]
+                                       + ["hand", "draw", "discard", "exhaust", "play"]))
+            used, opts = set(), []
+            for c in ours:
+                want = (card_id((c.get("id") or "").split(".", 1)[-1]), bool(c.get("upgraded")))
+                loc = next(((p, i) for p in order for i, h in enumerate(piles[p])
+                            if (p, i) not in used and (card_id(h.get("id")), bool(h.get("upgraded"))) == want), None)
+                if loc is not None:
+                    used.add(loc)
+                    opts.append({"id": piles[loc[0]][loc[1]].get("id"), "upgraded": want[1], "pile": loc[0], "index": loc[1]})
+                elif gen:
+                    opts.append({"id": (c.get("id") or "").split(".", 1)[-1], "upgraded": want[1]})
+                else:
+                    self.stats["bl_inject_fail:unlocated"] += 1
+                    return None
+            n = len(opts)
+            mn = min(int(st.get("min_select") or 0), n)
+            mx = min(int(st.get("max_select") if st.get("max_select") is not None else n), n)
+            cs.open_injected_choice(kind, opts, mn, max(mn, mx), bool(pc.get("can_skip")) or mn == 0, replace_parked=True)
+            ctx = st.get("context") or {}
+            asc = int(ctx.get("ascension") or 0)
+            rm = sts2_rs.RunManager(seed=0, character="Ironclad", ascension_level=asc, game_version=GAME_VERSION)
+            if is_last_boss(ctx):   # as _host: the run's last fight stands on its last boss node
+                col, row = last_boss_node(asc)
+                rm.debug_place_on_map(3, col, row, [], int(ctx.get("floor") or 0), 50)
+            rm.debug_enter_combat(cs, TIER.get(ctx.get("room_type"), "monster"))
+            return rm
+        except Exception as e:  # noqa: BLE001  (the old fallback still stands)
+            self.stats["bl_inject_fail:" + type(e).__name__] += 1
+            if self.stats["bl_inject_err_logged"] < 3:
+                self.stats["bl_inject_err_logged"] += 1
+                self._fail("bl_inject", f"{type(e).__name__}: {str(e)[:200]}")
+            return None
+
     def _fail(self, kind, detail):
         if len(self.fails) < 12:
             self.fails.append((kind, detail))
@@ -712,8 +849,9 @@ class RsFighter:
             self.blind_seed = self.blind_rs.getrandbits(63)
         if on_state:
             on_state(state)
+        bl_fb = False   # blind_rng only: this decision goes to the fallback (the host's move was refused)
         while state.get("decision") in ("combat_play", "card_select") and n < max_actions:
-            a = self.choose(sim, state)
+            a = None if bl_fb else self.choose(sim, state)
             if a is None:
                 self.stats["fallback"] += 1
                 self.cont = None   # the host did not take the fallback's move
@@ -732,9 +870,18 @@ class RsFighter:
                                    f"energy {state.get('energy')} enemies {len(state.get('enemies') or [])} "
                                    f"pots {[(p.get('index'), p.get('name')) for p in (state.get('player') or {}).get('potions') or [] if p]}")
                 self.host = self.cont = None
+                if self.blind_rng and not bl_fb and state.get("decision") == "combat_play":
+                    # blind fix (k3c2 sections 39, 46): a refused play changes nothing (RunSimulator returns before
+                    # enqueueing it): the fallback takes this same decision instead of ending the turn; a fallback move
+                    # refused too ends it as before. Drop the carried host as well.
+                    self.prev = None
+                    bl_fb = True
+                    self.stats["bl_exec_fb"] += 1
+                    continue
                 nxt = sim.act("end_turn") if state.get("decision") == "combat_play" else sim.act("skip_select")
                 if nxt.get("type") == "error":
                     break
+            bl_fb = False
             state = nxt
             if on_state:
                 on_state(state)
