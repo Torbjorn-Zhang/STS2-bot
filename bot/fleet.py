@@ -1189,10 +1189,16 @@ class Fleet:
                 if name in self.hosts:
                     moved = h.get("root", self.hosts[name]["root"]) != self.hosts[name]["root"]
                     # code_sig too: without it every host logged "code changed, synced" (and synced) at its first
-                    # dispatch after any restart although no file had changed; a real change still differs from it
+                    # dispatch after any restart although no file had changed; a real change still differs from it.
+                    # moved / moved_ids / down_since go with state: a host restored "down" without them read as
+                    # moved (default True), so its first good poll took back nothing and killed + requeued every
+                    # job that went on there (11-17 16:09, 96 jobs after a reboot inside the down grace)
                     for k in ("drain", "state", "gpu_quiet_since", "gpu_yield") if moved else \
                             ("files", "drain", "clean", "state", "gpu_quiet_since", "gpu_yield", "code_sig"):   # a new root has none of the old files
                         self.hosts[name][k] = h.get(k, self.hosts[name].get(k))
+                    for k in () if moved else ("moved", "moved_ids", "down_since"):   # only if saved (no None defaults)
+                        if k in h:
+                            self.hosts[name][k] = h[k]
             self.pipes = [PIPES[p["type"]](p["spec"], p["st"]) for p in s["pipes"]]
             for j in self.jobs.values():
                 if j["state"] == "fetch":
