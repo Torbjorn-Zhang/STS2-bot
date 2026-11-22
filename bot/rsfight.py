@@ -286,7 +286,7 @@ class RsFighter:
     def __init__(self, sims=1000, boss_sims=4000, boss3_sims=None, seed=0, elite_sims=None, reuse=False,
                  keep_host=False, boss1_pow=None, true_view=False, dump_wires=False, carry=False, carry_rooms=None,
                  blind_rng=False, relic_mod=False, loose_board=False, boss1_keep=0, a3_keep=None,
-                 root_log=False, ov=None, ov_scope=None):
+                 root_log=False, ov=None, ov_scope=None, pow1_scope=None):
         # boss3_sims: the act-3 bosses' budget (default boss_sims): they gate the run;
         # elite_sims: the elites' (default sims)
         self.sims, self.boss_sims, self.boss3_sims, self.seed = sims, boss_sims, boss3_sims or boss_sims, seed
@@ -337,6 +337,10 @@ class RsFighter:
         # ov_sha: sha1[:12] of the bundle this fight's agents were built with (the env bundle when nothing was set)
         self.ov, self.ov_scope, self.ov_sha = ov, set(ov_scope.split(",")) if ov_scope else set(), None
         assert not (self.ov_scope - set(OV_SCOPES)), f"--rs-ov-scope outside {OV_SCOPES}"
+        # pow1_scope (k3c2 section 74 r105 #1, the pow1 screen): the fights of these scopes (elite, hallway) add
+        # win_carry_pow=1.0, the HP price the screen's P1 arms used; empty: off, every call as before.
+        self.pow1_scope = set(pow1_scope or ())
+        assert not (self.pow1_scope - {"elite", "hallway"}), "--rs-pow1-scope outside elite, hallway"
         # boss1_keep n: the first boss of A10's double boss, entered with more than n potions, is
         # searched as if the n highest-slot potions were not on the belt (hidden from the wire every
         # host is built from), so they reach the second boss. 0: off (every potion visible)
@@ -384,6 +388,11 @@ class RsFighter:
         if sc is not None and sc in self.ov_scope:
             parts.append(self.ov)
             self.stats["ov_" + sc] += 1
+        if self.pow1_scope:
+            ps = fight_scope(ctx)
+            if ps in self.pow1_scope:
+                parts.append("win_carry_pow=1.0")
+                self.stats["pow1_" + ps] += 1
         bundle = ",".join(x for x in [cur] + parts if x)
         if parts:
             agent.set_mcts_overrides(bundle)

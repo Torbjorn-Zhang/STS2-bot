@@ -580,6 +580,9 @@ def main():
                          "only, in the same single set_mcts_overrides call as --rs-boss1-pow (k3c8c/REGISTER.md section 15)")
     ap.add_argument("--rs-ov-scope", default=None, choices=["b3"],
                     help="with --rs-ov: b3 = A10's first act-3 boss (never the last boss)")
+    ap.add_argument("--rs-pow1-scope", default=None,
+                    help="with --rs-fight: elite and / or hallway (comma list): those fights add win_carry_pow=1.0 to the "
+                         "agent's override bundle (k3c2 section 74 r105 #1, the pow1 screen); default off")
     ap.add_argument("--rs-boss1-keep", type=int, default=0,
                     help="with --rs-fight: A10's first act-3 boss, entered with more than N potions, keeps its N "
                          "highest-slot potions for the second boss (hidden from the search); 0: off")
@@ -649,6 +652,8 @@ def main():
     ap.add_argument("--value-weight", type=float, default=None,
                     help="with --model: score = hand-written + w * model (default: model only)")
     args = ap.parse_args()
+    if args.rs_pow1_scope and (not args.rs_fight or set(args.rs_pow1_scope.split(",")) - {"elite", "hallway"}):
+        ap.error("--rs-pow1-scope takes elite and / or hallway, with --rs-fight")
     if bool(args.rs_ov) != bool(args.rs_ov_scope) or (args.rs_ov and not args.rs_fight):
         ap.error("--rs-ov and --rs-ov-scope go together, with --rs-fight (k3c8c/REGISTER.md section 15)")
     if args.rs_fight:
@@ -656,6 +661,7 @@ def main():
         RS_FIGHT = tuple(int(x) for x in args.rs_fight.split(","))
         RS_FIGHT_KW.update({"elite_sims": args.rs_elite_sims, "reuse": args.rs_reuse, "keep_host": args.rs_keep_host,
                             "ov": args.rs_ov, "ov_scope": args.rs_ov_scope,
+                            **({"pow1_scope": args.rs_pow1_scope.split(",")} if args.rs_pow1_scope else {}),
                             "boss1_pow": args.rs_boss1_pow, "boss1_keep": args.rs_boss1_keep, "a3_keep": args.rs_a3_keep, "root_log": args.rs_root_log, "true_view": args.rs_true_view,
                             "dump_wires": args.rs_dump_wires, "carry": args.rs_carry, "blind_rng": args.rs_blind_rng,
                             "relic_mod": args.rs_relic_mod, "loose_board": args.rs_loose_board,
