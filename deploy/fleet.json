@@ -29,7 +29,7 @@
    "gpu": true,
    "order": 3,
    "gpu_avoid": "A6000",
-   "gpu_order": 0,
+   "gpu_order": 1,
    "rs": true
   },
   "lab3": {
@@ -44,7 +44,7 @@
    "dynamic": true,
    "share": 0.5,
    "gpu": true,
-   "gpu_order": 1,
+   "gpu_order": 0,
    "order": 4,
    "rs": true
   },

@@ -90,6 +90,25 @@ TRAIN_WAIT = 900   # a queued train job holds its host this long for TRAIN_SLOTS
 SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=10"]
 
 
+def full_fsync(fh):
+    """flush a file to the disk itself (macOS fsync stops at the drive cache; F_FULLFSYNC goes through it)"""
+    fh.flush()
+    try:
+        import fcntl
+        fcntl.fcntl(fh.fileno(), fcntl.F_FULLFSYNC)
+    except (ImportError, AttributeError, OSError):
+        os.fsync(fh.fileno())
+
+
+def fsync_dir(d):
+    """make a rename inside directory d durable"""
+    fd = os.open(d, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def log(msg):
     line = time.strftime("%m-%d %H:%M:%S ") + msg
     print(line, flush=True)
@@ -684,16 +703,32 @@ class Expert:
             log(f"{self.name}: expert evaluation, {len(jobs)} chunks")
         elif st["phase"] == "running":
             if all(fl.jobs[j]["state"] in ("done", "failed") for j in st["jobs"]):
+                # atomic, idempotent merge (supervisor r125 #3 / r128 #5): the chunk files are deleted only after the
+                # merged file is on disk (temp file + fsync + rename) and the finished state is saved (fsync). A crash
+                # or power cut at any point re-runs the merge from the same chunks onto the same base (the bytes the
+                # merged file had before this merge, kept in st["merge_base"]), so no row is lost or doubled.
+                final = os.path.join(HERE, "runs", f"{self.name}.jsonl")
+                if "merge_base" not in st:
+                    st["merge_base"] = os.path.getsize(final) if os.path.exists(final) else 0
+                    fl.save(force=True, sync=True)
+                paths = [os.path.join(HERE, fl.jobs[j]["outputs"][0]) for j in st["jobs"] if fl.jobs[j]["state"] == "done"]
                 rows = []
-                for j in st["jobs"]:
-                    p = os.path.join(HERE, fl.jobs[j]["outputs"][0])
-                    if fl.jobs[j]["state"] == "done" and os.path.exists(p):
+                for p in paths:
+                    if os.path.exists(p):
                         with open(p) as fh:
                             rows += [json.loads(l) for l in fh if l.strip()]
-                        os.remove(p)
-                with open(os.path.join(HERE, "runs", f"{self.name}.jsonl"), "a") as fh:
+                base = b""
+                if st["merge_base"]:
+                    with open(final, "rb") as fh:
+                        base = fh.read(st["merge_base"])
+                tmp = final + ".merge"
+                with open(tmp, "wb") as fh:
+                    fh.write(base)
                     for r in rows:
-                        fh.write(json.dumps(r) + "\n")
+                        fh.write((json.dumps(r) + "\n").encode())
+                    full_fsync(fh)
+                os.replace(tmp, final)
+                fsync_dir(os.path.dirname(final))
                 n = len(rows)
                 summ = {"runs": n, "act1": sum(1 for r in rows if (r.get("cleared_acts") or 0) >= 1),
                         "act2": sum(1 for r in rows if (r.get("cleared_acts") or 0) >= 2),
@@ -701,7 +736,11 @@ class Expert:
                         "mean_floor": round(sum(((r.get("act") or 1) - 1) * 17 + (r.get("floor") or 0) for r in rows) / max(1, n), 2),
                         "wall_s": round(time.time() - st["t0"], 1)}
                 st.update(phase="finished", summary=summ)
+                fl.save(force=True, sync=True)
                 log(f"{self.name}: expert evaluation done {json.dumps(summ)}")
+                for p in paths:
+                    if os.path.exists(p):
+                        os.remove(p)
 
     def finished(self):
         return self.st["phase"] in ("finished", "cancelled")
@@ -1220,7 +1259,7 @@ class Fleet:
         self.pipes = [p for p in self.pipes if p.name not in names]
         log(f"compacted: archived {len(done)} finished pipelines")
 
-    def save(self, force=False):
+    def save(self, force=False, sync=False):
         now = time.time()
         if not force and now - getattr(self, "_saved_at", 0) < 30:   # at most every 30 s
             return
@@ -1231,7 +1270,11 @@ class Fleet:
         tmp = STATE + ".tmp"
         with open(tmp, "w") as fh:
             json.dump(s, fh)
+            if sync:
+                full_fsync(fh)
         os.replace(tmp, STATE)
+        if sync:
+            fsync_dir(FLEET)
 
     def forget(self, ids):
         """Drop finished jobs whose results their pipeline has used (a live pipeline's chunks
