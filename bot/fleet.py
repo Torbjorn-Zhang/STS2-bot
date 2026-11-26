@@ -79,6 +79,14 @@ GPU_TRAIN_SLOTS = 1
 # newest jobs to free the slots: lab0 filled with fresh 40-min chunks just before up913_train was
 # queued, so it fell back to 1 slot on lab3's CPU and took 66 min instead of 3.5 (11-06)
 TRAIN_PREEMPT_AFTER = 120
+# r134 (supervisor r134 P1, route audit 454): a CPU update goes first to a host where other users' threads stayed,
+# over the last 2 hours, at least this many threads below the line at which the share guard stops the update
+# itself; 5 CPU updates were stopped in 24 h (11-26 18:40 to 11-27 08:56), each on a 32-thread host whose last
+# 10 minutes had looked calm, losing 10-28 minutes of training each time
+TRAIN_MARGIN = 4
+# ...and only at this width or more: a narrower update is always "safe" (at 1 slot the guard never stops it) but
+# slow (up995_train ran 47 min at w=1, r43); at 4 slots up9300_train took 54 min against 45-47 at 6 (11-27)
+TRAIN_MIN_W = 4
 # r31: a GPU-placed update that finds no idle card at launch exits with this rc and is requeued for
 # the CPU (no try counted); for NO_GPU_CPU_S it is not placed as a GPU job again
 NO_GPU_RC = 75
@@ -1772,6 +1780,15 @@ class Fleet:
                 hist = [x for x in h.get("others_hist", []) if now - x[0] < 600] + [[now, r["others_now"]]]
                 h["others_hist"] = hist
                 peak = max([others] + [x[1] for x in hist])
+                # r134: per-minute peaks over 2 hours, for CPU-update placement (pick); the guard itself
+                # still goes by the 10-minute peak and the current estimate
+                m0 = int(now // 60) * 60
+                h2 = [x for x in h.get("others_hist2", []) if now - x[0] < 7200]
+                if h2 and h2[-1][0] == m0:
+                    h2[-1][1] = max(h2[-1][1], r["others_now"])
+                else:
+                    h2.append([m0, r["others_now"]])
+                h["others_hist2"] = h2
             else:
                 ours_threads = sum(h["workers"] * j.get("w", 1) for j in self.running_on(h))
                 others = peak = max(0.0, r["load"] - ours_threads)
@@ -1786,13 +1803,19 @@ class Fleet:
                 for j in sorted(self.running_on(h), key=lambda j: (j["kind"] == "train", -j.get("t_start", 0))):
                     if freed >= extra:
                         break
+                    # r134: an update (6 slots, up to ~50 min of work) goes only if the chunks stopped before
+                    # it still leave more than the one slot of slack: with one chunk beside it and others'
+                    # load 9-12 of 32 threads, the guard stopped the chunk AND the update, though the update
+                    # alone was within the allowance
+                    if j["kind"] == "train" and extra - freed <= 1:
+                        break
                     stop.append(j)
                     freed += j.get("w", 1)
                 for j in stop:
                     self.kill_job(h["name"], j["id"])
                     if not self.drop_copy(j, h["name"]):
                         j["state"], j["host"] = "queued", None
-                log(f"{h['name']}: others' load {others:.0f} of {r['ncpu']} threads; stopped {extra} of our jobs")
+                log(f"{h['name']}: others' load {others:.0f} of {r['ncpu']} threads; stopped {freed} of our jobs")
         if reasons:
             h["drain"] = ", ".join(reasons)
             if r.get("ours"):         # a kill that did not take (or jobs started by hand): again
@@ -1894,6 +1917,16 @@ class Fleet:
     def free_slots(self, h):
         return self.cap(h) - sum(j.get("w", 1) for j in self.running_on(h))
 
+    def train_margin(self, h, w):
+        """r134: threads between the 2-hour peak of others' load on h and the line at which the share guard
+        (handle_poll) stops a w-slot update there: the largest others' load o with
+        int((ncpu - o) * share) // workers >= w - 1 (the guard's one slot of slack). -inf without measurements."""
+        if not h.get("ncpu") or "others_peak" not in h:
+            return float("-inf")
+        line = h["ncpu"] - (w - 1) * max(1, h["workers"]) / h.get("share", 0.5)
+        peak2 = max([h.get("others_peak", 0)] + [x[1] for x in h.get("others_hist2", [])])
+        return line - peak2
+
     def pick(self, job, hosts):
         if job.get("only"):   # e.g. a task whose data lives on one machine
             hosts = [h for h in hosts if h["name"] == job["only"]]
@@ -1916,6 +1949,19 @@ class Fleet:
             # there after TRAIN_PREEMPT_AFTER), so a busy-but-calm host beats a free stormy one
             cand = [h for h in hosts if not h.get("runai") and self.cap(h) > 0]
         if job["kind"] == "train" and cand:
+            # r43 (supervisor P0): the allowance counts only the slots schedule() can actually free there:
+            # free slots plus the one-slot jobs it may stop (not `only` tasks, not trains). up995_train went
+            # to the calm lab2 whose slots k3a2's pinned tasks held, and ran at w=1 (2 threads) for 47 min
+            freeable = lambda h: self.free_slots(h) + sum(x.get("w", 1) for x in self.running_on(h)
+                                                          if x["kind"] != "train" and not x.get("only") and x.get("w", 1) == 1)
+            need = lambda h: max(1, min(TRAIN_SLOTS, self.cap(h), freeable(h)))
+            # r134: first a host whose 2-hour peak of others' threads stays TRAIN_MARGIN below the guard's
+            # stop line for this update (at its width there, TRAIN_MIN_W or more); the widest update, then the biggest margin.
+            # up9300_train was stopped on lab3 at 07:53:07 and sent back to lab3 6 s later, while lab0 (41 of
+            # 80 threads taken, its stop line 60) was outside the calm filter below. None such: as before
+            safe = [h for h in cand if need(h) >= TRAIN_MIN_W and self.train_margin(h, need(h)) >= TRAIN_MARGIN]
+            if safe:
+                return max(safe, key=lambda h: (need(h), self.train_margin(h, need(h)), -h.get("order", 9))), False
             # a CPU update (r22): not where other users' threads peaked above half the machine in
             # the last 10 min (up949_train was stopped twice on lab0 by the share guard, 59 then 77
             # of 80 threads taken, and ran on lab1 at 4 threads while lab2/lab3 sat idle, 11-07);
@@ -1924,12 +1970,6 @@ class Fleet:
             # had 3.6/32. Its chunks are stopped after TRAIN_PREEMPT_AFTER anyway)
             calm = [h for h in cand if not h.get("ncpu") or h.get("others_peak", 0) <= 0.5 * h["ncpu"]]
             cand = calm or cand
-            # r43 (supervisor P0): the allowance counts only the slots schedule() can actually free there:
-            # free slots plus the one-slot jobs it may stop (not `only` tasks, not trains). up995_train went
-            # to the calm lab2 whose slots k3a2's pinned tasks held, and ran at w=1 (2 threads) for 47 min
-            freeable = lambda h: self.free_slots(h) + sum(x.get("w", 1) for x in self.running_on(h)
-                                                          if x["kind"] != "train" and not x.get("only") and x.get("w", 1) == 1)
-            need = lambda h: max(1, min(TRAIN_SLOTS, self.cap(h), freeable(h)))
             return max(cand, key=lambda h: (need(h), -h.get("others_peak", 0) / max(1, h.get("ncpu", 1)),
                                             min(self.free_slots(h), need(h)) / need(h), -h.get("order", 9))), False
         if job.get("slots") and job["kind"] != "train":
