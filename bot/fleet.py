@@ -1246,7 +1246,9 @@ class Fleet:
                     for k in ("drain", "state", "gpu_quiet_since", "gpu_yield") if moved else \
                             ("files", "drain", "clean", "state", "gpu_quiet_since", "gpu_yield", "code_sig"):   # a new root has none of the old files
                         self.hosts[name][k] = h.get(k, self.hosts[name].get(k))
-                    for k in () if moved else ("moved", "moved_ids", "down_since"):   # only if saved (no None defaults)
+                    # r134: others_hist2 too (the 2-hour record of others' load for CPU-update placement; restarts
+                    # are frequent, and an empty record would read as 2 calm hours)
+                    for k in () if moved else ("moved", "moved_ids", "down_since", "others_hist2"):   # only if saved (no None defaults)
                         if k in h:
                             self.hosts[name][k] = h[k]
             self.pipes = [PIPES[p["type"]](p["spec"], p["st"]) for p in s["pipes"]]
