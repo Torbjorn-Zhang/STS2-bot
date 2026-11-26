@@ -59,6 +59,9 @@ RELAY_PROBE = 600
 GPU_BUSY = 40        # % GPU utilisation by other programs that makes a yield_gpu host yield
 YIELD_QUIET = 600    # seconds of a quiet GPU before such a host gets work again
 MAX_TRIES = 4
+# r133: a local_root host (deploy/fleet.json; a pod on its own disk) whose code sync or engine builds failed
+# stays out and is tried again after this many seconds, instead of joining anyway and failing every chunk
+LOCAL_GATE_RETRY = 300
 BACKUP_AFTER = 120   # a job running this long while the queue is empty gets a backup copy on an idle host
 # a CPU training job takes up to this many slots (workers threads each): with 2 torch threads it was
 # a third of each iteration (750 s on lab0); without "overlap" the pipeline's self-play waits for it.
@@ -1441,14 +1444,20 @@ class Fleet:
                      "Fix14", "Fix15")
 
     def ensure_builds(self, h):
+        """-> True when every engine build is on a Linux host afterwards, False when not (r133: a local_root
+        host joins only then; Windows: None). A local_root host also needs its sts2-cli/lib link (game DLLs)."""
         if linux(h):
             R = h["root"].rstrip("/")
             dll = "sts2-cli/src/Sts2Headless/bin/{c}/net9.0/Sts2Headless.dll"
+            check = "; ".join(f"[ -f {R}/{dll.format(c=c)} ] && echo have:{c}" for c in self.ENGINE_BUILDS) + "; echo ok"
             try:
-                have = lx(h, "; ".join(f"[ -f {R}/{dll.format(c=c)} ] && echo have:{c}" for c in self.ENGINE_BUILDS) + "; echo ok")
+                have = lx(h, check + (f"; [ -d {R}/sts2-cli/lib ] && echo have:lib" if h.get("local_root") else ""))
                 missing = [c for c in self.ENGINE_BUILDS if f"have:{c}" not in have]
+                if h.get("local_root") and "have:lib" not in have:
+                    log(f"{h['name']}: engine build check failed (sts2-cli/lib missing)")
+                    return False
                 if not missing:
-                    return
+                    return True
                 if h.get("runai"):   # the pod has the .NET runtime only: lab0's builds through the relay
                     rl = h["relay"]
                     JR = self.hosts[rl["host"]]["root"].rstrip("/")
@@ -1457,8 +1466,12 @@ class Fleet:
                                                 f"tar -cf {rl['dir']}/{name} $(ls -d {' '.join(missing)} 2>/dev/null) && echo packed"],
                                          capture_output=True, text=True, timeout=600)
                     ok, msg = relay_unpack(h, name, f"{R}/sts2-cli/src/Sts2Headless/bin") if "packed" in res.stdout else (False, res.stderr[-100:])
+                    if ok:   # r133: count what is there now, not what the copy said
+                        have = lx(h, check)
+                        lost = [c for c in self.ENGINE_BUILDS if f"have:{c}" not in have]
+                        ok, msg = not lost, f"still missing: {' '.join(lost)}"
                     log(f"{h['name']}: engine builds {' '.join(missing)} from {rl['host']}: {'copied' if ok else 'FAILED ' + msg}")
-                    return
+                    return ok
                 if h.get("via"):   # lab2/lab3 have the .NET runtime only: copy lab0's builds through the jump
                     J = self.hosts[h["via"]]
                     JR = J["root"].rstrip("/")
@@ -1472,7 +1485,7 @@ class Fleet:
                             got.append(c)
                     log(f"{h['name']}: engine builds copied from {h['via']}: {' '.join(got) or 'none'}"
                         f"{'' if len(got) == len(missing) else ' (missing there: ' + ' '.join(sorted(set(missing) - set(got))) + ')'}")
-                    return
+                    return len(got) == len(missing)
                 cmd = " ; ".join(
                     f"( cd {R}/sts2-cli && DOTNET_CLI_TELEMETRY_OPTOUT=1 nice -n 19 ionice -c3 {R}/dotnet/dotnet build "
                     f"src/Sts2Headless/Sts2Headless.csproj -c {c} -p:Optimize=true --no-incremental > /dev/null 2>&1 ; "
@@ -1481,9 +1494,10 @@ class Fleet:
                 built = [c for c in missing if f"built:{c}" in out]
                 log(f"{h['name']}: engine builds: {' '.join(built) or 'none'}"
                     f"{'' if len(built) == len(missing) else ' (FAILED: ' + ' '.join(sorted(set(missing) - set(built))) + ')'}")
+                return len(built) == len(missing)
             except Exception as e:
                 log(f"{h['name']}: engine build check failed ({str(e)[:100]})")
-            return
+            return False
         R = wroot(h)
         script = "$env:DOTNET_CLI_TELEMETRY_OPTOUT='1'; Set-Location '" + R + "\\sts2-cli'\n" + "\n".join(
             f"if (-not (Test-Path '{R}\\sts2-cli\\src\\Sts2Headless\\bin\\{c}\\net9.0\\Sts2Headless.dll')) {{ "
@@ -1498,10 +1512,17 @@ class Fleet:
 
     def undrain(self, h, why):
         if h["drain"]:
+            if h.get("local_root") and time.time() < h.get("gate_until", 0):
+                return   # r133: stays out until the next try
             ok, msg = self.sync_code(h)   # the code may have changed while it was drained
             if ok:
                 h["code_sig"] = code_sig()
-                self.ensure_builds(h)
+                if self.ensure_builds(h) is False and h.get("local_root"):
+                    ok, msg = False, "engine builds or sts2-cli/lib missing"
+            if not ok and h.get("local_root"):   # r133: as on the way up, a pod on its own disk stays out without them
+                h["gate_until"] = time.time() + LOCAL_GATE_RETRY
+                log(f"{h['name']}: stays out ({why}): {msg}; next try in {LOCAL_GATE_RETRY} s")
+                return
             log(f"{h['name']}: back in the fleet ({why}){'' if ok else ' (code sync failed: ' + msg + ')'}")
             h["drain"] = None
 
@@ -1661,6 +1682,8 @@ class Fleet:
             h["agent_t"] = time.time()
             self.start_agent(h)
         if h["state"] != "up":
+            if h.get("local_root") and time.time() < h.get("gate_until", 0):
+                return   # r133: its code or engine did not get there; the next try comes at gate_until
             log(f"{h['name']}: up")
             if h.get("local_root"):   # root on the pod's own disk (/tmp; Apollo's project quota full since 11-26 18:27):
                 h["files"] = {}       # a new pod has none of the last one's inputs, so they go again (r132)
@@ -1683,8 +1706,14 @@ class Fleet:
             ok, msg = self.sync_code(h)
             if ok:
                 h["code_sig"] = sig
-            if ok:
-                self.ensure_builds(h)
+            if ok and self.ensure_builds(h) is False and h.get("local_root"):
+                ok, msg = False, "engine builds or sts2-cli/lib missing"
+            if not ok and h.get("local_root"):
+                # r133 (supervisor P1): a pod on its own disk has nothing of ours without them; joining anyway
+                # failed every chunk it took 4 times within minutes (02:17:06 engine FAILED, 28 chunks at 02:17:09)
+                h["gate_until"] = time.time() + LOCAL_GATE_RETRY
+                log(f"{h['name']}: not joining: {msg}; next try in {LOCAL_GATE_RETRY} s")
+                return
             if not ok:
                 h["sync_fails"] = h.get("sync_fails", 0) + 1
                 if h["sync_fails"] < 3:
