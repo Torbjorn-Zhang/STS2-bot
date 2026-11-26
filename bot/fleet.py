@@ -1662,6 +1662,8 @@ class Fleet:
             self.start_agent(h)
         if h["state"] != "up":
             log(f"{h['name']}: up")
+            if h.get("local_root"):   # root on the pod's own disk (/tmp; Apollo's project quota full since 11-26 18:27):
+                h["files"] = {}       # a new pod has none of the last one's inputs, so they go again (r132)
             if h["state"] == "down" and h.get("moved", True):
                 if not self.take_back(h, r):
                     self.kill(h)          # leftovers of jobs that were moved elsewhere
