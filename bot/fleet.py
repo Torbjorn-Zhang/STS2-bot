@@ -62,6 +62,11 @@ MAX_TRIES = 4
 # r133: a local_root host (deploy/fleet.json; a pod on its own disk) whose code sync or engine builds failed
 # stays out and is tried again after this many seconds, instead of joining anyway and failing every chunk
 LOCAL_GATE_RETRY = 300
+# 11-28 (route audit 466): a runai pod kept out by that gate this long goes through runai_revive. apollo's 160 h keeper
+# exited 11-27 12:57 and the workload (submitted 11-20 with the old command, no /tmp bootstrap) came back as a 2nd pod
+# whose relay agent answered every poll, so the host never counted as not answering, runai_revive was never called,
+# and the pod stayed out for 26.7 h (138 "not joining" lines) until it was deleted by hand
+LOCAL_GATE_REVIVE = 1800
 BACKUP_AFTER = 120   # a job running this long while the queue is empty gets a backup copy on an idle host
 # a CPU training job takes up to this many slots (workers threads each): with 2 torch threads it was
 # a third of each iteration (750 s on lab0); without "overlap" the pipeline's self-play waits for it.
@@ -432,7 +437,9 @@ except Exception:
 per_cpu = max(1, (b[0] - a[0]) / ncpu)
 busy = ((b[0] - a[0]) - (b[1] - a[1])) / per_cpu
 mine = max(0, b[2] - a[2]) / per_cpu
+import socket   # the pod name (slz-sts2-cpu-0-1): a new one means a new container with an empty /tmp (11-28)
 print(json.dumps({"pause": os.path.exists(root + "/PAUSE"), "jobs": jobs, "gpu": None, "gpus": gpus, "ours": len(alive),
+                  "pod": socket.gethostname(),
                   "agent": any("podrelay.py agent" in c for c in cmd.values()),
                   "load": float(open("/proc/loadavg").read().split()[0]), "ncpu": ncpu,
                   "others_now": round(max(0.0, busy - mine), 2), "ours_cpu": round(mine, 2)}))
@@ -1248,7 +1255,7 @@ class Fleet:
                         self.hosts[name][k] = h.get(k, self.hosts[name].get(k))
                     # r134: others_hist2 too (the 2-hour record of others' load for CPU-update placement; restarts
                     # are frequent, and an empty record would read as 2 calm hours)
-                    for k in () if moved else ("moved", "moved_ids", "down_since", "others_hist2"):   # only if saved (no None defaults)
+                    for k in () if moved else ("moved", "moved_ids", "down_since", "others_hist2", "pod", "gated_since"):   # only if saved (no None defaults)
                         if k in h:
                             self.hosts[name][k] = h[k]
             self.pipes = [PIPES[p["type"]](p["spec"], p["st"]) for p in s["pipes"]]
@@ -1688,6 +1695,21 @@ class Fleet:
                 self.runai_revive(h)
             return
         h["fails"] = 0
+        pod = r.get("pod")
+        if h.get("local_root") and pod and h.get("pod") and pod != h["pod"]:
+            # 11-28 (route audit 466): the same workload in a new container (apollo 11-27 12:57: 160 h keeper exit,
+            # a 2nd pod) has an empty /tmp root, but its relay agent answers, so the host never went down: 119 chunks
+            # were launched there in 5 minutes, failed rc 127 (no .venv) 420 times and 107 of them ran out of tries.
+            # Its jobs died with the old container: back to the queue without a try; then the way up below (inputs
+            # sent again, code sync, the engine-build gate)
+            log(f"{h['name']}: pod changed ({h['pod']} -> {pod}): a new container; its jobs go back to the queue "
+                f"and it joins again through the gate")
+            self.requeue(h, f"{h['name']} pod replaced")
+            if h["state"] != "down":
+                h["down_since"] = time.time()
+            h["state"], h["moved"], h["moved_ids"] = "down", True, []
+        if pod:
+            h["pod"] = pod
         if h.get("pod_agent") and h["state"] == "up" and not r.get("agent") and time.time() - h.get("agent_t", 0) > 300:
             h["agent_t"] = time.time()
             self.start_agent(h)
@@ -1722,8 +1744,12 @@ class Fleet:
                 # r133 (supervisor P1): a pod on its own disk has nothing of ours without them; joining anyway
                 # failed every chunk it took 4 times within minutes (02:17:06 engine FAILED, 28 chunks at 02:17:09)
                 h["gate_until"] = time.time() + LOCAL_GATE_RETRY
+                h.setdefault("gated_since", time.time())
                 log(f"{h['name']}: not joining: {msg}; next try in {LOCAL_GATE_RETRY} s")
+                if h.get("runai") and not h["drain"] and time.time() - h["gated_since"] >= LOCAL_GATE_REVIVE:
+                    self.runai_revive(h)   # 11-28: acts only on a Failed / 2nd-pod / timed-out / gone workload
                 return
+            h.pop("gated_since", None)
             if not ok:
                 h["sync_fails"] = h.get("sync_fails", 0) + 1
                 if h["sync_fails"] < 3:
